@@ -796,10 +796,11 @@ def test_cancel_permid_resolves_its_own_owner_with_duplicate_order_ids(client, t
     assert args[args.index("--client-id") + 1] == "27"
 
 
-def test_cancel_orderid_only_duplicate_rows_sends_no_client_id(client, tmp_db, monkeypatch):
+def test_cancel_orderid_only_duplicate_rows_is_refused_before_the_cli(client, tmp_db, monkeypatch):
     """orderId-only + two scoped rows sharing that ib_order_id → the stored
-    owner is ambiguous; omit --client-id and let the CLI's ambiguity rule
-    decide rather than forwarding an arbitrary owner."""
+    owner is ambiguous (orderIds are unique per clientId only). PR-07 fix5:
+    refuse with 409 ORDER_TARGET_AMBIGUOUS before any CLI call — the CLI
+    could cancel the other client's order."""
     _seed_dual_client_submissions()
     captured = {}
 
@@ -810,8 +811,9 @@ def test_cancel_orderid_only_duplicate_rows_sends_no_client_id(client, tmp_db, m
     monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
 
     resp = client.post("/orders/cancel", json={"orderId": 10})
-    assert resp.status_code == 200
-    assert "--client-id" not in captured["args"]
+    assert resp.status_code == 409
+    assert resp.json()["reason_code"] == "ORDER_TARGET_AMBIGUOUS"
+    assert captured == {}
 
 
 def test_cancel_permid_row_with_mismatched_order_id_sends_no_client_id(client, tmp_db, monkeypatch):

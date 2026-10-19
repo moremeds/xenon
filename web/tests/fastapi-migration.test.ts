@@ -364,7 +364,7 @@ describe("POST /api/orders/place (via xenonFetch)", () => {
     expect(res.status).toBe(400);
   });
 
-  it("detects IB silent rejection (Cancelled status)", async () => {
+  it("passes a FastAPI 200 through even with a Cancelled initialStatus", async () => {
     mockXenonFetch.mockResolvedValueOnce({
       status: "ok",
       orderId: 42,
@@ -387,12 +387,14 @@ describe("POST /api/orders/place (via xenonFetch)", () => {
       }),
     });
     const res = await POST(req);
-    expect(res.status).toBe(502);
+    // PR-07: FastAPI owns the verdict (Trade.log); a 200 is never relabeled
+    // "rejected" from the final status — that invited a duplicate resend.
+    expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.error).toContain("rejected");
+    expect(body.orderId).toBe(42);
   });
 
-  it("detects IB silent rejection (Unknown status)", async () => {
+  it("passes a FastAPI 200 through even with an Unknown initialStatus", async () => {
     mockXenonFetch.mockResolvedValueOnce({
       status: "ok",
       orderId: 42,
@@ -414,9 +416,9 @@ describe("POST /api/orders/place (via xenonFetch)", () => {
       }),
     });
     const res = await POST(req);
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.error).toContain("no acknowledgement");
+    expect(body.permId).toBe(9999);
   });
 
   it("succeeds with valid stock order", async () => {

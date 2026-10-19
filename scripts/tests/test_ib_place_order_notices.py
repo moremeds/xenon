@@ -59,10 +59,13 @@ class _WrapperClient:
     def connect(self, **_kwargs):
         self.__class__.connected = True
 
-    def qualify_contracts(self, *contracts):
+    def qualify_all(self, *contracts):
         for idx, contract in enumerate(contracts, start=1):
             contract.conId = idx
         return list(contracts)
+
+    def qualify_one(self, contract):
+        return self.qualify_all(contract)[0]
 
     def place_order(self, contract, order):
         # Mirrors ib_async IB.placeOrder for a new order (ib.py placeOrder).

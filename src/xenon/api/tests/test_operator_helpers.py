@@ -163,3 +163,31 @@ def test_service_health_rows_excludes_gate4_watermark(pg_session):
     names = [r["service"] for r in _service_health_rows()]
     assert "ib_activity_poller" in names
     assert VIEW_WATERMARK_SERVICE not in names
+
+
+def test_order_submissions_health_counts_every_unknown_with_oldest_age(pg_session):
+    """PR-07: an unresolved UNKNOWN place keeps its reservation, so /health
+    counts it however old it is (no 1 h window) and reports the oldest age."""
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+    rows = [("u-old", now - timedelta(days=3), "UNKNOWN"), ("u-new", now, "UNKNOWN"), ("w1", now, "WORKING")]
+    with get_sync_engine().begin() as c:
+        for sid, at, state in rows:
+            c.execute(
+                sa.insert(order_submissions).values(
+                    submission_id=sid,
+                    ticker="AAPL",
+                    security_type="STK",
+                    action="BUY",
+                    quantity=1,
+                    state=state,
+                    submitted_at=at,
+                    broker="IB",
+                    account_env="paper",
+                    broker_account="DU_A",
+                )
+            )
+    out = _order_submissions_health({"broker": "IB", "account_env": "paper", "broker_account": "DU_A"})
+    assert out["unknown_count"] == 2
+    assert out["oldest_unknown_age_seconds"] >= 3 * 86400 - 60

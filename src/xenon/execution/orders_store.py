@@ -96,6 +96,22 @@ _TERMINAL_STATES = {"REJECTED", "CANCELLED", "FAILED"}
 
 ATTEMPT_BODY_MISMATCH = "ATTEMPT_BODY_MISMATCH"
 
+# IB ``orderRef`` on every Xenon-placed order: "xo:<submission_id>". The
+# leg wizard keeps its own "leg_wizard:" prefix (naked_short_audit).
+XO_REF_PREFIX = "xo:"
+
+
+def order_ref_for(submission_id: str) -> str:
+    return f"{XO_REF_PREFIX}{submission_id}"
+
+
+def submission_id_from_order_ref(ref: object) -> str | None:
+    """The submission_id a Xenon orderRef names, else None (wizard,
+    TWS-typed, or empty refs)."""
+    if isinstance(ref, str) and ref.startswith(XO_REF_PREFIX) and len(ref) > len(XO_REF_PREFIX):
+        return ref[len(XO_REF_PREFIX) :]
+    return None
+
 # Sentinel for optional JSONB write-through params (register_from_snapshot):
 # "not provided" must not overwrite a stored value the caller never computed.
 _UNSET = object()
@@ -1010,7 +1026,11 @@ def mark_submitted(
     ib_order_id: str,
     perm_id: str | None,
     placing_client_id: int | None,
-) -> None:
+    expected_states: tuple[str, ...] | None = None,
+) -> int:
+    """Stamp IB ids and move the row to WORKING. ``expected_states`` guards
+    the transition (orderRef recovery only adopts UNKNOWN / PENDING rows).
+    Returns the affected rowcount."""
     ensure_writable()
 
     def _int_or_none(value: str | None) -> int | None:
@@ -1028,18 +1048,22 @@ def mark_submitted(
     perm_id_int = _int_or_none(perm_id)
     ib_order_id_int = _int_or_none(ib_order_id)
     engine = get_sync_engine()
+    stmt = update(order_submissions).where(order_submissions.c.submission_id == submission_id)
+    if expected_states is not None:
+        stmt = stmt.where(order_submissions.c.state.in_(expected_states))
     with engine.begin() as conn:
-        conn.execute(
-            update(order_submissions)
-            .where(order_submissions.c.submission_id == submission_id)
-            .values(
+        result = conn.execute(
+            stmt.values(
                 ib_order_id=str(ib_order_id),
                 perm_id=str(perm_id) if perm_id is not None else None,
                 placing_client_id=placing_client_id,
                 state="WORKING",
+                reason_code=None,
                 updated_at=monotone_updated_at(now),
             )
         )
+        if not result.rowcount:
+            return 0
         conn.execute(
             update(regime_overrides)
             .where(regime_overrides.c.submission_id == submission_id)
@@ -1048,6 +1072,39 @@ def mark_submitted(
                 ib_order_id=ib_order_id_int,
             )
         )
+    return result.rowcount
+
+
+def mark_place_unknown(
+    *,
+    submission_id: str,
+    ib_order_id: str | None,
+    perm_id: str | None,
+    placing_client_id: int | None,
+    reason_code: str,
+) -> int:
+    """PENDING → UNKNOWN for a place whose outcome the route cannot prove,
+    stamping any IB ids the CLI returned. One conditional UPDATE: a row the
+    activity poller already bound (WORKING) or finished (FILLED / ...) from
+    broker evidence is never demoted, and fills are never touched. Returns
+    the affected rowcount."""
+    ensure_writable()
+    values: dict = dict(state="UNKNOWN", reason_code=reason_code)
+    if ib_order_id:
+        values["ib_order_id"] = str(ib_order_id)
+    if perm_id and str(perm_id) not in ("", "0"):
+        values["perm_id"] = str(perm_id)
+    if placing_client_id is not None:  # clientId 0 is a real client
+        values["placing_client_id"] = int(placing_client_id)
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        now = datetime.now(timezone.utc)
+        result = conn.execute(
+            update(order_submissions)
+            .where(order_submissions.c.submission_id == submission_id, order_submissions.c.state == "PENDING")
+            .values(**values, updated_at=monotone_updated_at(now))
+        )
+    return result.rowcount
 
 
 def mark_terminal(
@@ -1255,6 +1312,7 @@ def load_submission_for_modify(
     *,
     order_id: str = "",
     perm_id: str = "",
+    client_id: int | str | None = None,
     broker: str = "IB",
     account_env: str = "legacy_unknown",
     broker_account: str = "legacy_unknown",
@@ -1281,6 +1339,9 @@ def load_submission_for_modify(
         conditions.append(order_submissions.c.perm_id == str(perm_id))
     elif order_id:
         conditions.append(order_submissions.c.ib_order_id == str(order_id))
+        if client_id is not None and str(client_id) != "":
+            # orderIds are unique per clientId: the pair names one order.
+            conditions.append(order_submissions.c.placing_client_id == int(client_id))
     else:
         return None
     engine = get_sync_engine()
@@ -1294,48 +1355,27 @@ def load_submission_for_modify(
     return row
 
 
-def lookup_submission_id_by_ib_order_id(
-    ib_order_id: str,
+def count_submissions_for_order_id(
+    order_id: str,
     *,
-    broker: str | None = None,
-    account_env: str | None = None,
-    broker_account: str | None = None,
-) -> str | None:
-    if not ib_order_id:
-        return None
-    conditions = [order_submissions.c.ib_order_id == str(ib_order_id)]
-    if broker is not None:
-        conditions.append(order_submissions.c.broker == broker)
-    if account_env is not None:
-        conditions.append(order_submissions.c.account_env == account_env)
-    if broker_account is not None:
-        conditions.append(order_submissions.c.broker_account == broker_account)
-    engine = get_sync_engine()
-    with engine.connect() as conn:
-        row = conn.execute(select(order_submissions.c.submission_id).where(*conditions)).first()
-    return row[0] if row else None
-
-
-def lookup_submission_id_by_perm_id(
-    perm_id: str,
-    *,
-    broker: str | None = None,
-    account_env: str | None = None,
-    broker_account: str | None = None,
-) -> str | None:
-    if not perm_id:
-        return None
-    conditions = [order_submissions.c.perm_id == str(perm_id)]
-    if broker is not None:
-        conditions.append(order_submissions.c.broker == broker)
-    if account_env is not None:
-        conditions.append(order_submissions.c.account_env == account_env)
-    if broker_account is not None:
-        conditions.append(order_submissions.c.broker_account == broker_account)
-    engine = get_sync_engine()
-    with engine.connect() as conn:
-        row = conn.execute(select(order_submissions.c.submission_id).where(*conditions).limit(1)).first()
-    return row[0] if row else None
+    client_id: int | str | None = None,
+    broker: str = "IB",
+    account_env: str = "legacy_unknown",
+    broker_account: str = "legacy_unknown",
+) -> int:
+    """Rows in scope with this orderId (and placing clientId, when given;
+    clientId 0 is a real client). >1 means an orderId-only request is
+    ambiguous: orderIds are unique per clientId only."""
+    conditions = [
+        order_submissions.c.broker == broker,
+        order_submissions.c.account_env == account_env,
+        order_submissions.c.broker_account == broker_account,
+        order_submissions.c.ib_order_id == str(order_id),
+    ]
+    if client_id is not None and str(client_id) != "":
+        conditions.append(order_submissions.c.placing_client_id == int(client_id))
+    with get_sync_engine().connect() as conn:
+        return int(conn.execute(select(func.count()).select_from(order_submissions).where(*conditions)).scalar() or 0)
 
 
 def lookup_by_attempt(

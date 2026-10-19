@@ -20,6 +20,9 @@ vi.mock("@/components/ticker-detail/useClientAttemptId", () => ({
     id: "test-attempt-id-123",
     markSubmitted,
     markTerminal,
+    markUncertain: vi.fn(),
+    isUncertain: () => false,
+    uncertain: false,
     onFieldEdit,
   }),
 }));

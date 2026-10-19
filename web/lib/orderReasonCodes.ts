@@ -63,6 +63,15 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
     severity: "info",
     copy: "Previous attempt ended. Rotating id.",
   },
+  // PR-07 fix3 — /orders/replace claim
+  REPLACEMENT_IN_PROGRESS: {
+    severity: "error",
+    copy: "Another replacement of this order is in progress or done. Nothing was cancelled — check working orders.",
+  },
+  ORDER_TARGET_AMBIGUOUS: {
+    severity: "error",
+    copy: "Could not identify the order to replace. Nothing was cancelled — refresh working orders and retry.",
+  },
   // F5 — cancel/modify failure classification
   IB_CONNECTION: { severity: "error", copy: "IB connection lost — retry." },
   OWNERSHIP: { severity: "error", copy: "Order owned by another session." },
@@ -137,7 +146,7 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
   },
   PLACE_OUTCOME_UNKNOWN: {
     severity: "error",
-    copy: "Order outcome unknown — check working orders. Do not resubmit.",
+    copy: "Order submitted, status unknown — check working orders. Do not resubmit.",
   },
 };
 

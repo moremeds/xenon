@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -295,6 +296,14 @@ def plan_session(
     }
 
 
+def _is_place_outcome_unknown(response: Response) -> bool:
+    try:
+        body = json.loads(bytes(response.body or b"{}"))
+    except (ValueError, TypeError, AttributeError):
+        return False
+    return isinstance(body, dict) and body.get("reason_code") == "PLACE_OUTCOME_UNKNOWN"
+
+
 async def submit_combo(session_id: str, request: dict[str, Any]) -> dict[str, Any] | Response:
     if is_read_only():
         return read_only_403()
@@ -337,7 +346,10 @@ async def submit_combo(session_id: str, request: dict[str, Any]) -> dict[str, An
         raise
 
     if isinstance(result, Response):
-        _release_submit_claim(session_id, attempt_id)
+        if not _is_place_outcome_unknown(result):
+            _release_submit_claim(session_id, attempt_id)
+        # Uncertain: IB may hold the combo. The claim stays so a second
+        # submit cannot place a duplicate; the poller resolves the row.
         return result
     if not isinstance(result, dict):
         _release_submit_claim(session_id, attempt_id)

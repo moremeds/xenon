@@ -104,13 +104,16 @@ def _reconcile_from_three_sources(
     if state == "PENDING" and not ib_order_id:
         age_s = now - submitted_at_epoch
         if age_s > PENDING_TIMEOUT_SECONDS:
+            # No broker evidence either way: the place may have reached IB
+            # before the process died. UNKNOWN keeps the reservation; the
+            # activity poller resolves it by orderRef (never FAILED here).
             return ReconcileDecision(
-                to_state="FAILED",
+                to_state="UNKNOWN",
                 reason_code="PENDING_TIMEOUT",
-                event_kind="REHYDRATE_RECONCILED",
+                event_kind="REHYDRATE_UNCERTAIN",
                 detail={
                     "from_state": state,
-                    "to_state": "FAILED",
+                    "to_state": "UNKNOWN",
                     "reason_code": "PENDING_TIMEOUT",
                     "age_seconds": round(age_s, 2),
                     "sources": sources,
@@ -615,6 +618,14 @@ def rehydrate_on_boot(
                     if decision.filled_qty is not None
                     else int(row.get("filled_qty") or 0),
                     avg_fill_price=decision.avg_fill_price,
+                )
+            elif decision.to_state == "UNKNOWN" and decision.reason_code:
+                orders_store.mark_terminal(
+                    submission_id=row["submission_id"],
+                    state="UNKNOWN",
+                    reason_code=decision.reason_code,
+                    filled_qty=None,
+                    avg_fill_price=None,
                 )
             elif decision.to_state == "UNKNOWN":
                 _update_state_only(row["submission_id"], "UNKNOWN")

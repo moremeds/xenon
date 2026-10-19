@@ -22,7 +22,15 @@ except ImportError:
     print(json.dumps({"status": "error", "message": "ib_async not installed"}))
     sys.exit(1)
 
-from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient, IBOrderAccountError
+from xenon.clients.ib_client import (
+    CLIENT_IDS,
+    DEFAULT_GATEWAY_PORT,
+    DEFAULT_HOST,
+    IBClient,
+    IBContractError,
+    IBOrderAccountError,
+)
+from xenon.execution.orders_store import order_ref_for
 
 CLIENT_ID = CLIENT_IDS.get("ib_place_order", 26)
 PORT = DEFAULT_GATEWAY_PORT
@@ -162,9 +170,10 @@ def place_order(params: dict) -> dict:
     errorEvent (any reqId, including -1) is returned in ``ibNotices``.
 
     Caveats: an ``unconfirmed`` order (no permId inside the wait) can still be
-    one IB later rejects; its WORKING row then waits for reconciliation. OP-1 is NOT fixed here: if the
-    route's 15 s subprocess timeout fires after IB accepted the order, the
-    reservation goes FAILED and a retry with a new attempt id can duplicate.
+    one IB later rejects; its WORKING row then waits for reconciliation. A
+    crash after ``place_order`` returns ``status: uncertain``; the route
+    stores the row UNKNOWN (OP-1) and the activity poller binds it back via
+    ``orderRef = "xo:<submission_id>"``.
     """
     order_type = params.get("type", "stock")
     symbol = params["symbol"].upper()
@@ -184,6 +193,8 @@ def place_order(params: dict) -> dict:
     account = str(params.get("account") or os.environ.get("XENON_BROKER_ACCOUNT", "")).strip()
 
     client = IBClient()
+    placed = False
+    trade = None
 
     try:
         client.connect(host=DEFAULT_HOST, port=PORT, client_id="auto", timeout=10)
@@ -206,9 +217,7 @@ def place_order(params: dict) -> dict:
                 )
                 options.append(opt)
 
-            qualified = client.qualify_contracts(*options)
-            if len(qualified) != len(options):
-                return {"status": "error", "message": f"Could not qualify all combo legs for {symbol}"}
+            qualified = client.qualify_all(*options)
 
             combo = Contract()
             combo.symbol = symbol
@@ -240,17 +249,11 @@ def place_order(params: dict) -> dict:
                 exchange="SMART",
                 currency="USD",
             )
-            qualified = client.qualify_contracts(contract)
-            if not qualified:
-                return {"status": "error", "message": f"Could not qualify contract: {symbol}"}
-            contract = qualified[0]
+            contract = client.qualify_one(contract)
 
         else:
             contract = _build_stock_contract(params)
-            qualified = client.qualify_contracts(contract)
-            if not qualified:
-                return {"status": "error", "message": f"Could not qualify contract: {symbol}"}
-            contract = qualified[0]
+            contract = client.qualify_one(contract)
 
         # Capture IB error events during the ack wait. Only events whose
         # reqId is THIS order's orderId can reject it; reqId -1 is a
@@ -272,6 +275,11 @@ def place_order(params: dict) -> dict:
             outsideRth=False,
         )
         order.account = account
+        # "xo:<submission_id>" binds a late-live order to its reservation row
+        # (recovery after a timeout / crash). A ref named by the request body
+        # is never used: a "leg_wizard:" ref would bypass the naked-short audit.
+        if params.get("submission_id"):
+            order.orderRef = order_ref_for(str(params["submission_id"]))
 
         if order_type == "combo":
             # NonGuaranteed is always sent explicitly — 0=guaranteed,
@@ -288,7 +296,13 @@ def place_order(params: dict) -> dict:
                 f"  Combo order: {len(legs_data)} legs, NonGuaranteed={non_guaranteed}, ratios={[int(l.get('ratio', 1)) for l in legs_data]}"
             )
 
-        # Place
+        # Send boundary. ib_async ``IB.placeOrder`` writes the order to the
+        # socket FIRST and does its bookkeeping after, so from this line on IB
+        # may hold the order: any exception is "uncertain", never "error" (an
+        # error releases the reservation and invites a duplicate resend). Only
+        # IBOrderAccountError is proven pre-send (IBClient raises it before
+        # calling placeOrder).
+        placed = True
         trade = client.place_order(contract, order)
 
         # Combo orders need extra time: IB routes each leg independently and
@@ -369,7 +383,22 @@ def place_order(params: dict) -> dict:
     except IBOrderAccountError as e:
         return {"status": "error", "reason_code": e.reason_code, "message": str(e)}
 
+    except IBContractError as e:
+        return {"status": "error", "message": str(e)}
+
     except Exception as e:
+        if placed:
+            # The trade may not exist yet (exception inside placeOrder after
+            # the send); the order object still carries what IB assigned.
+            order_obj = getattr(trade, "order", None) or order
+            return {
+                "status": "uncertain",
+                "outcome": "uncertain",
+                "message": f"Order sent to IB; outcome unknown: {e}",
+                "orderId": getattr(order_obj, "orderId", 0) or 0,
+                "permId": getattr(order_obj, "permId", 0) or 0,
+                "clientId": getattr(order_obj, "clientId", 0) or getattr(client, "_last_client_id", 0) or None,
+            }
         return {"status": "error", "message": str(e)}
 
     finally:

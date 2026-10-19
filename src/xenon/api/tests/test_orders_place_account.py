@@ -48,7 +48,17 @@ def harness(monkeypatch):
     monkeypatch.setattr(server_mod.app.state, "account", "U2222222", raising=False)
     monkeypatch.setattr(server_mod.app.state, "broker", "IB", raising=False)
 
-    calls: dict = {"terminal": [], "events": [], "runner": [], "submitted": []}
+    calls: dict = {"terminal": [], "events": [], "runner": [], "submitted": [], "unknown": []}
+
+    def _rec(key):
+        # Fake store writes "win" (rowcount 1); expected_states guards are
+        # covered against Postgres in scripts/tests/test_gate4_route.py.
+        def _write(**kw):
+            calls[key].append({k: v for k, v in kw.items() if k != "expected_states"})
+            return 1
+
+        return _write
+
     # PR-03b: the place route reserves through Gate 4 (coverage + reservation
     # in one locked txn); stub that seam and the IB leg-meta lookup.
     async def _no_meta(_body):
@@ -60,9 +70,10 @@ def harness(monkeypatch):
         "reserve_with_coverage",
         lambda *_a, **_k: gate4.Gate4Outcome(status="winner", submission_id="sub-1"),
     )
-    monkeypatch.setattr(orders_store, "mark_terminal", lambda **kw: calls["terminal"].append(kw))
+    monkeypatch.setattr(orders_store, "mark_terminal", _rec("terminal"))
+    monkeypatch.setattr(orders_store, "mark_place_unknown", _rec("unknown"))
     monkeypatch.setattr(orders_store, "record_event", lambda *a, **_k: calls["events"].append(a))
-    monkeypatch.setattr(orders_store, "mark_submitted", lambda **kw: calls["submitted"].append(kw))
+    monkeypatch.setattr(orders_store, "mark_submitted", _rec("submitted"))
 
     def set_result(data: dict):
         async def _runner(entry, args, timeout=30):
@@ -238,15 +249,17 @@ async def test_place_empty_cli_output_marks_unknown_not_pending(harness, data):
     assert body["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
     assert "working orders" in body["detail"].lower()
     assert "do not resubmit" in body["detail"].lower()
-    assert harness["terminal"] == [
+    # One conditional PENDING → UNKNOWN write (never demotes poller evidence).
+    assert harness["unknown"] == [
         {
             "submission_id": "sub-1",
-            "state": "UNKNOWN",
+            "ib_order_id": None,
+            "perm_id": None,
+            "placing_client_id": None,
             "reason_code": "PLACE_OUTCOME_UNKNOWN",
-            "filled_qty": 0,
-            "avg_fill_price": None,
         }
     ]
+    assert harness["terminal"] == []
     assert harness["submitted"] == []
 
 
@@ -356,8 +369,14 @@ async def test_place_legacy_hard_error_with_perm_id_and_live_status_is_unknown(h
 
     assert resp.status_code == 502
     assert json.loads(resp.body)["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
-    assert harness["submitted"] == [
-        {"submission_id": "sub-1", "ib_order_id": "7", "perm_id": "123456", "placing_client_id": 20}
+    # Ids stamped in the same conditional PENDING → UNKNOWN write.
+    assert harness["unknown"] == [
+        {
+            "submission_id": "sub-1",
+            "ib_order_id": "7",
+            "perm_id": "123456",
+            "placing_client_id": 20,
+            "reason_code": "PLACE_OUTCOME_UNKNOWN",
+        }
     ]
-    assert harness["terminal"][0]["state"] == "UNKNOWN"
-    assert harness["terminal"][0]["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
+    assert harness["submitted"] == []

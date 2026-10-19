@@ -851,7 +851,7 @@ def candidate_from_place_body(
 
 @dataclass
 class Gate4Outcome:
-    status: Literal["winner", "duplicate", "terminal", "body_mismatch", "rejected"]
+    status: Literal["winner", "duplicate", "terminal", "body_mismatch", "rejected", "in_progress", "target_unresolved"]
     submission_id: str | None = None
     state: str | None = None
     duplicate_of: str | None = None
@@ -864,6 +864,10 @@ class Gate4Outcome:
     # spec §2.3 leg-out case: any guaranteed all-OPT BAG, open or close
     # (route maps it to COMBO_SPLIT_REQUIRED).
     split_required: bool = False
+    # claim_replacement: targets resolved to canonical identities (winner),
+    # or the request target that could not be (target_unresolved).
+    targets: list[dict] = field(default_factory=list)
+    detail: str | None = None
 
 
 def _candidate_symbols(inputs: Gate4Inputs, candidate) -> frozenset[str] | None:
@@ -996,12 +1000,15 @@ def evaluate_and_reserve(
     scope: dict,
     submission_id: str,
     override_audit: dict | None = None,
+    release_ids: frozenset[str] = frozenset(),
 ) -> Gate4Outcome:
     """Dedupe → coverage.evaluate → insert — inside the caller's locked txn.
 
     `conn` must already hold `pg_advisory_xact_lock(scope_lock_key(scope))`.
     candidate=None skips evaluation (pinned single-leg BUY pass-through);
-    the reservation still serializes under the lock.
+    the reservation still serializes under the lock. `release_ids`: rows
+    the caller is about to cancel (replacement targets) — evaluated like
+    terminal rows (remaining 0, post-snapshot fills still count).
     """
     existing = conn.execute(
         select(order_submissions).where(
@@ -1016,6 +1023,10 @@ def evaluate_and_reserve(
 
     if candidate is not None:
         inputs = load_inputs(conn, scope)
+        if release_ids:
+            inputs.orders = [
+                replace(o, remaining=0, pending_amend_qty=None) if o.id in release_ids else o for o in inputs.orders
+            ]
         decision = _evaluate(inputs, candidate, netting=netting_enabled())
         if not decision.accept:
             return Gate4Outcome(
@@ -1122,6 +1133,161 @@ def reserve_with_coverage(
             scope=scope,
             submission_id=str(uuid.uuid4()),
             override_audit=override_audit,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Combo replacement (cancel original + place successor) — PR-07 fix3
+# ---------------------------------------------------------------------------
+
+# legs-payload key on a replacement's row: the orders it replaces.
+REPLACES_KEY = "replaces"
+# Claim states that prove nothing of this claim is (or may be) at IB.
+_DEAD_CLAIM_STATES = ("FAILED", "REJECTED")
+
+
+def _nonzero(value: Any) -> str | None:
+    v = str(value or "").strip()
+    return None if v in ("", "0") else v
+
+
+def _identity_keys(targets: list[dict]) -> set[str]:
+    """Canonical keys of resolved targets: the exact submission row and the
+    permId. Never the orderId — it is unique only per IB clientId."""
+    keys = set()
+    for t in targets:
+        if _nonzero(t.get("submission_id")):
+            keys.add(f"sub:{t['submission_id']}")
+        if _nonzero(t.get("perm_id")):
+            keys.add(f"perm:{t['perm_id']}")
+    return keys
+
+
+def _resolve_target(conn, in_scope: tuple, target: dict) -> tuple[dict | None, str | None]:
+    """One request target → canonical identity, or (None, why).
+
+    permId (globally unique) wins: its row, if any, must carry the given
+    orderId. Without a permId the pair (placing clientId, orderId) must name
+    exactly one row in scope; the clientId may be omitted when the scope
+    holds a single row for that orderId. Never orderId alone."""
+    perm, oid = _nonzero(target.get("perm_id")), _nonzero(target.get("ib_order_id"))
+    # clientId 0 is a real IB client (permId 0 / orderId 0 are not ids):
+    # only a missing value means unknown.
+    raw_client = target.get("client_id")
+    client = None if raw_client is None or str(raw_client).strip() == "" else str(int(raw_client))
+    cols = (
+        order_submissions.c.submission_id,
+        order_submissions.c.perm_id,
+        order_submissions.c.ib_order_id,
+        order_submissions.c.placing_client_id,
+    )
+    if perm is not None:
+        rows = conn.execute(select(*cols).where(*in_scope, order_submissions.c.perm_id == perm)).all()
+        if len(rows) > 1 or (rows and oid is not None and str(rows[0].ib_order_id or "") != oid):
+            return None, f"permId {perm} does not name exactly one order"
+        if not rows:  # not mirrored (e.g. a TWS order): the permId is the identity
+            return {"perm_id": perm, "ib_order_id": oid, "client_id": client, "submission_id": None}, None
+    elif oid is not None:
+        where = [*in_scope, order_submissions.c.ib_order_id == oid]
+        if client is not None:
+            where.append(order_submissions.c.placing_client_id == int(client))
+        rows = conn.execute(select(*cols).where(*where)).all()
+        if len(rows) != 1:
+            return None, f"orderId {oid} names {len(rows)} orders; send its permId"
+    else:
+        return None, "target has no permId or orderId"
+    r = rows[0]
+    return {
+        "perm_id": _nonzero(r.perm_id),
+        "ib_order_id": _nonzero(r.ib_order_id),
+        "client_id": str(r.placing_client_id) if r.placing_client_id is not None else client,
+        "submission_id": r.submission_id,
+    }, None
+
+
+def claim_replacement(
+    user_id: str,
+    client_attempt_id: str,
+    request: RequestRow,
+    *,
+    candidate: coverage.Order | None,
+    legs_payload: dict,
+    scope: dict,
+    targets: list[dict],
+) -> Gate4Outcome:
+    """Claim a replacement BEFORE any cancel, in one txn under the scope lock.
+
+    `targets` = [{"perm_id", "ib_order_id", "client_id"}] from the request.
+    Each is resolved ONCE, under the lock, to a canonical identity
+    (`_resolve_target`); an ambiguous or unresolved target refuses
+    (target_unresolved) before anything is cancelled. Refuses (in_progress)
+    when another replacement of the same submission row or permId exists
+    that is or may be at IB — every state but FAILED / REJECTED: a
+    successful earlier replacement already cancelled the target, and a
+    cancel of a gone order counts as success, so a second one would place a
+    duplicate. Otherwise dedupe → Gate-4 evaluate (exactly the resolved
+    rows released) → PENDING insert, identities under legs[REPLACES_KEY].
+    """
+    ensure_writable()
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        _lock_scope(conn, scope)
+        in_scope = (
+            order_submissions.c.broker == scope["broker"],
+            order_submissions.c.account_env == scope["account_env"],
+            order_submissions.c.broker_account == scope["broker_account"],
+        )
+        resolved = []
+        for t in targets:
+            ident, why = _resolve_target(conn, in_scope, t)
+            if ident is None:
+                return Gate4Outcome(status="target_unresolved", targets=[t], detail=why)
+            resolved.append(ident)
+        wanted = _identity_keys(resolved)
+        claims = conn.execute(
+            select(order_submissions.c.submission_id, order_submissions.c.state, order_submissions.c.legs).where(
+                *in_scope,
+                order_submissions.c.legs.has_key(REPLACES_KEY),
+                order_submissions.c.state.notin_(_DEAD_CLAIM_STATES),
+            )
+        ).all()
+        for c in claims:
+            if _identity_keys(list((c.legs or {}).get(REPLACES_KEY) or [])) & wanted:
+                return Gate4Outcome(status="in_progress", submission_id=c.submission_id, state=c.state)
+        outcome = evaluate_and_reserve(
+            conn,
+            user_id,
+            client_attempt_id,
+            request,
+            candidate=candidate,
+            legs_payload={**legs_payload, REPLACES_KEY: resolved},
+            scope=scope,
+            submission_id=str(uuid.uuid4()),
+            release_ids=frozenset(t["submission_id"] for t in resolved if t["submission_id"]),
+        )
+        outcome.targets = resolved
+        return outcome
+
+
+def recheck_claim(submission_id: str, candidate: coverage.Order, scope: dict) -> Gate4Outcome | None:
+    """Gate 4 again after the targets are cancelled, just before the place:
+    the view may have changed while the cancel ran (fills, a new snapshot).
+    The claim's own reservation is left out. None = accepted."""
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        _lock_scope(conn, scope)
+        inputs = load_inputs(conn, scope)
+        inputs.orders = [o for o in inputs.orders if o.id != submission_id]
+        decision = _evaluate(inputs, candidate, netting=netting_enabled())
+        if decision.accept:
+            return None
+        return Gate4Outcome(
+            status="rejected",
+            submission_id=submission_id,
+            reasons=list(decision.reasons),
+            uncovered=dict(decision.uncovered),
+            short_stock=dict(decision.short_stock),
+            split_required=(not netting_enabled() and _accepted_with_netting(inputs, candidate)),
         )
 
 

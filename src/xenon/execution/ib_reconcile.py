@@ -141,6 +141,10 @@ def executions_from_fills(fills: list) -> list:
                 # reqExecutions spans every managed account; writers keep
                 # only the scope account's fills.
                 "account": getattr(e, "acctNumber", "") or "",
+                # "xo:<submission_id>" binds a fill to its Xenon row even when
+                # the row never learned its permId (fill-before-poll).
+                "order_ref": getattr(e, "orderRef", "") or "",
+                "client_id": getattr(e, "clientId", None),
             }
         )
 

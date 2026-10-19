@@ -7,11 +7,13 @@ vi.mock("@/lib/xenonApi", () => ({
   XenonApiError: class extends Error {
     status: number;
     detail: string;
-    constructor(status: number, detail: string) {
+    body: Record<string, unknown> | null;
+    constructor(status: number, detail: string, body: Record<string, unknown> | null = null) {
       super(`Xenon API ${status}: ${detail}`);
       this.name = "XenonApiError";
       this.status = status;
       this.detail = detail;
+      this.body = body;
     }
   },
 }));
@@ -28,6 +30,12 @@ describe("POST /api/orders/place upstream error propagation", () => {
       new XenonApiError(
         502,
         "IB error 201: Order rejected - reason:YOUR ORDER IS NOT ACCEPTED.",
+        // FastAPI's rejection carries reason_code IB_REJECT; a 5xx without a
+        // known reason_code is "status unknown" (PR-07).
+        {
+          detail: "IB error 201: Order rejected - reason:YOUR ORDER IS NOT ACCEPTED.",
+          reason_code: "IB_REJECT",
+        },
       ),
     );
 

@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // http://hostname:3000) is non-secure, so the API is undefined and throws.
 // client_attempt_id is an idempotency key, not a security token — a
 // Math.random-based v4 is unique enough.
-function randomAttemptId(): string {
+export function randomAttemptId(): string {
   const c = globalThis.crypto;
   if (c && typeof c.randomUUID === "function") {
     return c.randomUUID();
@@ -24,6 +24,12 @@ export function useClientAttemptId({ ticker }: Options) {
   const [id, setId] = useState(() => randomAttemptId());
   const submitted = useRef(false);
   const first = useRef(true);
+  // PLACE_OUTCOME_UNKNOWN (or any post-dispatch failure): IB may hold the
+  // order. Sticky for this ticker: the id is never rotated again (not by a
+  // later response, not by a field edit), and submitPlaceOrder refuses every
+  // further submit. Only a new instrument (ticker change / remount) clears it.
+  const uncertainRef = useRef(false);
+  const [uncertain, setUncertain] = useState(false);
 
   useEffect(() => {
     if (first.current) {
@@ -32,21 +38,30 @@ export function useClientAttemptId({ ticker }: Options) {
     }
     setId(randomAttemptId());
     submitted.current = false;
+    uncertainRef.current = false;
+    setUncertain(false);
   }, [ticker]);
 
   const markSubmitted = useCallback(() => {
     submitted.current = true;
   }, []);
   const markTerminal = useCallback(() => {
+    if (uncertainRef.current) return;
     setId(randomAttemptId());
     submitted.current = false;
   }, []);
+  const markUncertain = useCallback(() => {
+    uncertainRef.current = true;
+    setUncertain(true);
+  }, []);
+  const isUncertain = useCallback(() => uncertainRef.current, []);
   const onFieldEdit = useCallback((_field: string) => {
+    if (uncertainRef.current) return;
     if (submitted.current) {
       setId(randomAttemptId());
       submitted.current = false;
     }
   }, []);
 
-  return { id, markSubmitted, markTerminal, onFieldEdit };
+  return { id, markSubmitted, markTerminal, markUncertain, isUncertain, uncertain, onFieldEdit };
 }
