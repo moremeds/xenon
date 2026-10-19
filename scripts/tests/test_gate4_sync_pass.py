@@ -15,6 +15,7 @@ pair of consecutive reads gets an injection. Activity after the last read
 
 from __future__ import annotations
 
+import json
 import math
 import sys
 import uuid
@@ -34,7 +35,7 @@ from ib_async import (
     Position,
     Trade,
 )
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, text, update
 
 from scripts.tests.test_gate4_route import (  # noqa: F401 — autouse fixtures
     _pg,
@@ -47,7 +48,7 @@ from scripts.tests.test_gate4_route import (  # noqa: F401 — autouse fixtures
     fresh_quote,
     ib_data,
 )
-from xenon.db.schema import account_snapshots, order_submissions
+from xenon.db.schema import account_snapshots, nav_history, order_submissions
 from xenon.execution import contract_meta, ib_sync
 
 pytestmark = pytest.mark.committed_db
@@ -369,6 +370,20 @@ def test_accountless_open_order_makes_pass_incomplete(monkeypatch, client, broke
     assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
 
 
+def test_accountless_fill_makes_pass_incomplete(monkeypatch, client, broker_calls, fresh_quote):
+    """#198 drops an execution with no acctNumber; the pass must then not
+    claim it saw every fill (an unattributed short fill could need cover)."""
+    fake = _shares_client(100)
+    c = _opt(510, con_id=5102)
+    fake.add_details(c)
+    fake.fills.append(_fill(c, exec_id="0001.noacct.01", perm_id=990004, order_id=9004, account=""))
+    _run_sync(monkeypatch, fake)
+
+    obs = _latest_payload()["observation"]
+    assert obs["complete"] is False
+    assert obs["reads"]["fill_accounts"] is False
+
+
 # ---------------------------------------------------------------------------
 # item 3 — contract metadata from IB objects
 # ---------------------------------------------------------------------------
@@ -553,3 +568,405 @@ def test_second_pass_reuses_cached_contract_metadata(monkeypatch, client, broker
     assert fake.detail_calls == first  # second pass: no IB call for known conIds
     leg = _latest_payload()["positions"][0]["legs"][0]
     assert (leg["tc"], leg["mult"]) == ("SPY", 100)
+
+
+# ---------------------------------------------------------------------------
+# merge-fix P1 — the activity poller drops accountless rows (#198 filter);
+# the scope's Gate-4 view must stop proving cover until a later pass clears it
+# ---------------------------------------------------------------------------
+
+
+def _poller_tick(fake):
+    from xenon.api.services.ib_activity_mirror import run_activity_poll_tick
+    from xenon.execution.account_scope import resolve_from_env
+
+    return run_activity_poll_tick(ib_client_factory=lambda: fake, scope=resolve_from_env())
+
+
+@pytest.mark.parametrize("account, allowed", [("", False), (FOREIGN, True)], ids=["accountless", "foreign"])
+def test_poller_open_order_without_scope_account(account, allowed, monkeypatch, client, broker_calls, fresh_quote):
+    fake = _shares_client(100)
+    _run_sync(monkeypatch, fake)
+    assert _latest_payload()["observation"]["complete"] is True
+    c = _opt(500, con_id=111)
+    fake.add_details(c)
+    fake.open_orders.append(_trade(c, order_id=9101, perm_id=991001, account=account))
+
+    _poller_tick(fake)
+
+    resp = client.post("/orders/place", json=_sell_call_body(f"sp-poll-oo-{account or 'none'}"))
+    if allowed:
+        assert resp.status_code == 200, resp.text
+    else:
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
+
+
+@pytest.mark.parametrize("account, allowed", [("", False), (FOREIGN, True)], ids=["accountless", "foreign"])
+def test_poller_fill_without_scope_account(account, allowed, monkeypatch, client, broker_calls, fresh_quote):
+    fake = _shares_client(100)
+    _run_sync(monkeypatch, fake)
+    assert _latest_payload()["observation"]["complete"] is True
+    c = _opt(500, con_id=111)
+    fake.add_details(c)
+    fake.fills.append(_fill(c, exec_id="0001.poll.01", perm_id=991002, order_id=9102, account=account))
+
+    _poller_tick(fake)
+
+    resp = client.post("/orders/place", json=_sell_call_body(f"sp-poll-fill-{account or 'none'}"))
+    if allowed:
+        assert resp.status_code == 200, resp.text
+    else:
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
+
+
+def _accountless_poller_view():
+    view = _shares_client(100)
+    c = _opt(500, con_id=111)
+    view.add_details(c)
+    view.open_orders.append(_trade(c, order_id=9103, perm_id=991003, account=""))
+    return view
+
+
+def _insert_legacy_snapshot():
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            insert(account_snapshots).values(
+                account=ACCOUNT,
+                bankroll=Decimal("0"),
+                payload={"positions": []},
+                broker="IB",
+                account_env="paper",
+                broker_account=ACCOUNT,
+            )
+        )
+    engine.dispose()
+
+
+@pytest.mark.parametrize("prior", ["empty", "legacy"])
+def test_first_publication_after_poller_mark_is_refused(prior, monkeypatch, client, broker_calls, fresh_quote):
+    """No PR-03b snapshot yet: the in-flight first pass started before the
+    poller's mark, so its publication cannot prove cover."""
+    if prior == "legacy":
+        _insert_legacy_snapshot()
+    inflight = _shares_client(100)
+    inflight.on_read["executions"] = lambda _f: _poller_tick(_accountless_poller_view())
+
+    _run_sync(monkeypatch, inflight)
+
+    assert _latest_payload()["observation"]["complete"] is True  # the pass itself saw a whole view
+    resp = client.post("/orders/place", json=_sell_call_body(f"sp-first-{prior}"))
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
+
+
+def test_overlapping_older_pass_cannot_replace_newer_snapshot(monkeypatch, client, broker_calls, fresh_quote):
+    """A starts -> poller mark -> B (started after the mark) publishes ->
+    A publishes. A's older 200-share view must not replace B's 100 shares."""
+    pass_b = _shares_client(100)
+    pass_a = FakeSyncClient(positions=[Position(ACCOUNT, _stk(), 200, 500.0)])
+
+    def _mark_then_b(_f):
+        _poller_tick(_accountless_poller_view())
+        _run_sync(monkeypatch, pass_b)
+
+    pass_a.on_read["positions"] = _mark_then_b
+    _run_sync(monkeypatch, pass_a)
+
+    payload = _latest_payload()
+    assert payload["observation"]["complete"] is True
+    assert [leg["contracts"] for p in payload["positions"] for leg in p["legs"]] == [100]
+    resp = client.post("/orders/place", json=_sell_call_body("sp-overlap-2", qty=2))
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["reason_code"] == "ETF_CALL_UNCOVERED"
+
+
+def test_pass_after_poller_mark_without_accountless_rows_is_allowed(monkeypatch, client, broker_calls, fresh_quote):
+    _run_sync(monkeypatch, _shares_client(100))
+    _poller_tick(_accountless_poller_view())
+    resp = client.post("/orders/place", json=_sell_call_body("sp-mark-blocked"))
+    assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
+
+    _run_sync(monkeypatch, _shares_client(100))
+
+    resp = client.post("/orders/place", json=_sell_call_body("sp-mark-cleared"))
+    assert resp.status_code == 200, resp.text
+
+
+def test_view_watermark_only_moves_forward():
+    """The watermark seq is an xid8; a later invalidation never lowers it."""
+    from xenon.execution import gate4
+
+    scope = {"broker": "IB", "account_env": "paper", "broker_account": ACCOUNT}
+    gate4.invalidate_view(scope, "first")
+    engine = gate4.get_sync_engine()
+    with engine.connect() as conn:
+        first = gate4.view_watermark(conn, scope)
+    gate4.invalidate_view(scope, "second")
+    with engine.connect() as conn:
+        second = gate4.view_watermark(conn, scope)
+    assert first is not None and second > first
+
+    # An older transaction (lower xid) that upserts after a newer one
+    # committed never moves the watermark back.
+    with engine.connect() as older:
+        tx = older.begin()
+        older_xid = int(older.execute(text("SELECT pg_current_xact_id()::text")).scalar())
+        gate4.invalidate_view(scope, "newer")
+        with engine.connect() as conn:
+            newer = gate4.view_watermark(conn, scope)
+        assert newer > older_xid
+        older.execute(
+            gate4._INVALIDATE_SQL,
+            {"service": gate4.VIEW_WATERMARK_SERVICE, **scope, "reason": "older", "at": datetime.now(timezone.utc)},
+        )
+        tx.commit()
+    with engine.connect() as conn:
+        assert gate4.view_watermark(conn, scope) == newer
+
+
+def test_clock_regression_pass_with_higher_seq_is_published(monkeypatch, client, broker_calls, fresh_quote):
+    """Ordering is by pass_seq, not wall time: a later pass whose clock went
+    back still publishes, and its holdings are the ones Gate 4 reads."""
+    _run_sync(monkeypatch, _shares_client(100))
+    first_as_of = datetime.fromisoformat(_latest_payload()["observation"]["as_of"])
+
+    class _BackClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return first_as_of - timedelta(seconds=60)
+
+    monkeypatch.setattr(ib_sync, "datetime", _BackClock)
+    _run_sync(monkeypatch, FakeSyncClient(positions=[Position(ACCOUNT, _stk(), 200, 500.0)]))
+    monkeypatch.setattr(ib_sync, "datetime", datetime)
+
+    payload = _latest_payload()
+    assert datetime.fromisoformat(payload["observation"]["as_of"]) < first_as_of
+    assert [leg["contracts"] for p in payload["positions"] for leg in p["legs"]] == [200]
+    resp = client.post("/orders/place", json=_sell_call_body("sp-clock-back", qty=2))
+    assert resp.status_code == 200, resp.text
+
+
+def test_reader_orders_by_pass_seq_not_snapshot_at(monkeypatch, client, broker_calls, fresh_quote):
+    """A DB clock step back can give the newer pass an earlier snapshot_at;
+    load_inputs still reads the snapshot with the highest pass_seq."""
+    _run_sync(monkeypatch, _shares_client(100))
+    _run_sync(monkeypatch, FakeSyncClient(positions=[Position(ACCOUNT, _stk(), 200, 500.0)]))
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        rows = conn.execute(select(account_snapshots.c.id).order_by(account_snapshots.c.id)).all()
+        conn.execute(
+            update(account_snapshots)
+            .where(account_snapshots.c.id == rows[0].id)
+            .values(snapshot_at=datetime.now(timezone.utc) + timedelta(hours=1))
+        )
+    engine.dispose()
+
+    resp = client.post("/orders/place", json=_sell_call_body("sp-seq-order", qty=2))
+    assert resp.status_code == 200, resp.text
+
+
+def _nav_rows():
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(select(nav_history.c.nav).where(nav_history.c.source == "intraday")).all()
+    engine.dispose()
+    return [float(r.nav) for r in rows]
+
+
+def _bare_portfolio(net_liq):
+    from xenon.execution import gate4
+
+    seq, cluster = gate4.next_pass_seq()
+    return {
+        "positions": [],
+        "account_summary": {"net_liquidation": net_liq},
+        "observation": {
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "pass_seq": str(seq),
+            "pass_cluster": cluster,
+        },
+    }
+
+
+def test_overlapping_passes_cannot_interleave_nav(monkeypatch):
+    """A commits its snapshot, then B commits snapshot + NAV, then A would
+    write NAV. NAV is part of each publish transaction, so B's NAV stands."""
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", ACCOUNT)
+    monkeypatch.delenv("XENON_READ_ONLY", raising=False)
+    pass_a = _bare_portfolio(1000.0)
+    pass_b = _bare_portfolio(2000.0)
+    real_save = ib_sync._save_portfolio_to_postgres
+
+    def _a_commits_then_b(portfolio):
+        published = real_save(portfolio)
+        if portfolio is pass_a:
+            ib_sync.save_portfolio(pass_b)
+        return published
+
+    monkeypatch.setattr(ib_sync, "_save_portfolio_to_postgres", _a_commits_then_b)
+    ib_sync.save_portfolio(pass_a)
+
+    assert _nav_rows() == [2000.0]
+
+
+def test_save_portfolio_skips_nav_when_pass_not_published(monkeypatch):
+    """A stale (or read-only) pass publishes nothing and writes no NAV."""
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", ACCOUNT)
+    monkeypatch.delenv("XENON_READ_ONLY", raising=False)
+    older = _bare_portfolio(1000.0)
+    newer = _bare_portfolio(2000.0)
+    ib_sync.save_portfolio(older)
+    ib_sync.save_portfolio(newer)
+    ib_sync.save_portfolio(older)  # stale: pass_seq not after the newest published
+
+    assert _nav_rows() == [2000.0]
+
+
+# ---------------------------------------------------------------------------
+# Every seq carries its cluster id (pg_control_system().system_identifier).
+# A seq from another cluster (pg_dump/pg_restore) or without one is foreign
+# forever, however far this cluster's xids advance.
+# ---------------------------------------------------------------------------
+
+FOREIGN_CLUSTER = "7000000000000000001"
+SCOPE = {"broker": "IB", "account_env": "paper", "broker_account": ACCOUNT}
+
+
+def _sql(stmt, **params):
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        res = conn.execute(text(stmt), params)
+        out = res.first() if res.returns_rows else None
+    engine.dispose()
+    return out
+
+
+def _restamp_latest(*, seq, cluster, copy=False):
+    """Give the latest snapshot (or a copy of it) another pass_seq/pass_cluster,
+    as a restore from another cluster leaves it. cluster=None drops the key."""
+    obs_expr = "jsonb_set(payload, '{observation,pass_seq}', to_jsonb(CAST(:seq AS text)))"
+    obs_expr = (
+        f"jsonb_set({obs_expr}, '{{observation,pass_cluster}}', to_jsonb(CAST(:cluster AS text)))"
+        if cluster is not None
+        else f"({obs_expr}) #- '{{observation,pass_cluster}}'"
+    )
+    latest = "(SELECT max(id) FROM xenon.account_snapshots)"
+    if copy:
+        _sql(
+            "INSERT INTO xenon.account_snapshots (account, bankroll, peak_value, net_liquidation, payload, "
+            "broker, account_env, broker_account) SELECT account, bankroll, peak_value, net_liquidation, "
+            f"{obs_expr}, broker, account_env, broker_account FROM xenon.account_snapshots WHERE id = {latest}",
+            seq=str(seq),
+            cluster=cluster,
+        )
+    else:
+        _sql(
+            f"UPDATE xenon.account_snapshots SET payload = {obs_expr} WHERE id = {latest}",
+            seq=str(seq),
+            cluster=cluster,
+        )
+
+
+def _set_watermark(seq, cluster):
+    from xenon.execution import gate4
+
+    gate4.invalidate_view(SCOPE, "seed")
+    _sql(
+        "UPDATE xenon.service_health SET detail = :d WHERE service = :s",
+        d=json.dumps({"reason": "restored", "seq": str(seq), "cluster": cluster}),
+        s=gate4.VIEW_WATERMARK_SERVICE,
+    )
+
+
+def _xmax():
+    return int(_sql("SELECT pg_snapshot_xmax(pg_current_snapshot())::text")[0])
+
+
+@pytest.mark.parametrize("which", ["lower", "higher"])
+def test_other_cluster_rows_never_rank_or_block(which, monkeypatch, client, broker_calls, fresh_quote):
+    """(a)/(b) A restored 200-share snapshot and watermark from another
+    cluster, with a seq below or far above every local one: a new local
+    100-share pass publishes, is the one Gate 4 reads, and is not blocked."""
+    _run_sync(monkeypatch, FakeSyncClient(positions=[Position(ACCOUNT, _stk(), 200, 500.0)]))
+    foreign_seq = 1 if which == "lower" else _xmax() + 1_000_000
+    _restamp_latest(seq=foreign_seq, cluster=FOREIGN_CLUSTER)
+    _set_watermark(foreign_seq if which == "higher" else _xmax() + 1_000_000, FOREIGN_CLUSTER)
+
+    _run_sync(monkeypatch, _shares_client(100))
+
+    assert [leg["contracts"] for p in _latest_payload()["positions"] for leg in p["legs"]] == [100]
+    two = client.post("/orders/place", json=_sell_call_body(f"sp-cluster-{which}-2", qty=2))
+    assert two.status_code == 400, two.text
+    assert two.json()["reason_code"] == "ETF_CALL_UNCOVERED"
+    one = client.post("/orders/place", json=_sell_call_body(f"sp-cluster-{which}-1"))
+    assert one.status_code == 200, one.text
+
+
+def test_restored_row_stays_foreign_after_xids_advance(monkeypatch, client, broker_calls, fresh_quote):
+    """(c) Review horizon case: a restored row with seq F just above xmax
+    stays foreign after local xids pass F, so it never outranks the local
+    snapshot nor beats the local invalidation."""
+    from xenon.execution import gate4
+
+    _run_sync(monkeypatch, _shares_client(100))
+    restored = _xmax() + 20
+    _restamp_latest(seq=restored, cluster=FOREIGN_CLUSTER, copy=True)
+    gate4.invalidate_view(SCOPE, "unprovenanced_open_orders")
+    for _ in range(40):
+        gate4.next_pass_seq()  # each call commits one local xid
+    assert _xmax() > restored
+
+    resp = client.post("/orders/place", json=_sell_call_body("sp-horizon"))
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
+
+
+def test_local_invalidation_replaces_foreign_watermark(monkeypatch, client, broker_calls, fresh_quote):
+    """(d) A stored other-cluster watermark (even with a huge seq) is replaced
+    by a local invalidation, which then blocks the earlier local snapshot."""
+    from xenon.execution import gate4
+
+    _run_sync(monkeypatch, _shares_client(100))
+    pass_seq = int(_latest_payload()["observation"]["pass_seq"])
+    _set_watermark(_xmax() + 1_000_000, FOREIGN_CLUSTER)
+
+    gate4.invalidate_view(SCOPE, "unprovenanced_open_orders")
+
+    with gate4.get_sync_engine().connect() as conn:
+        mark = gate4.view_watermark(conn, SCOPE)
+    assert mark is not None and mark > pass_seq
+    resp = client.post("/orders/place", json=_sell_call_body("sp-foreign-mark-replaced"))
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
+
+
+@pytest.mark.parametrize("cluster", [None, FOREIGN_CLUSTER], ids=["legacy-no-cluster", "other-cluster"])
+def test_snapshot_without_local_cluster_is_incomplete(cluster, monkeypatch, client, broker_calls, fresh_quote):
+    """(e) The only snapshot has no cluster (legacy) or another cluster's."""
+    _run_sync(monkeypatch, _shares_client(100))
+    seq = int(_latest_payload()["observation"]["pass_seq"])
+    _restamp_latest(seq=seq, cluster=cluster)
+
+    resp = client.post("/orders/place", json=_sell_call_body(f"sp-nocluster-{cluster}"))
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
+
+
+def test_pass_stamped_by_another_cluster_is_not_published(monkeypatch):
+    """A pass whose seq came from another cluster (DB switched mid-pass)
+    cannot be ordered here, so it is not published."""
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", ACCOUNT)
+    monkeypatch.delenv("XENON_READ_ONLY", raising=False)
+    portfolio = _bare_portfolio(1000.0)
+    portfolio["observation"]["pass_cluster"] = FOREIGN_CLUSTER
+
+    ib_sync.save_portfolio(portfolio)
+
+    assert _sql("SELECT count(*) FROM xenon.account_snapshots")[0] == 0
+    assert _nav_rows() == []

@@ -1053,7 +1053,7 @@ def mark_submitted(
 def mark_terminal(
     *,
     submission_id: str,
-    state: Literal["FILLED", "REJECTED", "CANCELLED", "FAILED", "PARTIALLY_FILLED"],
+    state: Literal["FILLED", "REJECTED", "CANCELLED", "FAILED", "PARTIALLY_FILLED", "UNKNOWN"],
     reason_code: str | None,
     filled_qty: int | None,
     avg_fill_price: Decimal | None,

@@ -16,6 +16,11 @@ export const SERVICE_WINDOWS: Record<string, StalenessWindow> = {
   naked_short_audit: { open: 3600, extended: 3600, closed: null },
 };
 
+// service_health rows that are not background writers (sentinels). The API
+// already drops them; the console filters too so they never count as an
+// unhealthy writer.
+export const NON_WRITER_SERVICES = new Set(["gate4_view_invalidated"]);
+
 const DEFAULT_WINDOW: StalenessWindow = {
   open: 300,
   extended: 600,

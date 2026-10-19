@@ -29,7 +29,7 @@ from sqlalchemy import select
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 from xenon.db.engine import get_sync_engine
 from xenon.db.schema import account_snapshots
-from xenon.execution.account_scope import AccountScope, resolve_from_env
+from xenon.execution.account_scope import AccountScope, resolve_from_env, row_in_account
 from xenon.execution.orders_store import record_fill, update_fill_commission
 from xenon.execution.trade_aggregator import aggregate_trade_from_fills
 
@@ -138,9 +138,9 @@ def executions_from_fills(fills: list) -> list:
                 "strike": c.strike if c.secType == "OPT" else None,
                 "expiry": c.lastTradeDateOrContractMonth if c.secType == "OPT" else None,
                 "right": c.right if c.secType == "OPT" else None,
-                # Account provenance (PR-03b): executions on a multi-account
-                # connection carry the account that owns the fill.
-                "account": getattr(e, "acctNumber", None) or None,
+                # reqExecutions spans every managed account; writers keep
+                # only the scope account's fills.
+                "account": getattr(e, "acctNumber", "") or "",
             }
         )
 
@@ -300,22 +300,20 @@ def record_external_fills(
     updated = 0
     replayed = 0
     skipped_foreign = 0
+    skipped_unprovenanced = 0
     affected_legacy_ids: set[str] = set()
     affected_submission_ids: set[str] = set()
 
-    scope_account = resolved.broker_account or ""
-    scoped = bool(scope_account and scope_account != "legacy_unknown")
-
     for execution in executions:
-        # PR-03b provenance: a fill that names a DIFFERENT account must never
-        # land in this scope's ledger. A missing account stamps scope as
-        # before — unattributed fills can only over-reserve cover at the gate
-        # (fail-closed direction), never supply it.
-        if scoped:
-            fill_account = _field(execution, "account", "acctNumber")
-            if fill_account and fill_account != scope_account:
+        # One account filter (#198): another (or an empty) account's fill is
+        # never stamped with this scope. The sync pass attests separately
+        # that every fill it read named an account.
+        if not row_in_account(execution, resolved.broker_account, "account", "acctNumber"):
+            if _field(execution, "account", "acctNumber"):
                 skipped_foreign += 1
-                continue
+            else:
+                skipped_unprovenanced += 1
+            continue
         perm_id = str(_field(execution, "perm_id", "permId") or "") or None
         submission_id = _resolve_submission_id_by_perm_id(perm_id, scope=resolved)
         legacy_id = _legacy_group_id(execution)
@@ -369,6 +367,13 @@ def record_external_fills(
                 else:
                     affected_legacy_ids.add(legacy_id)
 
+    if skipped_unprovenanced:
+        # Same rule as the open-order writer: a dropped accountless fill's
+        # demand is not in Postgres, so the scope's view is not provable.
+        from xenon.execution import gate4
+
+        gate4.invalidate_view(resolved.as_dict(), "unprovenanced_fills")
+
     ordered_submission_ids = sorted(affected_submission_ids)
     for sid in ordered_submission_ids:
         aggregate_trade_from_fills(submission_id=sid)
@@ -382,6 +387,7 @@ def record_external_fills(
         "updated": updated,
         "replayed": replayed,
         "skipped_foreign": skipped_foreign,
+        "skipped_unprovenanced": skipped_unprovenanced,
         "affected_legacy_ids": ordered_legacy_ids,
         "affected_submission_ids": ordered_submission_ids,
     }

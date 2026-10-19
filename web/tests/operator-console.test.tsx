@@ -89,6 +89,42 @@ describe("OperatorConsole", () => {
     );
     expect(screen.getByText("IB Gateway")).toBeTruthy();
   });
+  it("does not count the gate4 watermark sentinel as a writer", async () => {
+    const withSentinel: OperatorData = {
+      ...DATA,
+      writers: [
+        ...DATA.writers,
+        {
+          service: "gate4_view_invalidated",
+          state: "invalidated",
+          detail: '{"reason": "unprovenanced_open_orders", "seq": "1"}',
+          last_error: null,
+          last_started_at: null,
+          last_finished_at: "2026-06-15T10:00:00Z",
+          updated_at: "2026-06-15T10:00:00Z",
+          age_secs: 14400,
+        },
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) =>
+        Promise.resolve({
+          ok: true,
+          json: async () =>
+            String(url).includes("/uw-quota")
+              ? { configured: false }
+              : withSentinel,
+        }),
+      ),
+    );
+    render(<OperatorConsole />);
+    await waitFor(() =>
+      expect(screen.getByText(/ib_activity_poller/)).toBeTruthy(),
+    );
+    expect(screen.queryByText("gate4_view_invalidated")).toBeNull();
+    expect(screen.getByText(/1\/1 healthy/)).toBeTruthy();
+  });
   it("shows a loading state before data", () => {
     vi.stubGlobal("fetch", vi.fn().mockReturnValue(new Promise(() => {})));
     render(<OperatorConsole />);

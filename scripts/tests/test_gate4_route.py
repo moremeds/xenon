@@ -15,6 +15,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from xenon._test_db import committed_pass_stamp
+
 pytestmark = pytest.mark.committed_db
 
 from fastapi.testclient import TestClient
@@ -49,6 +51,8 @@ def _seed_snapshot(engine, positions, *, complete=True):
             "complete": complete,
             "account": "DU0000000",
             "reads": {"positions": True, "open_orders": True, "executions": True},
+            # xid8 ordering key + cluster id from a committed txn, as ib_sync stamps them.
+            **committed_pass_stamp(),
         },
     }
     with engine.begin() as conn:
@@ -450,6 +454,49 @@ def test_second_sell_after_reservation_exhausts_cover(client, broker_calls, fres
     assert second.json()["reason_code"] == "ETF_CALL_UNCOVERED"
     assert len(broker_calls) == 1
     assert len(_submission_rows()) == 1
+
+
+@pytest.mark.parametrize(
+    "data, second_status",
+    [
+        # #200 UNKNOWN path: IB may hold the order, so its Gate-4 demand stays.
+        (
+            {
+                "status": "error",
+                "code": 201,
+                "message": "x",
+                "orderId": 4244,
+                "permId": 777003,
+                "initialStatus": "PreSubmitted",
+            },
+            400,
+        ),
+        # Explicit rejection releases the reservation.
+        ({"status": "error", "outcome": "rejected", "code": 201, "message": "x"}, 200),
+    ],
+    ids=["unknown-keeps-demand", "rejected-releases"],
+)
+def test_place_outcome_vs_gate4_reservation(data, second_status, monkeypatch, client, broker_calls, fresh_quote):
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_stock("SPY", 100)])
+    engine.dispose()
+    results = [ScriptResult(ok=True, data=data)]
+
+    async def fake(entry: str, args: list, timeout: float = 30):
+        broker_calls.append({"entry": entry, "args": args})
+        if results:
+            return results.pop(0)
+        return ScriptResult(ok=True, data={"status": "ok", "orderId": 4245, "permId": 777004, "clientId": 26})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake)
+
+    first = client.post("/orders/place", json=_sell_call_body("rt-outcome-1"))
+    assert first.status_code == 502, first.text
+    second = client.post("/orders/place", json=_sell_call_body("rt-outcome-2"))
+    assert second.status_code == second_status, second.text
+    if second_status == 400:
+        assert second.json()["reason_code"] == "ETF_CALL_UNCOVERED"
+        assert first.json()["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
 
 
 # ---------------------------------------------------------------------------

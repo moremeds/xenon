@@ -22,7 +22,13 @@ from typing import Optional
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 from xenon.execution import gate4, orders_store
-from xenon.execution.account_scope import AccountScope, resolve_from_env
+from xenon.execution.account_scope import (
+    AccountScope,
+    IBAccountSelectionError,
+    resolve_from_env,
+    row_in_account,
+    select_ib_account,
+)
 
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
 DEFAULT_CLIENT_ID = CLIENT_IDS["ib_orders"]
@@ -228,9 +234,6 @@ def open_orders_from_trades(client: IBClient, trades: list) -> list:
                 "limitPrice": safe_float(order.lmtPrice),
                 "auxPrice": safe_float(order.auxPrice),  # stop price
                 "status": status.status,  # Submitted, PreSubmitted, etc.
-                # Account provenance (PR-03b): reqAllOpenOrders spans every
-                # account the connection can see — consumers filter on this.
-                "account": getattr(order, "account", None) or None,
                 # BAG guarantee mode from smartComboRoutingParams — persisted
                 # on the reservation row so modify can never silently change it.
                 "nonGuaranteed": _non_guaranteed_mode(order),
@@ -241,6 +244,9 @@ def open_orders_from_trades(client: IBClient, trades: list) -> list:
                 # Surface IB's orderRef so the naked-short audit can detect
                 # leg_wizard-tagged orders and skip them (Wiz spec §11.1).
                 "orderRef": getattr(order, "orderRef", None) or None,
+                # reqAllOpenOrders spans every managed account; writers keep
+                # only the scope account's rows.
+                "account": getattr(order, "account", "") or "",
             }
         )
 
@@ -326,21 +332,17 @@ def sync_open_orders_to_postgres(
     foreign = 0
     unprovenanced = 0
     unidentified = 0
-    scope_account = resolved.get("broker_account") or ""
-    scoped = bool(scope_account and scope_account != "legacy_unknown")
     for order in open_orders:
-        # PR-03b account provenance: reqAllOpenOrders spans every account the
-        # connection can see. A row naming a DIFFERENT account must never
-        # enter this scope's reservation view. An order WITHOUT account
-        # provenance is still stored — `legs.account: null` marks it so the
-        # gate treats the view as incomplete rather than hiding the demand.
-        if scoped:
-            raw_account = order.get("account")
-            if raw_account and raw_account != scope_account:
+        # One account filter (#198): another (or an empty) account's order is
+        # never stamped with this scope. Both are counted: the sync pass
+        # attests completeness separately (an accountless order makes it
+        # incomplete; a foreign one does not).
+        if not row_in_account(order, resolved["broker_account"], "account"):
+            if order.get("account"):
                 foreign += 1
-                continue
-            if not raw_account:
+            else:
                 unprovenanced += 1
+            continue
         contract = order.get("contract") or {}
         sec_type = str(contract.get("secType") or "STK")
         multiplier = 100 if sec_type in {"OPT", "BAG"} else 1
@@ -385,6 +387,10 @@ def sync_open_orders_to_postgres(
             resurrected += 1
         elif action == "SKIPPED_UUID":
             skipped += 1
+    if unprovenanced:
+        # The dropped accountless order's demand is not in Postgres: stop the
+        # scope's snapshot from proving cover until a later pass clears it.
+        gate4.invalidate_view(resolved, "unprovenanced_open_orders")
     return {
         "registered": registered,
         "updated": updated,
@@ -447,9 +453,14 @@ def main():
         display_orders(open_orders, executed_orders)
 
         if args.sync:
-            accounts = client.ib.managedAccounts()
-            if accounts:
-                os.environ["XENON_BROKER_ACCOUNT"] = accounts[0]
+            # A configured XENON_BROKER_ACCOUNT is kept (select returns it when
+            # managed); it is only exported when unset and the login manages
+            # exactly one account. Never managedAccounts()[0].
+            try:
+                os.environ["XENON_BROKER_ACCOUNT"] = select_ib_account(client.ib.managedAccounts())
+            except IBAccountSelectionError as exc:
+                print(f"✗ Not syncing open orders: {exc}")
+                sys.exit(1)
             result = sync_open_orders_to_postgres(open_orders, observed_at=observed_at)
             print(f"Registered {result['registered']} open-order snapshots in Postgres")
         else:

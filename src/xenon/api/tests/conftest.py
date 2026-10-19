@@ -39,38 +39,28 @@ def _postgres_orders_test_db(monkeypatch, request):
     monkeypatch.setenv("DATABASE_URL", url)
     monkeypatch.setenv("DATABASE_URL_TEST", url)
 
-    try:
-        import xenon.db.engine as engine_mod
+    import xenon.db.engine as engine_mod
 
-        # Async engine: required by route handlers; not affected by Phase 2.
-        engine_mod._engine = None  # type: ignore[attr-defined]
-        engine_mod.init_engine(url)
-    except Exception:
-        pass
+    # Clear the cached sync engine on EVERY path, offline included: a cached
+    # engine may point at a non-test DB, and the env rewrite above does not
+    # reach it (INV-test-db-leak). The next caller rebuilds from the test URL.
+    monkeypatch.setattr(engine_mod, "_sync_engine", None)
+    # Async engine: required by route handlers; not affected by Phase 2.
+    engine_mod._engine = None  # type: ignore[attr-defined]
+    engine_mod.init_engine(url)
 
     if not is_pg_reachable():
         yield
         return
 
     if request.node.get_closest_marker("committed_db"):
-        try:
-            import xenon.db.engine as engine_mod
-
-            monkeypatch.setattr(engine_mod, "_sync_engine", None)
-        except Exception:
-            pass
         truncate_all_xenon_tables()
         yield
         truncate_all_xenon_tables()
         return
 
     conn = request.getfixturevalue("pg_session")
-    try:
-        import xenon.db.engine as engine_mod
-
-        monkeypatch.setattr(engine_mod, "_sync_engine", _BoundEngine(conn))
-    except Exception:
-        pass
+    monkeypatch.setattr(engine_mod, "_sync_engine", _BoundEngine(conn))
     yield
 
 

@@ -185,6 +185,12 @@ class OrderExecutor:
         action = "BUY" if side.upper() == "BUY" else "SELL"
 
         order = LimitOrder(action=action, totalQuantity=qty, lmtPrice=limit_price, tif="DAY", outsideRth=False)
+        # Place on the sync-subprocess scope account; resolve_from_env raises
+        # when XENON_BROKER_ACCOUNT is unset or mismatches the trading mode,
+        # and IBClient.place_order rejects an account this login doesn't manage.
+        from xenon.execution.account_scope import resolve_from_env
+
+        order.account = resolve_from_env().broker_account
 
         print(f"\n📤 Submitting order...")
         trade = self.client.place_order(contract, order)

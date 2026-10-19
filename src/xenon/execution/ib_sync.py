@@ -33,6 +33,7 @@ except ImportError:
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 from xenon.db.engine import get_sync_engine
 from xenon.execution import naked_short_audit
+from xenon.execution.account_scope import IBAccountSelectionError, select_ib_account
 
 # Default connection settings
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
@@ -83,14 +84,16 @@ ACCOUNT_TAGS = [
 ]
 
 
-def get_account_summary(client: IBClient) -> dict:
-    """Fetch account summary from cached account values (instant, no round-trip).
+def get_account_summary(client: IBClient, account: str) -> dict:
+    """Fetch the scope account's summary from cached account values (instant, no round-trip).
 
     Uses ib.accountValues() which reads from ib_async's internal cache
     (populated automatically at connect time) instead of ib.accountSummary()
-    which makes a blocking round-trip (~200-700ms).
+    which makes a blocking round-trip (~200-700ms). The cache spans every
+    managed account; keep only ``account``'s rows, or each tag would hold
+    whichever account's value arrived last.
     """
-    account_values = client.ib.accountValues()
+    account_values = [av for av in client.ib.accountValues() if av.account == account]
 
     summary = {}
     for av in account_values:
@@ -100,15 +103,15 @@ def get_account_summary(client: IBClient) -> dict:
     return summary
 
 
-def get_fx_rates(client: IBClient) -> dict:
-    """USD-per-unit FX rates from IB's cached accountValues ExchangeRate rows.
+def get_fx_rates(client: IBClient, account: str) -> dict:
+    """USD-per-unit FX rates from the scope account's cached ExchangeRate rows.
 
     For a USD-base account IB reports each non-USD currency's ExchangeRate as the
     native→USD multiplier (base = native * ExchangeRate), so the returned map is
     directly usable as usd_per_unit. Always includes USD: 1.0."""
     from xenon.utils.fx import usd_per_unit_from_account_values
 
-    return usd_per_unit_from_account_values(client.ib.accountValues())
+    return usd_per_unit_from_account_values([av for av in client.ib.accountValues() if av.account == account])
 
 
 def get_pnl(client: IBClient, account: str = "") -> dict:
@@ -119,10 +122,10 @@ def get_pnl(client: IBClient, account: str = "") -> dict:
         return val is not None and not ib_util.isNan(val)
 
     try:
-        # IB requires a non-empty account string for reqPnL
+        # IB requires a non-empty account string for reqPnL. Never default
+        # to managedAccounts()[0]; select_ib_account raises when ambiguous.
         if not account:
-            accounts = client.ib.managedAccounts()
-            account = accounts[0] if accounts else ""
+            account = select_ib_account(client.ib.managedAccounts())
         pnl = client.get_pnl(account)
         # Poll until dailyPnL is non-NaN (IB streams this asynchronously)
         for _ in range(8):  # 8 x 1s = 8s max on top of the 2s in get_pnl
@@ -620,9 +623,17 @@ def _resolve_market_price(
     return None, False
 
 
-def fetch_positions(client: IBClient) -> list:
-    """Fetch all positions from IB"""
-    positions = client.get_positions()
+def fetch_positions(client: IBClient, account: str | None = None, *, rows: list | None = None) -> list:
+    """Fetch positions from IB; with ``account``, only that account's rows.
+
+    ib.positions() spans every managed account. Rows naming another account
+    (or no account) are dropped so they never blend into the scope snapshot.
+    ``rows`` passes an already-made ``client.get_positions()`` read (the sync
+    pass reads once and also attests account provenance on it).
+    """
+    positions = client.get_positions() if rows is None else list(rows)
+    if account is not None:
+        positions = [p for p in positions if getattr(p, "account", None) == account]
 
     formatted = []
     for pos in positions:
@@ -722,11 +733,10 @@ def fetch_position_daily_pnl(client: IBClient, positions: list, account: str = "
         return val is not None and not ib_util.isNan(val) and val != 1.7976931348623157e308
 
     if not account:
-        accounts = client.ib.managedAccounts()
-        account = accounts[0] if accounts else ""
-
-    if not account:
-        return positions
+        try:
+            account = select_ib_account(client.ib.managedAccounts())
+        except IBAccountSelectionError:
+            return positions
 
     # Request PnL for all positions simultaneously — bypass IBClient's
     # get_pnl_single() which sleeps 0.5s per call, and call IB API directly.
@@ -1094,14 +1104,15 @@ def _scope_from_env() -> tuple[str, str, str]:
     )
 
 
-def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
+def _append_nav_snapshot(net_liq: float, daily_pnl=None, *, conn=None) -> None:
     """Upsert today's intraday NAV via the unified writer.
 
     Pass-2 (writer unification): delegates to
     ``xenon.utils.portfolio_loader.upsert_nav_sync``. The cross-env guard
     (Decisions §13) and race-safe IntegrityError catch live inside the
     shared helper now — guard is default-on; do NOT pass
-    ``enforce_account_env_guard=False`` here.
+    ``enforce_account_env_guard=False`` here. ``conn``: the snapshot
+    publish transaction (see `_save_portfolio_to_postgres`).
     """
     if os.environ.get("XENON_READ_ONLY") == "1":
         print(f"⏭  XENON_READ_ONLY=1 — skipping NAV snapshot write (net_liq=${net_liq:,.2f})")
@@ -1126,12 +1137,13 @@ def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
         nav=nav_val,
         daily_pnl=pnl_val,
         source="intraday",
+        conn=conn,
     )
 
     print(f"✓ NAV snapshot: {today} → ${net_liq:,.2f}")
 
 
-def _save_portfolio_to_postgres(portfolio: dict) -> None:
+def _save_portfolio_to_postgres(portfolio: dict) -> bool:
     """Write positions + account snapshot to Postgres.
 
     The full structured `portfolio` dict is also stamped into
@@ -1144,9 +1156,9 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
     if os.environ.get("XENON_READ_ONLY") == "1":
         n = len(portfolio.get("positions") or [])
         print(f"⏭  XENON_READ_ONLY=1 — skipping portfolio→PG write ({n} positions, snapshot not persisted)")
-        return
+        return False
 
-    from sqlalchemy import delete, insert, text
+    from sqlalchemy import delete, func, insert, text
 
     from xenon.db.schema import account_snapshots, positions
 
@@ -1155,6 +1167,21 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
     engine = get_sync_engine()
     with engine.begin() as conn:
         conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('portfolio_sync'))"))
+        observation = portfolio.get("observation")
+        if isinstance(observation, dict):
+            from xenon.execution import gate4
+
+            # A pass that did not start after the newest published pass must
+            # not replace its holdings (overlapping passes).
+            if gate4.is_stale_publication(
+                conn,
+                {"broker": broker, "account_env": account_env, "broker_account": broker_account},
+                observation,
+            ):
+                print(
+                    f"⏭  Stale sync pass (pass_seq {observation.get('pass_seq')}) — newer snapshot kept, not published"
+                )
+                return False
         conn.execute(
             delete(positions).where(
                 positions.c.broker == broker,
@@ -1211,38 +1238,32 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
                 broker=broker,
                 account_env=account_env,
                 broker_account=broker_account,
+                # Taken after the locks (now() is txn start): publication
+                # order by snapshot_at matches the lock order.
+                snapshot_at=func.clock_timestamp(),
             )
         )
+        # NAV commits with the snapshot under the same locks, so overlapping
+        # passes cannot interleave NAV writes (an older pass's NAV can never
+        # land after a newer published pass).
+        net_liq = acct.get("net_liquidation") or portfolio.get("bankroll")
+        if net_liq:
+            try:
+                _append_nav_snapshot(float(net_liq), acct.get("daily_pnl"), conn=conn)
+            except Exception as exc:  # noqa: BLE001 — savepoint rolled back; snapshot still commits
+                print(f"  Warning: NAV snapshot failed: {exc}")
+    return True
 
 
 def save_portfolio(portfolio: dict):
     """Save portfolio to Postgres."""
+    # The intraday NAV row is written inside the publish transaction; a
+    # read-only, stale or failed publish writes no NAV.
     try:
-        _save_portfolio_to_postgres(portfolio)
-        print("✓ Saved portfolio to Postgres")
+        if _save_portfolio_to_postgres(portfolio):
+            print("✓ Saved portfolio to Postgres")
     except Exception as exc:
         print(f"  Warning: Postgres write failed: {exc}")
-
-    # Track daily NAV for performance history
-    acct = portfolio.get("account_summary", {})
-    net_liq = acct.get("net_liquidation") or portfolio.get("bankroll")
-    if net_liq:
-        try:
-            _append_nav_snapshot(float(net_liq), acct.get("daily_pnl"))
-        except Exception as exc:
-            print(f"  Warning: NAV snapshot failed: {exc}")
-
-
-def _scope_positions(positions: list, ib_account: str | None) -> tuple[list, bool]:
-    """Keep only the scope account's positions (PR-03b round 3, item 2).
-
-    Foreign-account rows are dropped BEFORE structure classification so they
-    can never be grouped with, or stamped as, the scope's holdings. Any row
-    without an account makes the read unattested (returned ok=False): an
-    accountless position is never credited as scoped cover.
-    """
-    ok = bool(ib_account) and all(p.get("account") for p in positions)
-    return [p for p in positions if ib_account and p.get("account") == ib_account], ok
 
 
 def _stamp_option_metadata(client, collapsed: list) -> None:
@@ -1378,15 +1399,39 @@ def main(argv=None):
     # the snapshot cannot show and gate4 counts them via order_fills.
     pass_started = datetime.now(timezone.utc)
     reads = {"positions": False, "open_orders": False, "executions": False}
+    # Ordering key for this pass (xid8, no wall clock). Taken before any IB
+    # read; without it the pass cannot be published (gate4.is_stale_publication).
+    pass_seq = pass_cluster = None
+    if os.environ.get("XENON_READ_ONLY") != "1":
+        try:
+            from xenon.execution import gate4
+
+            pass_seq, pass_cluster = gate4.next_pass_seq()
+        except Exception as exc:  # noqa: BLE001 — degrade: snapshot is not published
+            logging.getLogger("ib_sync.pass").warning("pass_seq unavailable (%s)", exc)
 
     # Connect
     client = connect_ib(args.host, args.port, args.client_id or "auto")
 
     try:
+        # Export the scope account so downstream DB writers
+        # (`_save_portfolio_to_postgres`, `_append_nav_snapshot`,
+        # the in-process naked-short audit heartbeat) stamp scope rows with it. A
+        # configured XENON_BROKER_ACCOUNT is kept (it must be managed); with it
+        # unset the login must manage exactly one account. Never
+        # managedAccounts()[0] — abort rather than write under a guessed scope.
+        # Every account-data read below is filtered to this account.
+        try:
+            ib_account = select_ib_account(client.ib.managedAccounts())
+        except IBAccountSelectionError as exc:
+            print(f"✗ Not syncing portfolio: {exc}")
+            sys.exit(1)
+        os.environ["XENON_BROKER_ACCOUNT"] = ib_account
+
         # ── Phase 1: Account summary (fast, no sleep needed) ──
         print("Fetching account summary...")
-        account = get_account_summary(client)
-        fx_rates = get_fx_rates(client)
+        account = get_account_summary(client, ib_account)
+        fx_rates = get_fx_rates(client, ib_account)
 
         # ── Phase 2: Request account PnL + positions concurrently ──
         # reqPnL is a subscription — request it, then do other work while it streams
@@ -1396,21 +1441,16 @@ def main(argv=None):
         def _valid_pnl(val):
             return val is not None and not ib_util.isNan(val)
 
-        accounts = client.ib.managedAccounts()
-        ib_account = accounts[0] if accounts else ""
-        # Export the connected account ID so downstream DB writers
-        # (`_save_portfolio_to_postgres`, `_append_nav_snapshot`,
-        # the in-process naked-short audit heartbeat) stamp scope rows with the live
-        # account instead of the legacy_unknown env fallback. Per
-        # account_scope.py docstring: this is where the env var is set.
-        if ib_account:
-            os.environ["XENON_BROKER_ACCOUNT"] = ib_account
-        pnl_obj = client.ib.reqPnL(ib_account) if ib_account else None
+        pnl_obj = client.ib.reqPnL(ib_account)
 
-        # Fetch positions while PnL streams. Foreign-account rows are dropped
-        # before classification; an accountless row leaves the read unattested.
-        positions, positions_ok = _scope_positions(fetch_positions(client), ib_account)
-        reads["positions"] = positions_ok
+        # Fetch positions while PnL streams: ONE read. fetch_positions keeps
+        # only the scope account's rows (#198: other / empty account dropped
+        # before classification). An accountless row also leaves the read
+        # unattested (PR-03b): a short position IB did not attribute could
+        # still need cover in this account.
+        raw_positions = client.get_positions()
+        reads["positions"] = all(getattr(p, "account", "") for p in raw_positions)
+        positions = fetch_positions(client, ib_account, rows=raw_positions)
 
         if not args.no_prices and positions:
             # ── Phase 3: Set exchange + request ALL data at once ──
@@ -1549,9 +1589,13 @@ def main(argv=None):
             open_orders = open_orders_from_trades(client, activity["trades"]) if activity["trades"] else []
             executions = executions_from_fills(activity["fills"])
             # An open order without account provenance makes the view
-            # incomplete (adv-14) — it is persisted (legs.account=null) but
-            # the pass cannot claim it saw a whole, scoped picture.
+            # incomplete (adv-14): the #198 filter does not persist it, so the
+            # pass cannot claim it saw a whole, scoped picture. Orders of a
+            # NAMED other account are excluded and do not affect completeness.
             reads["order_accounts"] = all(o.get("account") for o in open_orders)
+            # Same rule for fills: the writers drop an accountless execution
+            # (#198 filter), so the pass cannot claim it saw all of them.
+            reads["fill_accounts"] = all(e.get("account") for e in executions)
             reads["persisted"] = (
                 reads["open_orders"]
                 and reads["executions"]
@@ -1566,6 +1610,8 @@ def main(argv=None):
             # read succeeded, every row named an account, and the observed
             # orders/fills were persisted before this snapshot.
             portfolio["observation"] = _observation_stamp(pass_started, reads, ib_account)
+            portfolio["observation"]["pass_seq"] = str(pass_seq) if pass_seq is not None else None
+            portfolio["observation"]["pass_cluster"] = pass_cluster
             portfolio["observation"]["executions_client_id"] = activity.get("executions_client_id")
             save_portfolio(portfolio)
 

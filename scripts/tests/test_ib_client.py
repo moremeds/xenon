@@ -488,6 +488,7 @@ class TestOrderOperations:
         stop_loss = _make_trade(order_id=3, status="PreSubmitted")
         mock_ib.bracketOrder.return_value = [parent.order, take_profit.order, stop_loss.order]
         mock_ib.placeOrder.side_effect = [parent, take_profit, stop_loss]
+        mock_ib.managedAccounts.return_value = ["DU0000000"]
 
         client = IBClient()
         client.connect(client_id=2)
@@ -500,6 +501,7 @@ class TestOrderOperations:
             limit_price=150.0,
             take_profit_price=160.0,
             stop_loss_price=145.0,
+            account="DU0000000",
         )
 
         assert mock_ib.bracketOrder.call_count == 1

@@ -18,6 +18,8 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+
+from xenon._test_db import committed_pass_stamp
 from sqlalchemy import insert, select, text
 
 from xenon.db.engine import get_sync_engine
@@ -38,6 +40,8 @@ def _snapshot_payload(positions, *, as_of=None, complete=True, account="DU000000
             "complete": complete,
             "account": account,
             "reads": {"positions": True, "open_orders": True, "executions": True},
+            # xid8 ordering key + cluster id from a committed txn, as ib_sync stamps them.
+            **committed_pass_stamp(),
         },
     }
 

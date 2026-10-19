@@ -9,6 +9,8 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
+from xenon._test_db import committed_pass_stamp
 # Phase 2 carve-out: this module's tests open their own SQLAlchemy engine
 # (helpers calling sqlalchemy.create_engine directly, or subprocess CLIs)
 # and therefore can't share the test's BEGIN/ROLLBACK transaction. They
@@ -42,6 +44,8 @@ def _insert_portfolio_snapshot(payload: dict, *, snapshot_at: datetime | None = 
             "complete": True,
             "account": "DU0000000",
             "reads": {"positions": True, "open_orders": True, "executions": True},
+            # xid8 ordering key + cluster id from a committed txn, as ib_sync stamps them.
+            **committed_pass_stamp(),
         },
     )
 

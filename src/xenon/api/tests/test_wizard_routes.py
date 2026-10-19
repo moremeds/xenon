@@ -4,6 +4,8 @@ import json
 import os
 
 import pytest
+
+from xenon._test_db import committed_pass_stamp
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from starlette.responses import JSONResponse
@@ -70,6 +72,8 @@ def _seed_gate4_snapshot(engine) -> None:
             "complete": True,
             "account": "DU0000000",
             "reads": {"positions": True, "open_orders": True, "executions": True},
+            # xid8 ordering key + cluster id from a committed txn, as ib_sync stamps them.
+            **committed_pass_stamp(),
         },
     }
     with engine.begin() as conn:

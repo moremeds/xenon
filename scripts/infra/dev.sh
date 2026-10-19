@@ -225,9 +225,9 @@ export IB_REALTIME_STATUS_TOKEN="${IB_REALTIME_STATUS_TOKEN:-$(openssl rand -hex
 # Per-mode broker account placeholder. AccountScope.resolve_from_env() raises
 # if XENON_BROKER_ACCOUNT is unset, and many sync subprocesses (ib_sync,
 # ib_reconcile, naked_short_audit) call it at startup before IB Gateway is
-# even reachable. ib_sync overrides this with managedAccounts()[0] after the
-# IB connection is established — so this export is only the initial value to
-# unblock imports. Pulled from .env vars XENON_PAPER_ACCOUNT / XENON_LIVE_ACCOUNT
+# even reachable. After the IB connection, ib_sync keeps this account if the
+# login manages it (else exits without writing) and never substitutes
+# managedAccounts()[0] — see account_scope.select_ib_account. Pulled from .env vars XENON_PAPER_ACCOUNT / XENON_LIVE_ACCOUNT
 # (paper requires DU* prefix; live requires U* and not DU*).
 if [[ -f "$ENV_FILE" ]]; then
   set -a

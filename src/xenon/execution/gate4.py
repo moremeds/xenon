@@ -47,6 +47,7 @@ per-symbol, so it cannot change another symbol's result.
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from dataclasses import dataclass, field, replace
@@ -54,11 +55,11 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Literal
 
-from sqlalchemy import insert, select, text, update
+from sqlalchemy import Numeric, case, func, insert, literal_column, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from xenon.db.engine import get_sync_engine
-from xenon.db.schema import account_snapshots, order_fills, order_submissions, regime_overrides
+from xenon.db.schema import account_snapshots, order_fills, order_submissions, regime_overrides, service_health
 from xenon.execution import coverage, orders_store
 from xenon.execution.orders_store import (
     ATTEMPT_BODY_MISMATCH,
@@ -327,6 +328,155 @@ def _holdings_from_payload(payload: dict) -> list[coverage.Holding]:
 FILL_LAG_S = 60.0
 
 
+# xenon.service_health row (one per scope) holding the Gate-4 invalidation
+# watermark in `last_finished_at`. Reused instead of a new table: the PK is
+# (service, broker, account_env, broker_account) and the column is timestamptz.
+VIEW_WATERMARK_SERVICE = "gate4_view_invalidated"
+
+
+def _scope_where(table, scope: dict):
+    return (
+        table.c.broker == scope["broker"],
+        table.c.account_env == scope["account_env"],
+        table.c.broker_account == scope["broker_account"],
+    )
+
+
+# This Postgres cluster's identity: random per initdb, the same for every DB
+# in the cluster, executable by PUBLIC. An xid8 seq orders things only
+# within the cluster that issued it, so every stored seq carries it.
+_CLUSTER_SQL = "(SELECT system_identifier FROM pg_control_system())::text"
+
+
+def next_pass_seq() -> tuple[int, str]:
+    """(xid8, cluster id) — this sync pass's sequence number.
+
+    Taken at pass start in its own short transaction. xids are handed out in
+    increasing order within one cluster, so `pass_seq` orders passes and
+    watermarks without any wall clock (`as_of` stays for display and
+    freshness only). Raises if either value is unavailable — the pass then
+    has no seq and is not published.
+    """
+    with get_sync_engine().begin() as conn:
+        seq, cluster = conn.execute(text(f"SELECT pg_current_xact_id()::text, {_CLUSTER_SQL}")).one()
+    if not cluster:
+        raise RuntimeError("pg_control_system() returned no system_identifier")
+    return int(seq), cluster
+
+
+def _seq(value: Any) -> int | None:
+    """xid8 text/int → int (numeric compare, never string order)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+# Snapshot ordering key: observation.pass_seq as a number, only when the
+# snapshot's pass_cluster is this cluster. Legacy rows (no cluster) and rows
+# restored from another cluster are FOREIGN forever: NULL here, so they rank
+# last and never count as the newest published pass.
+_PASS_SEQ = account_snapshots.c.payload[("observation", "pass_seq")].astext.cast(Numeric)
+_PASS_CLUSTER = account_snapshots.c.payload[("observation", "pass_cluster")].astext
+_LOCAL_PASS_SEQ = case((_PASS_CLUSTER == literal_column(_CLUSTER_SQL), _PASS_SEQ), else_=None)
+
+
+def _local_seq(conn, seq: int | None, cluster: Any) -> int | None:
+    """`seq` if this cluster issued it, else None (foreign, legacy or missing)."""
+    if seq is None or not isinstance(cluster, str) or not cluster:
+        return None
+    return seq if cluster == conn.execute(text(f"SELECT {_CLUSTER_SQL}")).scalar() else None
+
+
+_INVALIDATE_SQL = text(
+    f"""
+    INSERT INTO xenon.service_health
+        (service, broker, account_env, broker_account, state, detail, last_finished_at, updated_at)
+    VALUES (:service, :broker, :account_env, :broker_account, 'invalidated',
+            json_build_object('reason', CAST(:reason AS text), 'seq', pg_current_xact_id()::text,
+                              'cluster', {_CLUSTER_SQL})::text,
+            :at, :at)
+    ON CONFLICT ON CONSTRAINT pk_service_health DO UPDATE SET
+        detail = CASE
+            WHEN service_health.detail IS NULL OR left(service_health.detail, 1) <> '{{' THEN EXCLUDED.detail
+            -- Keep the stored seq only when the same cluster issued it and it
+            -- is not lower; a foreign/legacy stored seq never outranks a
+            -- local one (view_watermark ignores it) and is replaced.
+            WHEN (service_health.detail::jsonb ->> 'cluster') IS DISTINCT FROM (EXCLUDED.detail::jsonb ->> 'cluster')
+                THEN EXCLUDED.detail
+            WHEN (service_health.detail::jsonb ->> 'seq')::numeric >= (EXCLUDED.detail::jsonb ->> 'seq')::numeric
+                THEN service_health.detail
+            ELSE EXCLUDED.detail
+        END,
+        state = 'invalidated',
+        last_finished_at = GREATEST(service_health.last_finished_at, EXCLUDED.last_finished_at),
+        updated_at = GREATEST(service_health.updated_at, EXCLUDED.updated_at)
+    """
+)
+
+
+def invalidate_view(scope: dict, reason: str) -> None:
+    """Move this scope's Gate-4 invalidation watermark forward.
+
+    A writer that drops an accountless open order or fill (#198 filter) leaves
+    its demand out of Postgres. From then on a snapshot proves cover only if
+    its `pass_seq` is greater than the watermark's `seq` (`load_inputs`).
+    The seq is this transaction's xid, assigned after the scope lock and after
+    the writer's IB read; the row keeps the greater seq and is never cleared.
+    `last_finished_at` is display only.
+    """
+    ensure_writable()
+    at = datetime.now(timezone.utc)
+    with get_sync_engine().begin() as conn:
+        _lock_scope(conn, scope)
+        conn.execute(
+            _INVALIDATE_SQL,
+            {
+                "service": VIEW_WATERMARK_SERVICE,
+                **{k: scope[k] for k in ("broker", "account_env", "broker_account")},
+                "reason": reason,
+                "at": at,
+            },
+        )
+
+
+def view_watermark(conn, scope: dict) -> int | None:
+    """Local watermark seq, or None. Non-JSON, legacy (no cluster) and
+    other-cluster watermarks are ignored: every pass in this cluster ran
+    after a restore, so it is after that invalidation."""
+    detail = conn.execute(
+        select(service_health.c.detail).where(
+            service_health.c.service == VIEW_WATERMARK_SERVICE, *_scope_where(service_health, scope)
+        )
+    ).scalar()
+    try:
+        mark = json.loads(detail) if detail else None
+        if not isinstance(mark, dict):
+            return None
+    except ValueError:
+        return None
+    return _local_seq(conn, _seq(mark.get("seq")), mark.get("cluster"))
+
+
+def is_stale_publication(conn, scope: dict, observation: dict) -> bool:
+    """Snapshot writer check, under the scope lock on `conn`.
+
+    True when this pass has no local `pass_seq` or its `pass_seq` is not
+    greater than the newest published local one for the scope: the writer then skips
+    publishing, so the newer snapshot's holdings stay what `load_inputs`
+    reads (it orders by `pass_seq`).
+    """
+    _lock_scope(conn, scope)
+    seq = _local_seq(conn, _seq(observation.get("pass_seq")), observation.get("pass_cluster"))
+    if seq is None:
+        return True
+    prior = conn.execute(select(func.max(_LOCAL_PASS_SEQ)).where(*_scope_where(account_snapshots, scope))).scalar()
+    return prior is not None and seq <= int(prior)
+
+
 def load_inputs(conn, scope: dict) -> Gate4Inputs:
     """Assemble holdings/orders/view for coverage.evaluate on `conn`.
 
@@ -344,7 +494,9 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
             account_snapshots.c.account_env == account_env,
             account_snapshots.c.broker_account == broker_account,
         )
-        .order_by(account_snapshots.c.snapshot_at.desc())
+        # Newest local pass by pass_seq (xid order); legacy and other-cluster
+        # rows sort last and fall back to snapshot_at.
+        .order_by(_LOCAL_PASS_SEQ.desc().nulls_last(), account_snapshots.c.snapshot_at.desc())
         .limit(1)
     ).first()
 
@@ -369,6 +521,13 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
                 complete = False
             obs_account = observation.get("account")
             if obs_account is not None and obs_account != broker_account:
+                complete = False
+            # A writer dropped an accountless row at watermark seq `mark`:
+            # only a pass that started after it can prove cover. No pass_seq
+            # (or a legacy / other-cluster one) → the pass cannot be ordered.
+            pass_seq = _local_seq(conn, _seq(observation.get("pass_seq")), observation.get("pass_cluster"))
+            mark = view_watermark(conn, scope)
+            if pass_seq is None or (mark is not None and pass_seq <= mark):
                 complete = False
         holdings = _holdings_from_payload(payload)
 

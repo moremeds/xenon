@@ -71,7 +71,8 @@ from xenon.db.engine import dispose_engine, get_sync_engine, init_engine
 from xenon.db.queries.blotter import blotter_has_trades, fetch_blotter_pg, fetch_futu_blotter, merge_pg_and_flex
 from xenon.db.schema import account_snapshots, order_events, order_submissions
 from xenon.execution import gate4, orders_store, preflight, quote_guard, quote_tokens
-from xenon.execution.account_scope import resolve_from_app_state
+from xenon.execution.account_scope import IBAccountSelectionError, resolve_from_app_state, select_ib_account
+from xenon.execution.ib_place_order import TERMINAL_STATUSES, is_hard_error
 from xenon.execution.preflight import (
     PortfolioView,
     PreflightRequest,
@@ -231,14 +232,21 @@ async def _run_rehydrate_on_boot() -> None:
         logger.info("test_mode: skipping rehydrate")
         return
 
-    # Resolve scope from app.state populated earlier in lifespan. None values
-    # mean "no scope filter" — pre-scope rows still get reconciled.
+    # Resolve scope from app.state populated earlier in lifespan. Fail
+    # closed: an empty scope would map to broker_account=None, which
+    # rehydrate treats as "no account filter" (every account's rows).
     _scope_account_env = getattr(app.state, "trading_mode", None)
     _scope_account = getattr(app.state, "account", None)
+    if not _scope_account_env or not _scope_account:
+        logger.error("rehydrate skipped: IB account scope unresolved (trading_mode/account empty)")
+        return
+    if getattr(app.state, "mode_verified", False) is not True:
+        logger.error("rehydrate skipped: trading mode not verified for account %r", _scope_account)
+        return
     _scope_kwargs = {
-        "broker": "IB" if _scope_account_env else None,
+        "broker": "IB",
         "account_env": _scope_account_env,
-        "broker_account": _scope_account or None,
+        "broker_account": _scope_account,
     }
 
     # Operator heartbeat: record "ok" only when BOTH phases finish without
@@ -327,6 +335,9 @@ def _maybe_start_activity_poller() -> None:
     _scope_account = getattr(app.state, "account", None)
     if not _scope_account_env or not _scope_account:
         logger.info("ib activity poller skipped: scope not resolved")
+        return
+    if getattr(app.state, "mode_verified", False) is not True:
+        logger.error("ib activity poller skipped: trading mode not verified for account %r", _scope_account)
         return
 
     scope = AccountScope(
@@ -451,7 +462,10 @@ async def _run_fills_replay_on_boot() -> None:
     _scope_account_env = getattr(app.state, "trading_mode", None)
     _scope_account = getattr(app.state, "account", None)
     if not _scope_account_env or not _scope_account:
-        logger.info("ib fills replay skipped: scope not resolved (trading_mode/account empty)")
+        logger.error("ib fills replay skipped: scope not resolved (trading_mode/account empty)")
+        return
+    if getattr(app.state, "mode_verified", False) is not True:
+        logger.error("ib fills replay skipped: trading mode not verified for account %r", _scope_account)
         return
 
     scope = AccountScope(
@@ -502,11 +516,15 @@ async def _run_fills_replay_on_boot() -> None:
 
 
 def _get_managed_account_for_health() -> str:
-    """Return the first managedAccount from the IB pool's sync client.
+    """Return the boot scope account, chosen by ``select_ib_account``.
 
-    Returns "" when the pool isn't connected (test mode, Gateway down, etc.).
-    Pulled out as a module-level function so tests can monkeypatch it
-    without booting a real IB connection.
+    ``XENON_BROKER_ACCOUNT`` wins when set and managed by the login; with it
+    unset, the login must manage exactly one account. Never
+    ``managedAccounts()[0]``. Returns "" when the pool isn't connected (test
+    mode, Gateway down, etc.) or no account can be chosen — the lifespan then
+    sets ``mode_verified=False`` and order routes refuse. Pulled out as a
+    module-level function so tests can monkeypatch it without booting a real
+    IB connection.
     """
     if ib_pool is None:
         return ""
@@ -517,7 +535,11 @@ def _get_managed_account_for_health() -> str:
         accounts = client.ib.managedAccounts()
     except Exception:  # noqa: BLE001
         return ""
-    return accounts[0] if accounts else ""
+    try:
+        return select_ib_account(accounts)
+    except IBAccountSelectionError as exc:
+        logger.error("IB ACCOUNT SCOPE UNRESOLVED — order routes stay disabled: %s", exc)
+        return ""
 
 
 @asynccontextmanager
@@ -589,6 +611,15 @@ async def lifespan(app: FastAPI):
     # nothing lands in core_test.
     if is_read_only():
         logger.warning("XENON_READ_ONLY=1 — skipping rehydrate, fills replay, and activity poller (no PG writes).")
+    elif not account or not verified:
+        # Boot writers stamp and filter rows by this account; without a
+        # resolved, verified account they would write or reconcile unscoped.
+        logger.error(
+            "IB account scope unresolved or unverified (account=%r, mode_verified=%s) — "
+            "skipping rehydrate, fills replay, and activity poller.",
+            account,
+            verified,
+        )
     else:
         # F7.2 — single-leg three-source rehydrate. Runs synchronously before
         # the server starts serving so our view of in-flight orders is accurate
@@ -1160,6 +1191,9 @@ def _service_health_rows() -> list[dict]:
                 conn.execute(
                     select(service_health)
                     .where(
+                        # The Gate-4 invalidation watermark is a sentinel row,
+                        # not a background writer — never shown as one.
+                        service_health.c.service != gate4.VIEW_WATERMARK_SERVICE,
                         or_(
                             and_(
                                 service_health.c.broker == kwargs["broker"],
@@ -2636,7 +2670,10 @@ async def _orders_place_from_body(body: dict):
             "submission_id": submission_id,
         }
 
-    order_json = json.dumps(body)
+    # Place on the account the reservation row was stamped with — never on an
+    # account named by the request body, never on IB's default. The
+    # subprocess fails closed if it is legacy_unknown or not managed.
+    order_json = json.dumps({**body, "account": scope["broker_account"]})
     result = await _run_ib_script_with_recovery("xenon-ib-place-order", ["--json", order_json], timeout=15)
     if not result.ok:
         orders_store.mark_terminal(
@@ -2647,7 +2684,30 @@ async def _orders_place_from_body(body: dict):
             avg_fill_price=None,
         )
         raise HTTPException(status_code=502, detail=result.error)
-    if result.data and result.data.get("status") == "error":
+    verdict = _place_verdict(result.data)
+    if verdict == "unknown":
+        return _place_outcome_unknown(submission_id, result.data or {})
+    if verdict == "accepted" and result.data.get("status") == "error":
+        # Legacy payload (no ``outcome``): IB holds the order (permId > 0,
+        # non-terminal status, notice-only code) though the CLI said error.
+        # Never mark it REJECTED: the user would retry and place a duplicate.
+        logger.warning(
+            "IB order accepted despite CLI error: submission=%s ib_code=%s status=%s permId=%s",
+            submission_id,
+            result.data.get("code"),
+            result.data.get("initialStatus"),
+            result.data.get("permId"),
+        )
+        _record_place_event(
+            submission_id,
+            {
+                "ib_code": result.data.get("code"),
+                "ib_message": result.data.get("message"),
+                "initial_status": result.data.get("initialStatus"),
+            },
+        )
+        result.data = {**result.data, "status": "ok"}
+    if verdict == "rejected":
         # B6 — write a reason_code the UI toast map can resolve. Most IB
         # rejections collapse to IB_REJECT, but tick-rule rejections
         # (code 110) re-map to LIMIT_OFF_TICK so the user sees a clean
@@ -2656,7 +2716,10 @@ async def _orders_place_from_body(body: dict):
         # row so we don't lose the info.
         ib_code = result.data.get("code")
         ib_message = result.data.get("message", "Order failed")
-        if str(ib_code) == "110":
+        account_reason = result.data.get("reason_code")
+        if account_reason in (ReasonCode.ACCOUNT_UNRESOLVED.value, ReasonCode.ACCOUNT_NOT_MANAGED.value):
+            reason_code = account_reason
+        elif str(ib_code) == "110":
             reason_code = ReasonCode.LIMIT_OFF_TICK.value
             logger.warning(
                 "IB rejected order with tick-rule violation: submission=%s ib_code=110 ib_message=%s",
@@ -2684,15 +2747,101 @@ async def _orders_place_from_body(body: dict):
                 submission_id,
                 exc_info=True,
             )
-        raise HTTPException(status_code=502, detail=ib_message)
-    if result.data:
+        # Top-level reason_code so the toast helper renders the mapped copy.
+        return JSONResponse(
+            status_code=502,
+            content={"detail": ib_message, "reason_code": reason_code},
+        )
+    # The CLI returns the clientId it really placed with ("auto" allocates
+    # one); cancel / modify must reuse it. 26 is only the legacy fallback.
+    orders_store.mark_submitted(
+        submission_id=submission_id,
+        ib_order_id=str(result.data.get("orderId") or ""),
+        perm_id=str(result.data.get("permId") or ""),
+        placing_client_id=int(result.data.get("clientId") or 26),
+    )
+    if result.data.get("ibNotices"):
+        _record_place_event(submission_id, {"notices": result.data["ibNotices"]})
+    return result.data
+
+
+def _place_verdict(data: dict | None) -> str:
+    """``accepted`` | ``rejected`` | ``unknown`` for a place CLI result.
+
+    The CLI's explicit ``outcome`` (from the ordered ib_async Trade.log) is
+    trusted: ``accepted`` / ``unconfirmed`` → accepted (stored WORKING),
+    ``rejected`` → rejected. Payloads without ``outcome`` (older CLI, or an
+    error raised before placement) fall back conservatively: an error with
+    permId > 0 and a non-terminal status is never REJECTED — accepted when
+    its code is a notice, UNKNOWN when it is a hard error.
+
+    A WORKING row is then updated by the activity poller / fill mirror, but
+    the activity-mirror sweep (``sweep_disappeared_orders``) skips an empty
+    open-order snapshot and needs two consecutive misses, and boot rehydrate
+    without a positions baseline leaves the row as is — a per-row grace /
+    unknown-order reconciliation is a follow-up.
+    """
+    if not data:
+        return "unknown"
+    outcome = data.get("outcome")
+    if outcome == "rejected":
+        return "rejected"
+    if outcome in ("accepted", "unconfirmed"):
+        return "accepted"
+    if data.get("status") != "error":
+        return "accepted"
+    try:
+        perm_id = int(data.get("permId") or 0)
+    except (TypeError, ValueError):
+        perm_id = 0
+    if perm_id > 0 and str(data.get("initialStatus") or "") not in TERMINAL_STATUSES:
+        return "unknown" if is_hard_error(data.get("code")) else "accepted"
+    return "rejected"
+
+
+def _place_outcome_unknown(submission_id: str, data: dict) -> JSONResponse:
+    """IB may or may not hold the order. Never leave the row PENDING (a
+    same-attempt retry would return "duplicate" and nothing would resolve
+    it) and never call it rejected. UNKNOWN is the uncertain state /health
+    counts; an operator resolves it against IB working orders. Any IB ids the
+    CLI returned are stored first so the row can be matched."""
+    if data.get("orderId") or data.get("permId"):
         orders_store.mark_submitted(
             submission_id=submission_id,
-            ib_order_id=str(result.data.get("orderId") or ""),
-            perm_id=str(result.data.get("permId") or ""),
-            placing_client_id=int(result.data.get("clientId") or 26),
+            ib_order_id=str(data.get("orderId") or ""),
+            perm_id=str(data.get("permId") or ""),
+            placing_client_id=int(data.get("clientId") or 26),
         )
-    return result.data
+        _record_place_event(
+            submission_id,
+            {
+                "ib_code": data.get("code"),
+                "ib_message": data.get("message"),
+                "initial_status": data.get("initialStatus"),
+            },
+        )
+    orders_store.mark_terminal(
+        submission_id=submission_id,
+        state="UNKNOWN",
+        reason_code=ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
+        filled_qty=0,
+        avg_fill_price=None,
+    )
+    return JSONResponse(
+        status_code=502,
+        content={
+            "detail": "Order outcome unknown — check working orders before placing it again. Do not resubmit.",
+            "reason_code": ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
+        },
+    )
+
+
+def _record_place_event(submission_id: str, detail: dict) -> None:
+    """Best-effort IB_NOTICE audit row; a failed write never fails the place."""
+    try:
+        orders_store.record_event(submission_id, "IB_NOTICE", detail)
+    except Exception:  # pragma: no cover — event writes are best-effort
+        logger.warning("Failed to record IB_NOTICE event for submission %s", submission_id, exc_info=True)
 
 
 # F5.4 — cancel/modify failure classification

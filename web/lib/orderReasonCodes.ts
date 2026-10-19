@@ -126,6 +126,19 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
     severity: "error",
     copy: "Order service unreachable — retry in a moment.",
   },
+  // IB account scope — new orders never fall back to IB's default account
+  ACCOUNT_UNRESOLVED: {
+    severity: "error",
+    copy: "Broker account unresolved — order not placed.",
+  },
+  ACCOUNT_NOT_MANAGED: {
+    severity: "error",
+    copy: "Scope account not managed by this IB login — order not placed.",
+  },
+  PLACE_OUTCOME_UNKNOWN: {
+    severity: "error",
+    copy: "Order outcome unknown — check working orders. Do not resubmit.",
+  },
 };
 
 const FALLBACK: ReasonToast = {

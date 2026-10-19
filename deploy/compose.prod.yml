@@ -1,0 +1,150 @@
+# deploy/compose.prod.yml -- DEPLOY TRUTH for the Mac mini production stack.
+#
+# This file is the reviewed source of /opt/xenon/compose.yml. The running
+# stack must match it. Change prod by changing this file in a PR first.
+#
+# Operator sync (on the Mac mini; export PATH=/opt/homebrew/bin:$PATH first):
+#   scp deploy/compose.prod.yml macmini:/opt/xenon/compose.yml
+#   cd /opt/xenon && docker-compose up -d
+# Compare before copying:  diff deploy/compose.prod.yml /opt/xenon/compose.yml
+#
+# MIGRATIONS ARE MANUAL. The migrator never starts with `up -d` (profile
+# "migrate") and Watchtower never touches it. On any release that adds an
+# alembic revision, run it by hand BEFORE or right after the new api image
+# lands, or the portfolio freezes on schema drift:
+#   cd /opt/xenon && docker-compose --profile migrate run --rm migrator
+#
+# Secrets: none live here. They come from env_file entries (/opt/xenon/.env,
+# /opt/xenon/web.env) and from ${VAR} interpolation. docker-compose reads
+# /opt/xenon/.env for interpolation, so GHCR_USER, GHCR_PAT,
+# XENON_INTERNAL_API_TOKEN and WATCHTOWER_NOTIFICATION_URL must be defined
+# there.
+#
+# Scheduled jobs (nav-flex-refresh, core_test refresh) are host launchd
+# entries that call `docker-compose -f /opt/xenon/compose.yml run --rm api
+# <cli>`. They need no extra service here. See deploy/jobs/.
+#
+# The build-based dev compose is docker-compose.yml at the repo root. It is
+# not the deploy truth.
+#
+# ---- Original description of the stack ----
+# Pulls 4 images from ghcr.io/moremeds/xenon-* (no build steps).
+# Postgres + IB Gateway live host-native; containers reach both via
+# host.docker.internal.
+#
+# Profiles
+#   default ............ api + web + realtime
+#   migrate ............ migrator (one-shot -- `docker-compose run --rm migrator`)
+#
+# Auto-deploy (Stage C): api/web/realtime track :latest and carry the
+# Watchtower opt-in label. The label-gated `watchtower` service polls GHCR
+# every 60s and recreates them in place when release.yml publishes a new
+# :latest digest. migrator is intentionally excluded (manual one-shot), and
+# the co-located trading-* observability stack is untouched (no opt-in label,
+# and Watchtower runs in WATCHTOWER_LABEL_ENABLE opt-in mode).
+
+services:
+  migrator:
+    image: ghcr.io/moremeds/xenon-migrator:latest
+    profiles: ["migrate"]
+    env_file:
+      - ./.env
+    volumes:
+      - ./.env:/app/.env:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: "no"
+
+  api:
+    image: ghcr.io/moremeds/xenon-api:latest
+    env_file:
+      - ./.env
+      - ./web.env
+    environment:
+      FUTU_OPEND_HOST: host.docker.internal
+    ports:
+      - "127.0.0.1:8321:8321"
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8321/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    restart: unless-stopped
+
+  web:
+    image: ghcr.io/moremeds/xenon-web:latest
+    env_file:
+      - ./web.env
+    environment:
+      XENON_API_URL: http://api:8321
+      XENON_INTERNAL_API_TOKEN: ${XENON_INTERNAL_API_TOKEN:-}
+    ports:
+      - "127.0.0.1:3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/sign-in"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    restart: unless-stopped
+
+  realtime:
+    image: ghcr.io/moremeds/xenon-realtime:latest
+    env_file:
+      - ./.env
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - ./.env:/app/.env:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      api:
+        condition: service_healthy
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    restart: unless-stopped
+
+  # Stage C auto-deploy. Label-gated so ONLY the three services above are
+  # watched — migrator and the trading-* stack are never auto-updated.
+  watchtower:
+    image: containrrr/watchtower:1.7.1
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WATCHTOWER_POLL_INTERVAL: 60
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
+      WATCHTOWER_NOTIFICATIONS_LEVEL: info
+      # Push a ntfy.sh alert ONLY when a container is actually updated/failed.
+      # REPORT=true + a template guarded by (or .Updated .Failed) → renders empty
+      # on no-op cycles, and Watchtower skips empty notifications (no per-minute spam).
+      WATCHTOWER_NOTIFICATIONS: shoutrrr
+      WATCHTOWER_NOTIFICATION_URL: ${WATCHTOWER_NOTIFICATION_URL}
+      WATCHTOWER_NOTIFICATION_REPORT: "true"
+      WATCHTOWER_NOTIFICATION_TEMPLATE: "{{- if .Report -}}{{- with .Report -}}{{- if (or .Updated .Failed) -}}{{range .Updated}}Updated {{.Name}} ({{.ImageName}}){{println}}{{end}}{{range .Failed}}Failed {{.Name}}: {{.Error}}{{println}}{{end}}{{- end -}}{{- end -}}{{- end -}}"
+      # GHCR credentials for pulling private images
+      REPO_USER: ${GHCR_USER}
+      REPO_PASS: ${GHCR_PAT}
+      # Docker Engine 29.x rejects API < 1.44; the bundled SDK defaults to
+      # 1.25. Force the negotiated version up to the daemon's floor.
+      DOCKER_API_VERSION: "1.44"
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"

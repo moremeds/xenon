@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from xenon._test_db import committed_pass_stamp
+
 # Phase 3: opt out of Phase 2 BoundEngine binding — this file owns its
 # own TRUNCATE-based teardown that needs committed cross-test state.
 pytestmark = pytest.mark.committed_db
@@ -58,6 +60,8 @@ def _seed_gate4_snapshot(engine):
             "complete": True,
             "account": "DU0000000",
             "reads": {"positions": True, "open_orders": True, "executions": True},
+            # xid8 ordering key + cluster id from a committed txn, as ib_sync stamps them.
+            **committed_pass_stamp(),
         },
     }
     with engine.begin() as conn:
