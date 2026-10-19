@@ -161,8 +161,5 @@ Postgres is primary for portfolio, orders, NAV, trades, UW stats, and journal en
 | `xenon-portfolio-attrib`  | P&L attribution (incl. Kelly calibration display fields)              |
 | `xenon-portfolio-perf`    | Performance computation (drawdown, return series, OHLC enrichment)    |
 | `xenon-perf-explainer`    | Performance-page HTML explainer                                       |
-| `xenon-monitor-daemon`    | Position-rules + fill monitor + preset rebalance daemon               |
-| `xenon-position-rules`    | Position-close rule CLI                                               |
-| `xenon-preset-rebalance`  | Preset rebalance handler                                              |
 | `xenon-market-hours`      | Market-hours helper                                                   |
 | `xenon-presets`           | Preset list helper                                                    |
