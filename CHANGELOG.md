@@ -5,6 +5,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-10-19
+
 ### Removed
 
 - The standalone marketing site (`site/`, 68 files) and its site-only tooling — the core product does not need it.
