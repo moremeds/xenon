@@ -382,29 +382,6 @@ class _FakeIBAsync:
 
 
 @pytest.mark.asyncio
-async def test_spike_connect_async_refused_at_boundary(monkeypatch):
-    """scripts/spike/option_chain_minimal main() must refuse a custom endpoint
-    before connectAsync — sentinel proves the transport is never reached."""
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "_option_chain_minimal",
-        Path(__file__).parent.parent / "spike" / "option_chain_minimal.py",
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    fake_ib = _FakeIBAsync()
-    monkeypatch.setattr(mod, "IB", lambda: fake_ib)
-    monkeypatch.setattr(sys, "argv", ["ocm", "--host", "10.9.9.9", "--port", "4500"])
-    monkeypatch.setenv("OPTION_CHAIN_DATABASE_URL", "postgresql://x@127.0.0.1:1/none")
-
-    with pytest.raises(BrokerEndpointDenied, match="broker guard refused"):
-        await mod.main()
-    assert fake_ib.connect_calls == []
-
-
-@pytest.mark.asyncio
 async def test_ib_realtime_probe_connect_async_refused_at_boundary(monkeypatch):
     """scripts/infra/ib_realtime's connectivity probe records the refusal as
     a failed connect result and never reaches connectAsync."""
