@@ -47,6 +47,26 @@ All notable changes to Xenon are documented here. Format loosely based on
 - `deploy/compose.prod.yml`: the realtime service now sets `WS_HOST=0.0.0.0`. Since 0.9.0 the relay binds `127.0.0.1` by default, so inside the container the published port refused argon, apex and the browser. The web healthcheck now probes `/` instead of the removed `/sign-in` page. Prod was hot-fixed with the same two lines on 2026-10-19.
 - `deploy/compose.prod.yml`: realtime sets `TICKET_VALIDATE_URL=http://api:8321/ws-ticket/validate` and api sets `IB_REALTIME_STATUS_URL=http://realtime:8765/status`. Both defaults pointed at the container's own loopback, so browser WS tickets failed with `validate_unreachable` (since before 0.9.0) unless an env file overrode them. `.env.example` now says prod `XENON_ALLOWED_HOSTS` belongs in `web.env`.
 
+### Database
+
+- **DESTRUCTIVE migration `2026_10_20_drop_signal_tables`: this release DROPS twelve dead signal-layer tables** left over from the pure-portfolio pivot (no reader or writer remains in `src/`, `scripts/`, `web/`, `deploy/` or `docker/`): `scan_results`, `cri_series`, `vcg_series`, `gex_snapshots`, `uw_analyze_snapshots`, `uw_analyze_flow_alerts`, `uw_analyze_gex_strikes`, `uw_analyze_short_volume_trend`, `uw_flow_events`, `uw_flow_event_ticks`, `ticker_cache`, `uw_api_stats`. It also drops the `xenon.regime_state` view (it only projected `vcg_series` + `cri_series`) and the four `fanout_uw_*` trigger functions with their triggers. `regime_overrides` (order-path audit) is NOT touched. The migrator is a manual step (`docker-compose --profile migrate run --rm migrator`), so nothing is dropped until the operator runs it. `downgrade()` recreates the structure only, never the rows.
+  **Operator, BEFORE running the migrator**, dump exactly these tables (schema + data, custom format) and keep the file:
+
+  ```bash
+  # libpq does not accept the app's driver schemes (postgresql+asyncpg:// / +psycopg://); strip them.
+  PGURL="$(printf '%s' "$DATABASE_URL" | sed -E 's#^postgresql\+(asyncpg|psycopg)://#postgresql://#')"
+  BACKUP="/path/to/backup/xenon-dropped-signal-tables-$(date +%Y%m%d).dump"
+  # Use a pg_dump whose major version matches the server (prod is PostgreSQL 17).
+  pg_dump -Fc "$PGURL" \
+    -t xenon.scan_results -t xenon.cri_series -t xenon.vcg_series -t xenon.gex_snapshots \
+    -t xenon.uw_analyze_snapshots -t xenon.uw_analyze_flow_alerts -t xenon.uw_analyze_gex_strikes \
+    -t xenon.uw_analyze_short_volume_trend -t xenon.uw_flow_events -t xenon.uw_flow_event_ticks \
+    -t xenon.ticker_cache -t xenon.uw_api_stats \
+    -f "$BACKUP" && pg_restore --list "$BACKUP" | grep -c 'TABLE DATA'   # expect 12
+  ```
+
+  Run the migrator only after the dump succeeds and lists 12 `TABLE DATA` entries. `DATABASE_URL` is the prod (`core_dev`) connection string from the operator's own environment; never echo it or paste it into tickets or logs. The `-t` patterns also dump the sequences owned by those tables.
+
 ## [0.9.0] — 2026-10-19
 
 ### Removed
