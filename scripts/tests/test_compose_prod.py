@@ -23,6 +23,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PROD_COMPOSE = REPO_ROOT / "deploy" / "compose.prod.yml"
@@ -116,6 +117,19 @@ def test_only_opted_in_services_carry_watchtower_label() -> None:
     assert text.count('com.centurylinklabs.watchtower.enable: "true"') == 3
     assert text.count('com.centurylinklabs.watchtower.enable: "false"') == 1  # watchtower itself
     assert 'profiles: ["migrate"]' in text
+
+
+def test_cross_container_urls_and_web_healthcheck() -> None:
+    """v0.9.0 shipped without these: the relay defaults WS_HOST and its ticket
+    validator to 127.0.0.1 (its own loopback, not the published port or the api),
+    the api probed relay /status on its own loopback, and web probed the deleted
+    /sign-in page."""
+    services = yaml.safe_load(_text())["services"]
+    rt_env = services["realtime"]["environment"]
+    assert rt_env["WS_HOST"] == "0.0.0.0"
+    assert rt_env["TICKET_VALIDATE_URL"] == "http://api:8321/ws-ticket/validate"
+    assert services["api"]["environment"]["IB_REALTIME_STATUS_URL"] == "http://realtime:8765/status"
+    assert services["web"]["healthcheck"]["test"][-1] == "http://127.0.0.1:3000/"
 
 
 def test_dev_compose_header_points_to_prod_truth() -> None:

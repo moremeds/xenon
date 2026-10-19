@@ -5,6 +5,11 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+### Fixed
+
+- `deploy/compose.prod.yml`: the realtime service now sets `WS_HOST=0.0.0.0`. Since 0.9.0 the relay binds `127.0.0.1` by default, so inside the container the published port refused argon, apex and the browser. The web healthcheck now probes `/` instead of the removed `/sign-in` page. Prod was hot-fixed with the same two lines on 2026-10-19.
+- `deploy/compose.prod.yml`: realtime sets `TICKET_VALIDATE_URL=http://api:8321/ws-ticket/validate` and api sets `IB_REALTIME_STATUS_URL=http://realtime:8765/status`. Both defaults pointed at the container's own loopback, so browser WS tickets failed with `validate_unreachable` (since before 0.9.0) unless an env file overrode them. `.env.example` now says prod `XENON_ALLOWED_HOSTS` belongs in `web.env`.
+
 ## [0.9.0] — 2026-10-19
 
 ### Removed
