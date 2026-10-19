@@ -91,7 +91,7 @@ ignore = ["E501"]  # line length handled separately
 
 [tool.ruff.lint.per-file-ignores]
 # Alembic revisions are append-only history; the template imports `sa` even when unused.
-"src/xenon/db/migrations/**" = ["F401"]
+"src/xenon/db/migrations/versions/*.py" = ["F401"]
 
 [tool.ruff.lint.isort]
 known-first-party = [
