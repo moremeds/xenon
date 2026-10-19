@@ -84,6 +84,13 @@ jobs:
           cd web && npm run universe:gen
           cd .. && NODE_ENV=test ASSISTANT_MOCK=1 npx vitest run --config vitest.config.ts web/tests lib/tools \
             --exclude 'web/tests/order-e2e.test.ts'
+      - name: Python/TS combo quote parity
+        # Only this job has both .venv and web/node_modules/tsx. The test skips
+        # without tsx (python-tests job); XENON_REQUIRE_TS_PARITY=1 turns that
+        # skip into a failure here. Needs no Postgres (offline fixtures no-op).
+        env:
+          XENON_REQUIRE_TS_PARITY: "1"
+        run: uv run pytest scripts/tests/test_combo_quote_ts_parity.py -q
 
   python-tests:
     runs-on: ubuntu-latest
