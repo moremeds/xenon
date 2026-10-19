@@ -5,6 +5,10 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+### Fixed
+
+- `deploy/compose.prod.yml`: the realtime service now sets `WS_HOST=0.0.0.0`. Since 0.9.0 the relay binds `127.0.0.1` by default, so inside the container the published port refused argon, apex and the browser. The web healthcheck now probes `/` instead of the removed `/sign-in` page. Prod was hot-fixed with the same two lines on 2026-10-19.
+
 ## [0.9.0] — 2026-10-19
 
 ### Removed
