@@ -198,7 +198,7 @@ Order-route integration tests use `web/tests/fastapiHarness.ts` with `XENON_API_
 | IB Gateway (cloud / Docker / launchd)   | Broker session for quotes, execution, reports                                        |
 | Monitor daemon (`xenon-monitor-daemon`) | Fills mirror, exit orders, naked-short audit, Flex token checks (10 MB log rotation) |
 
-Ops runbooks: [`ib-connection-troubleshooting`](docs/runbooks/ib-connection-troubleshooting.md) · [`ib-gateway-docker`](docs/runbooks/ib-gateway-docker.md) · [`mac-mini`](docs/runbooks/mac-mini.md) · [`ops`](docs/runbooks/ops.md) · [`release`](docs/runbooks/release.md).
+Ops runbooks: [`ib-connection-troubleshooting`](docs/runbooks/ib-connection-troubleshooting.md) · [`ib-gateway-docker`](docs/runbooks/ib-gateway-docker.md) · [`remote-deploy`](docs/runbooks/remote-deploy.md) · [`ops`](docs/runbooks/ops.md) · [`release`](docs/runbooks/release.md).
 
 ## Release
 

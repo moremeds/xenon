@@ -48,7 +48,7 @@ services:
     # `required: false` is defensive: it lets the api service parse
     # cleanly when web/.env is absent. (Note: the web service below still
     # requires web/.env, so `docker compose up` of the full stack still
-    # needs the file. macmini-bootstrap.sh always creates one.)
+    # needs the file.)
     # Why both: UW_TOKEN and ANTHROPIC_API_KEY live in web/.env per the
     # Credentials table in CLAUDE.md, but src/xenon/api/server.py and
     # src/xenon/clients/menthorq_client.py read them from os.environ. The
