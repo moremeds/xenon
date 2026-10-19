@@ -747,15 +747,23 @@ class IBClient:
     def get_open_orders(self) -> list:
         """Return all open orders across all clients.
 
-        Uses ``reqAllOpenOrders`` (master client sees everything).
+        Returns the trades IB sent in response to this ``reqAllOpenOrders``
+        request (collected until ``openOrderEnd``). It does NOT return
+        ``openTrades()``: that is ib_async's client-side cache, and on a
+        long-lived connection it is not kept in sync for other clients'
+        orders. An order that another client cancelled stays there as
+        ``Submitted`` forever, so the cache can resurrect a cancelled order
+        (incident #32 in docs/reference/order-path-incident-history.md).
         """
         self._require_connection()
-        self._ib.reqAllOpenOrders()
-        self._ib.sleep(0.5)
-        return self._ib.openTrades()
+        return list(self._ib.reqAllOpenOrders() or [])
 
     def get_open_trades(self) -> list:
-        """Return currently open trades."""
+        """Return this session's open trades from the client-side cache.
+
+        Only reliable for orders this client placed itself. For "is this
+        order open at the broker" use :meth:`get_open_orders`.
+        """
         self._require_connection()
         return self._ib.openTrades()
 

@@ -377,8 +377,8 @@ class ComboWizardIbAdapter:
         return [_fill_to_dict(f) for f in (raw or [])]
 
     def get_open_orders(self) -> list:
-        """Delegate to IBClient. Citation: ib_async/ib.py:804 — reqAllOpenOrders
-        (wrapped in ib_client.py:649 which calls reqAllOpenOrders + openTrades)."""
+        """Delegate to IBClient.get_open_orders — the fresh reqAllOpenOrders
+        response, not the client-side openTrades cache."""
         return self._ib.get_open_orders() or []
 
     def get_positions(self) -> list:

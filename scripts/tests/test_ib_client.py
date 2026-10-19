@@ -587,6 +587,23 @@ class TestOrderOperations:
         assert len(orders) == 2
 
     @patch("xenon.clients.ib_client.IB")
+    def test_get_open_orders_ignores_stale_open_trades_cache(self, MockIB):
+        """Incident #32: another client cancelled the order. IB's fresh
+        reqAllOpenOrders response omits it, but ib_async's openTrades()
+        cache on this long-lived connection still holds it as Submitted.
+        get_open_orders must return the fresh response, not the cache."""
+        mock_ib = MockIB.return_value
+        mock_ib.isConnected.return_value = True
+        mock_ib.reqAllOpenOrders.return_value = []
+        mock_ib.openTrades.return_value = [_make_trade(order_id=7, status="Submitted")]
+
+        client = IBClient()
+        client.connect(client_id=3)
+
+        assert client.get_open_orders() == []
+        mock_ib.reqAllOpenOrders.assert_called_once()
+
+    @patch("xenon.clients.ib_client.IB")
     def test_get_order_status(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
