@@ -31,12 +31,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 # Project root
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -393,7 +390,7 @@ def main():
         print(f"📚 Context loaded: {facts} facts, {episodes} episodes, {human} annotations ({tokens}/{budget} tokens)")
         print(result["context"])
     else:
-        print(f"📚 Context: empty (no persistent memory yet)")
+        print("📚 Context: empty (no persistent memory yet)")
 
     # Show manifest summary
     excluded = result["manifest"]["excluded"]

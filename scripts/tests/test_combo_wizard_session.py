@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
-from pathlib import Path
 
 import pytest
 
@@ -13,7 +11,6 @@ from xenon._test_db import committed_pass_stamp
 pytestmark = pytest.mark.committed_db
 from sqlalchemy import create_engine, text
 
-from xenon.execution import orders_store
 from xenon.execution.combo_wizard import session
 
 # --------------------------------------------------------------------------

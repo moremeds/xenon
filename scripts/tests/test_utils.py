@@ -1,9 +1,6 @@
 """Tests for scripts/utils/ shared utility modules."""
 
-import json
-import os
 from datetime import datetime
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -256,7 +253,7 @@ class TestConnectIb:
         MockIB.return_value = mock_ib
 
         self._allow(monkeypatch, "192.168.1.1", 7497)
-        result = connect_ib("ib_sync", host="192.168.1.1", port=7497)
+        connect_ib("ib_sync", host="192.168.1.1", port=7497)
 
         mock_ib.connect.assert_called_once_with("192.168.1.1", 7497, clientId=0, timeout=10)
 
@@ -271,7 +268,7 @@ class TestConnectIb:
         from xenon.utils.ib_connection import DEFAULT_HOST as _DH
 
         self._allow(monkeypatch, _DH, _DP)
-        result = connect_ib("ib_sync", client_id=999)
+        connect_ib("ib_sync", client_id=999)
 
         mock_ib.connect.assert_called_once_with(_DH, _DP, clientId=999, timeout=10)
 
@@ -286,7 +283,7 @@ class TestConnectIb:
         from xenon.utils.ib_connection import DEFAULT_HOST as _DH
 
         self._allow(monkeypatch, _DH, _DP)
-        result = connect_ib("ib_sync", timeout=30)
+        connect_ib("ib_sync", timeout=30)
 
         mock_ib.connect.assert_called_once_with(_DH, _DP, clientId=0, timeout=30)
 

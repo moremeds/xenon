@@ -18,14 +18,13 @@ import logging
 import math
 import os
 from dataclasses import dataclass
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xenon.db.queries.futu_history import list_cashflows
 from xenon.db.queries.nav_history import load_benchmark_cached, load_nav_curve
 from xenon.execution.account_scope import AccountScope
 from xenon.reports import performance_metrics as M
@@ -535,7 +534,6 @@ async def compute(
 
     bench_df, bench_err = await load_benchmark_cached(engine, ib_pool, "SPY", period_start)
 
-    futu_official: FutuOfficialPerformance | None = None
     if scope.broker == "IB":
         # IB branch: load CashTransactions (Deposits/Withdrawals) from
         # xenon.ib_cash_flow — sourced from IB Flex via the "account" saved
@@ -561,7 +559,6 @@ async def compute(
 
     warnings: list[str] = []
     metrics_unlocked = days_collected >= min_metrics
-    futu_mask = False  # PR-2: lifted now that flow-adjusted returns + IRR ship
     # IB now has flow-adjusted returns + IRR via xenon.ib_cash_flow (sourced
     # from IB Flex Deposits/Withdrawals). The mask still applies when the
     # XENON_IB_DAILYPNL_INCLUDES_CASHFLOWS env gate hasn't been disabled, but

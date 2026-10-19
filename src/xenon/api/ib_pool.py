@@ -169,7 +169,6 @@ class IBPool:
             if i > 0:
                 await asyncio.sleep(1)
 
-            connected = False
             for attempt in range(3):
                 try:
                     # Pin connect to the role's executor so the event loop
@@ -186,7 +185,6 @@ class IBPool:
                     self._clients[role] = client
                     self._connected[role] = True
                     status[role] = True
-                    connected = True
                     logger.info("IB pool: %s connected (client_id=%d)", role, client_id)
                     break
                 except Exception as e:

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 
 class Side(Enum):
@@ -285,17 +285,17 @@ class TradeBlotter:
                     short_types = set(l.executions[0].right for l in short_legs if l.executions)
 
                     if long_types == short_types == {"P"}:
-                        name = f"Put Spread"
+                        name = "Put Spread"
                     elif long_types == short_types == {"C"}:
-                        name = f"Call Spread"
+                        name = "Call Spread"
                     elif "P" in short_types and "C" in long_types:
-                        name = f"Risk Reversal"
+                        name = "Risk Reversal"
                     elif "C" in short_types and "P" in long_types:
-                        name = f"Collar"
+                        name = "Collar"
                     else:
-                        name = f"Spread"
+                        name = "Spread"
                 else:
-                    name = f"Multi-leg"
+                    name = "Multi-leg"
 
                 spreads.append(
                     Spread(

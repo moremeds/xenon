@@ -24,7 +24,6 @@ from typing import Any, Callable
 
 from xenon.db.engine import get_sync_engine
 from xenon.db.queries import combo_wizard
-from xenon.execution.combo_wizard import protect as _protect_mod
 from xenon.execution.trade_aggregator import aggregate_trade_from_fills
 from xenon.execution.single_leg_rehydrate import (  # noqa: F401 — shared pattern
     _index_execution_records,

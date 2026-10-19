@@ -3,7 +3,7 @@
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -393,7 +393,7 @@ class TestOutput:
         assert data["status"] == "error"
 
     def test_output_extra_fields(self, capsys):
-        with pytest.raises(SystemExit) as exc:
+        with pytest.raises(SystemExit):
             output("ok", "done", orderId=42, newPrice=22.5)
         captured = capsys.readouterr()
         data = json.loads(captured.out)

@@ -14,7 +14,6 @@ Usage:
 """
 
 import argparse
-import json
 import logging
 import os
 import sys
@@ -333,7 +332,6 @@ def _merge_covered_call_groups(groups: dict) -> dict:
     2. A stock group exists for the same ticker with long shares
     3. Stock shares >= short call contracts * 100 (fully covered)
     """
-    from collections import defaultdict
 
     # Find all stock groups and short-call-only groups per ticker
     stock_groups = {}  # ticker -> (key, legs)
@@ -971,7 +969,6 @@ def convert_to_portfolio_format(
     from xenon.execution.account_scope import resolve_from_env
     from xenon.utils.portfolio_loader import EntryDateLookups, load_entry_date_lookups_sync
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     try:
         lookups = load_entry_date_lookups_sync(scope=resolve_from_env())
     except Exception as e:

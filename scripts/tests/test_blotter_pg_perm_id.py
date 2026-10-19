@@ -12,7 +12,6 @@ _SUBMITTED = _NOW - timedelta(days=2, hours=1)
 _OPENED = _NOW - timedelta(days=2)
 _CLOSED = _OPENED + timedelta(hours=1)
 
-import pytest
 from sqlalchemy import insert
 
 from xenon.db.engine import get_sync_engine

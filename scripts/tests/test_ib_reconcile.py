@@ -8,11 +8,9 @@ net_quantity=0 → "CLOSED" when both legs are actually new opens.
 Fix: group by (symbol, sec_type, strike, expiry, right) for options.
 """
 
-import pytest
 import builtins
 from datetime import datetime
 from decimal import Decimal
-from unittest.mock import MagicMock
 
 
 # Import the functions under test

@@ -10,7 +10,7 @@ import pytest
 # go through xenon.db.engine.get_sync_engine().
 pytestmark = pytest.mark.committed_db
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
 from xenon.execution import orders_store
 from xenon.execution.orders_store import (

@@ -16,7 +16,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST
-from xenon.trade_blotter.blotter_service import IBFetcher, create_blotter_service
+from xenon.trade_blotter.blotter_service import create_blotter_service
 from xenon.trade_blotter.formatting import format_currency, format_pnl
 from xenon.trade_blotter.models import Trade, TradeBlotter
 

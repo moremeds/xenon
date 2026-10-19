@@ -7,7 +7,7 @@ distinguishing connection / ownership / ib_reject failures per SL §8.
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, call
 
 import pytest
 

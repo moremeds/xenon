@@ -10,6 +10,10 @@ All notable changes to Xenon are documented here. Format loosely based on
 - Wizard Risk Alert runs inside FastAPI as a lifespan task (`api/services/wizard_risk_alert.py`). Every 30 s it checks PROTECTED wizard sessions with an enabled alert against the signed combo net mid (ib_pool `data` role, snapshot quotes). It uses the old daemon rule (`net mid <= threshold`). A quote older than 2 min is a "no quote" state and never a trigger. The first crossing records `RISK_ALERT_CROSSED` in `xenon.wizard_events` (no write under `XENON_READ_ONLY=1`). The task never places, cancels or modifies an order. `GET /wizard/alerts` → `/api/wizard/alerts` feeds a new risk-alert banner in the workspace. Set `XENON_WIZARD_RISK_ALERT=0` to disable it.
 - `flex_token` field on `GET /health` and `/admin/operator` (IB Flex token expiry, same `data/flex_token_config.json` source and 30/14/7/1-day thresholds as the old daemon handler) and a Flex Token tile in the Operator console.
 
+### Changed
+
+- CI runs `ruff check --select F src scripts` (new `ruff-pyflakes` job, ruff from the locked `dev` extra). Unused imports, unused locals and placeholder-less f-strings are removed across `src/` and `scripts/` (PR-16, no behaviour change).
+
 ### Removed
 
 - Dead data-layer code (PR-14a): `db/queries/{orders,trades,wizard,regime_overrides,scans,uw,cache}.py`, the unused `portfolio` and `events` query functions and their tests (the test-only `futu_history` readers stay). Tables stay; a separate migration drops the signal tables.
@@ -87,6 +91,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 ### Fixed
 
 - xenon-api no longer stops answering every weekday from about 16:20 to 20:25 ET. The nightly Futu history sync called `FutuClient.connect()` on the event loop, and the futu SDK retries a refused OpenD forever, so every route (including `/options/greeks`) hung until the Colima watchdog restarted the VM. `connect()` now TCP-probes OpenD (3 s) and fails fast, and the loop runs its connect in a thread with a 30 s bound. While OpenD stays unreachable from the container, the nightly sync records an error instead of hanging.
+
 ## [0.8.3] — 2026-10-11
 
 ### Added
@@ -114,8 +119,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 - `POST /historical/bars` returns **504** when the IB request hits ib_async's 60 s timeout.
   ib_async cancels the request and returns `[]`, which used to surface as `200 {"bars": []}`
   (seen live: `USDCAD` `17 Y` daily MIDPOINT). Split long windows with `end_date_time`.
-## [0.8.1] — 2026-07-04
 
+## [0.8.1] — 2026-07-04
 
 ### Fixed
 
@@ -141,6 +146,7 @@ All notable changes to Xenon are documented here. Format loosely based on
   per-request timeout plus a reconnect reset prevent a stuck request from
   permanently blocking a symbol. During RTH nothing is stale, so no historical
   requests are issued and the live streaming `last` is never overridden.
+
 ## [0.8.0] — 2026-07-04
 
 ### Fixed

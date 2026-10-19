@@ -31,7 +31,6 @@ from xenon.clients.futu_statement_pdf import (
     _parse_statement_date,
     _to_decimal,
     decrypt,
-    inspect,
     parse,
 )
 

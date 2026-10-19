@@ -3,7 +3,6 @@
 import os
 from unittest.mock import patch
 
-import pytest
 
 from xenon.api.auth import API_KEY_ALLOWED_PATHS, verify_api_key
 

@@ -15,7 +15,6 @@ from datetime import date
 from typing import Any
 
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from xenon.db.schema import nav_history

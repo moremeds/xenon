@@ -7,7 +7,7 @@ client_factory) which sequences M3 → M4 → M5.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock
 

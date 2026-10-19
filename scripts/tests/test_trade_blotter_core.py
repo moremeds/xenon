@@ -5,11 +5,11 @@ Run with: uv run pytest scripts/tests/test_trade_blotter_core.py -v
 
 from datetime import datetime
 from decimal import Decimal
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 
-from xenon.trade_blotter.models import Execution, SecurityType, Side, Spread, Trade, TradeBlotter
+from xenon.trade_blotter.models import Execution, SecurityType, Side, Trade, TradeBlotter
 
 
 class TestExecution:

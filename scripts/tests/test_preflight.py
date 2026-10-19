@@ -11,7 +11,6 @@ from xenon.execution.preflight import (
     PortfolioView,
     PreflightRequest,
     ReasonCode,
-    Verdict,
     evaluate,
 )
 

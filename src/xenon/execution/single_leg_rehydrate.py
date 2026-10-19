@@ -25,7 +25,6 @@ from typing import Any, Callable, Literal
 
 from xenon.db.engine import get_sync_engine
 from xenon.db.queries import combo_wizard
-from xenon.execution import orders_store as _orders_store_mod
 from xenon.execution.trade_aggregator import aggregate_trade_from_fills
 
 PENDING_TIMEOUT_SECONDS = 60

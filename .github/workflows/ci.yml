@@ -176,6 +176,16 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - run: uv run --no-sync python scripts/release/version_sync_check.py
 
+  ruff-pyflakes:
+    # Pyflakes (F) rules: unused imports/variables, undefined names, f-strings
+    # without placeholders. ruff comes from the locked `dev` extra.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+      - name: Ruff --select F
+        run: uv run --frozen --extra dev ruff check --select F src scripts
+
   order-path-guards:
     # Layer 2 of docs/reference/order-path-incident-history.md.
     # Pure-stdlib Python — `uv run --no-sync` gives the repo-pinned interpreter

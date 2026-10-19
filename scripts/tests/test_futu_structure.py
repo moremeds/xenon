@@ -8,7 +8,6 @@ from decimal import Decimal
 
 from xenon.api.services.futu_structure import (
     build_blotter_rows,
-    classify_structure,
     group_closed_trades,
     parse_occ,
 )

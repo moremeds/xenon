@@ -5,9 +5,8 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
-from xenon.execution import orders_store
 from xenon.execution.orders_store import (
     RequestRow,
     apply_modify,

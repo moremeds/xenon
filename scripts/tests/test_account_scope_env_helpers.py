@@ -3,7 +3,6 @@
 Correction #18 (perf-rebuild plan): SIMULATE→"paper" (aligned with IB's
 existing account_env convention) NOT "sim".
 """
-import os
 
 import pytest
 

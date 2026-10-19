@@ -12,7 +12,7 @@ Result is a `date`, matching the CLI's `--since` arg shape.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from decimal import Decimal
 
 import pytest

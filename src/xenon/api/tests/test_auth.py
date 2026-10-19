@@ -4,7 +4,7 @@ import time
 import uuid
 
 # --- ws_ticket tests ---
-from xenon.api.ws_ticket import TICKET_TTL_SECONDS, _ticket_store, create_ticket, validate_ticket
+from xenon.api.ws_ticket import _ticket_store, create_ticket, validate_ticket
 
 
 class TestCreateTicket:
