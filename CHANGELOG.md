@@ -7,6 +7,10 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ### Removed
 
+- Dead data-layer code (PR-14a): `db/queries/{orders,trades,wizard,regime_overrides,scans,uw,cache}.py`, the unused `portfolio`/`futu_history`/`events` query functions and their tests. Tables stay; a separate migration drops the signal tables.
+- `reports/portfolio_performance.py`, `reports/performance_explainer_report.py`, the `reports/blotter.py` shim and `utils/price_cache.py`, with the `xenon-portfolio-perf`, `xenon-perf-explainer`, `xenon-presets` and `xenon-api` entry points. `fetch_ib_nav_series` and its Flex CSV/cash-flow helpers moved to `xenon.jobs.ib_nav_flex` (used by `xenon-nav-flex-refresh`). `xenon-portfolio-attrib` stays because `GET /attribution` has a web caller.
+- Dead utils: `env_loader`, `launchd_calendar`, `launchd_schedule`, `vectorized_greeks`, `presets`, and the write-only UW call-stats collector `uw_api_stats` (removed from `UWClient._get`). `utils/ib_connection.py` stays because `IBClient` imports `assert_broker_endpoint_allowed`.
+- `trade_blotter/test_integration.py` (live-IB probe that returned booleans). Unit tests moved to `scripts/tests/test_trade_blotter_core.py`; `run_pytest_affected.py` no longer special-cases `src/xenon/trade_blotter`.
 - `POST /ib/restart`, `POST /performance` and `POST /performance/background` (no caller in `web/` or `scripts/`; `GET /performance` and `GET /attribution` stay) and the FastAPI CORS middleware (the browser never calls FastAPI; Next.js proxies server-side).
 - `xenon-ib-execute` (`execution/ib_execute.py`), a parallel place-and-monitor path with no preflight, naked-short, quote, idempotency or read-only guard, and no in-repo caller. Place orders through `POST /orders/place`.
 - `execution/contract_normalize.py` (tests were its only importer) and `quote_guard.check()` (the server calls `check_market_hours` and `check_payload`).
@@ -15,6 +19,9 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ### Changed
 
+- Every `[project.scripts]` CLI answers `--help` with exit 0 and no side effects (`xenon-nav-flex-refresh`, `xenon-market-hours`, `xenon-ib-reconcile` and `xenon-ib-place-order` used to run their job; `xenon-api` started a server and is removed). A subprocess test (`scripts/tests/test_cli_help_inert.py`) pins this.
+- `xenon-portfolio-report` and `xenon-blotter` use the configured gateway port and `client_id="auto"` instead of 4001 / clientId 55 and 88. `xenon-portfolio-report` no longer reads `data/trade_log.json`; its thesis-check section and Kelly card are gone.
+- `xenon-nav-flex-refresh`, `xenon-futu-statement-sync` and `flex_divergence_check --apply` refuse to write under `XENON_READ_ONLY=1` (exit 3).
 - One shared `connect_ib` (`execution/ib_connect.py`) replaces the three copies in `ib_sync`, `ib_orders` and `ib_reconcile`. `ib_orders` now prints the `ib_sync` success and troubleshooting text.
 
 ### Fixed

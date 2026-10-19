@@ -5,7 +5,7 @@ Python execution, broker integration, portfolio reports — the installable `xen
 ## Data Sources
 
 1. **Interactive Brokers (TWS/Gateway)** — real-time quotes, chains, execution, live portfolio. Primary.
-2. **Unusual Whales (`$UW_TOKEN`)** — historic stock OHLC + option contract history for portfolio reports (`xenon-portfolio-perf`, `xenon-portfolio-report`). Data-source role only — signal generation was removed in the pure-portfolio pivot.
+2. **Unusual Whales (`$UW_TOKEN`)** — dark-pool flow for the `xenon-portfolio-report` HTML report. Data-source role only — signal generation was removed in the pure-portfolio pivot.
 3. **Futu OpenD** — read-only positions snapshot.
 4. **IB Flex Query** — historical fills audit overlay.
 
@@ -15,11 +15,9 @@ Python execution, broker integration, portfolio reports — the installable `xen
 
 **Futu (read-only):** `src/xenon/clients/futu_client.py` — positions snapshot from local Futu OpenD. Never write, never subscribe to market data. Server-side singleton with asyncio singleflight lock in `src/xenon/api/server.py` (`/futu/sync` / `/futu/portfolio`). Silent degrade when OpenD unreachable.
 
-## UW API Observability
+## UW Cache
 
-`src/xenon/utils/uw_api_stats.py` — thread-safe singleton that records every `UWClient._get()` call (latency, cache hits, retries, rate-limits, errors). Backed by the `xenon.uw_api_stats` Postgres table. UWClient is used in subprocess by portfolio-report CLIs; the stats persist across runs.
-
-`src/xenon/utils/uw_cache.py` is lock-protected because `UWClient._get` runs under `asyncio.to_thread()` and multiple evaluator threads hit the cache concurrently — **do not drop the lock**.
+`src/xenon/utils/uw_cache.py` is lock-protected because `UWClient._get` runs under `asyncio.to_thread()` and several threads hit the cache concurrently — **do not drop the lock**. The per-call UW stats collector (`uw_api_stats`) was removed; the `xenon.uw_api_stats` table is dropped in a separate migration.
 
 ## Database
 
@@ -27,7 +25,7 @@ Postgres is the primary persistence layer. `src/xenon/db/` owns:
 
 - `engine.py` — async SQLAlchemy engine for FastAPI plus sync psycopg engine for subprocess callers
 - `schema.py` — SQLAlchemy Core table definitions for `xenon.*` and `events.*`
-- `queries/` — focused query modules for portfolio, orders, trades, wizard, combo wizard
+- `queries/` — focused query modules: `portfolio` (latest payload), `blotter`, `journal`, `nav_history`, `futu_history`, `watchlist`, `combo_wizard`. Order state lives in `execution/orders_store.py`, not here
 - `events.py` — LISTEN/NOTIFY helpers and outbox consumption
 - `migrations/` — Alembic environment and migration versions
 
@@ -130,7 +128,7 @@ Python deps via **`uv`** (not pip). `pyproject.toml` defines `[project.optional-
 
 ```bash
 uv sync --extra test                  # install deps incl. test
-uv run xenon-portfolio-perf --json    # run any CLI entry point
+uv run xenon-market-hours             # run any CLI entry point (every one answers --help without side effects)
 uv run pytest -xvs <path>             # single test
 ```
 
@@ -138,13 +136,12 @@ CI uses `uv sync --frozen --extra test` then `uv run pytest` — affected-on-PR,
 
 ## Legacy data files
 
-Postgres is primary for portfolio, orders, NAV, trades, UW stats, and journal entries. Files under `data/` are backup or cache inputs unless a module explicitly documents otherwise.
+Postgres is primary for portfolio, orders, NAV, trades, and journal entries. Files under `data/` are backup or cache inputs unless a module explicitly documents otherwise.
 
 ## Commands
 
 | Command                   | Action                                                                |
 | ------------------------- | --------------------------------------------------------------------- |
-| `xenon-api`               | FastAPI server (`localhost:8321`) — used by `dev.sh`                  |
 | `xenon-ib-sync`           | Pull live portfolio + open orders from IB into Postgres               |
 | `xenon-ib-place-order`    | Subprocess placeholder for the place-order path                       |
 | `xenon-ib-order-manage`   | Subprocess for cancel/modify (uses original clientId)                 |
@@ -159,10 +156,11 @@ Postgres is primary for portfolio, orders, NAV, trades, UW stats, and journal en
 | `xenon-blotter-history`   | Historical trades (Flex Query)                                        |
 | `xenon-portfolio-report`  | HTML portfolio report                                                 |
 | `xenon-portfolio-attrib`  | P&L attribution (incl. Kelly calibration display fields)              |
-| `xenon-portfolio-perf`    | Performance computation (drawdown, return series, OHLC enrichment)    |
-| `xenon-perf-explainer`    | Performance-page HTML explainer                                       |
+| `xenon-nav-flex-refresh`  | Daily IB Flex NAV + cash-flow refresh into Postgres (READ_ONLY-guarded) |
+| `xenon-nav-reconcile`     | Read-only NAV reconciliation report                                   |
+| `xenon-futu-history-sync` | Futu trades / cash flows / orders history into Postgres               |
+| `xenon-futu-statement-sync` | Futu daily statements from Outlook into Postgres (READ_ONLY-guarded) |
 | `xenon-monitor-daemon`    | Position-rules + fill monitor + preset rebalance daemon               |
 | `xenon-position-rules`    | Position-close rule CLI                                               |
 | `xenon-preset-rebalance`  | Preset rebalance handler                                              |
 | `xenon-market-hours`      | Market-hours helper                                                   |
-| `xenon-presets`           | Preset list helper                                                    |
