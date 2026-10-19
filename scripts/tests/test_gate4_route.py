@@ -931,6 +931,106 @@ def test_not_placed_attempt_with_new_body_stays_body_mismatch(state, client, bro
     assert resp.status_code == 409 and resp.json()["reason_code"] == "ATTEMPT_BODY_MISMATCH", resp.text
 
 
+# Row 36: the live run (2026-10-19) killed a stock place after IB saw it; the
+# poller recovered the row by orderRef, and the open-order mirror then
+# replaced the stored leg with IB's view of a stock contract (right "?",
+# strike 0.0, a conId). An identical replay then failed the body match.
+def _stock_body(attempt, **over):
+    body = {
+        "client_attempt_id": attempt,
+        "type": "stock",
+        "symbol": "SPY",
+        "action": "BUY",
+        "quantity": 1,
+        "limitPrice": 1.00,
+        "tif": "DAY",
+    }
+    body.update(over)
+    return body
+
+
+def _ib_stock_open_order(submission_id):
+    """fetch_open_orders shape for the live order (IB reports a stock
+    contract with right "?" and strike 0.0)."""
+    from xenon.execution import orders_store
+
+    return {
+        "orderId": 21,
+        "permId": 1605763079,
+        "clientId": 29,
+        "orderRef": orders_store.order_ref_for(submission_id),
+        "account": SCOPE["broker_account"],
+        "action": "BUY",
+        "totalQuantity": 1.0,
+        "limitPrice": 1.0,
+        "tif": "DAY",
+        "status": "Submitted",
+        "contract": {"conId": 756733, "symbol": "SPY", "secType": "STK", "strike": 0.0, "right": "?", "expiry": None},
+    }
+
+
+def _poll_tick(monkeypatch, open_orders):
+    from xenon.api.services import ib_activity_mirror
+    from xenon.execution.account_scope import AccountScope
+
+    monkeypatch.setattr(ib_activity_mirror, "_fetch_open_orders", lambda c: list(open_orders))
+    monkeypatch.setattr(ib_activity_mirror, "_fetch_ib_executions", lambda c, lookback_days=7: [])
+    return ib_activity_mirror.run_activity_poll_tick(ib_client_factory=lambda: object(), scope=AccountScope(**SCOPE))
+
+
+def test_identical_replay_of_recovered_stock_attempt_is_idempotent(monkeypatch, client, broker_calls, fresh_quote):
+    """Uncertain place → poller recovery by orderRef → open-order mirror →
+    identical replay: the same idempotent answer as a normal duplicate
+    (WORKING → 200 duplicate; later CANCELLED → ATTEMPT_ID_TERMINAL), and
+    nothing reaches the broker again. New price / qty stay 409."""
+    from xenon.api.services import ib_activity_mirror
+
+    async def killed(entry: str, args: list, timeout: float = 30):
+        broker_calls.append({"entry": entry, "args": args})
+        return ScriptResult(ok=False, error="Entry point exited with code -9", exit_code=-9)
+
+    async def stock_quote(body: dict):
+        # Stub quote (no con_id in a stock body → the route qualifies first).
+        return 756733, {"bid": 4.90, "ask": 5.10, "bid_size": 100, "ask_size": 100}
+
+    monkeypatch.setattr(server_mod, "_fetch_order_quote_snapshot", stock_quote)
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", killed)
+    first = client.post("/orders/place", json=_stock_body("rt-rec-1"))
+    assert first.status_code == 502 and first.json()["reason_code"] == "PLACE_OUTCOME_UNKNOWN", first.text
+    sid = _submission_rows()[0]._mapping["submission_id"]
+
+    tick = _poll_tick(monkeypatch, [_ib_stock_open_order(sid)])
+    assert tick["order_ref_recovery"] == {"recovered": 1, "unresolved": 0}, tick
+    row = _submission_rows()[0]._mapping
+    assert (row["state"], row["perm_id"], row["ib_order_id"]) == ("WORKING", "1605763079", "21")
+    # The mirror owns the stored leg list: IB's stock sentinels are stored.
+    assert row["legs"]["legs"][0]["right"] == "?" and row["legs"]["legs"][0]["con_id"] == 756733
+
+    again = _place_again(client, broker_calls, _stock_body("rt-rec-1"))
+    assert again.status_code == 200, again.text
+    assert (again.json()["state"], again.json()["submission_id"]) == ("WORKING", sid)
+
+    for field, value in (("limitPrice", 1.01), ("quantity", 2), ("action", "SELL"), ("symbol", "QQQ")):
+        _already_placed(_place_again(client, broker_calls, _stock_body("rt-rec-1", **{field: value})))
+
+    # The order later disappears from IB (cancelled elsewhere): the sweep
+    # marks it CANCELLED after its one-tick grace.
+    monkeypatch.setattr(ib_activity_mirror, "_SWEEP_GRACE", set())
+    # Another (permId-less) open order keeps the snapshot non-empty without
+    # registering a second row.
+    other = [{"orderId": 888888, "account": SCOPE["broker_account"]}]
+    _poll_tick(monkeypatch, other)
+    _poll_tick(monkeypatch, other)
+    assert [r._mapping["state"] for r in _submission_rows()] == ["CANCELLED"]
+
+    terminal = _place_again(client, broker_calls, _stock_body("rt-rec-1"))
+    assert terminal.status_code == 409, terminal.text
+    assert (terminal.json()["reason_code"], terminal.json()["state"]) == ("ATTEMPT_ID_TERMINAL", "CANCELLED")
+    _already_placed(_place_again(client, broker_calls, _stock_body("rt-rec-1", limitPrice=1.01)))
+    assert len(broker_calls) == 1
+    assert len(_submission_rows()) == 1
+
+
 def test_modify_rejects_guarantee_mode_change(client, broker_calls):
     _place_bag(client, "rt-mod-flip-1")
 

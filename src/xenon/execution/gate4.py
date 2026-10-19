@@ -937,17 +937,28 @@ def _legs_for_body_match(legs_payload):
     state (pending amend, observed_qty, account provenance, IB-qualified
     tc/mult/und_sec/con_id) and must not turn an identical replay into a
     body mismatch.
+
+    A stock leg has no right / expiry / strike: the body never sets them,
+    while the open-order mirror stores IB's stock sentinels (right "?",
+    strike 0.0) once it owns the leg list (incident row 36). They are not
+    request terms, so a STK leg compares on its identity keys only.
     """
     if not isinstance(legs_payload, dict):
         return legs_payload
     legs = legs_payload.get("legs")
     if isinstance(legs, list):
-        legs = [{k: leg.get(k) for k in _REQUEST_LEG_KEYS} if isinstance(leg, dict) else leg for leg in legs]
+        legs = [_request_leg(leg) if isinstance(leg, dict) else leg for leg in legs]
     return {"legs": legs, "guaranteed": legs_payload.get("guaranteed")}
+
+
+def _request_leg(leg: dict) -> dict:
+    keys = _REQUEST_STK_LEG_KEYS if leg.get("sec") == "STK" else _REQUEST_LEG_KEYS
+    return {k: leg.get(k) if k in keys else None for k in _REQUEST_LEG_KEYS}
 
 
 # Leg fields the place body itself determines (the rest come from IB).
 _REQUEST_LEG_KEYS = ("action", "sym", "sec", "ratio", "right", "exp", "strike")
+_REQUEST_STK_LEG_KEYS = ("action", "sym", "sec", "ratio")
 
 
 ATTEMPT_ALREADY_PLACED = "ATTEMPT_ALREADY_PLACED"
