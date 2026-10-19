@@ -13,12 +13,6 @@ def test_xenon_metadata_has_expected_tables():
         "wizard_events",
         "wizard_combo_attempts",
         "wizard_protection",
-        "scan_results",
-        "cri_series",
-        "uw_analyze_snapshots",
-        "uw_flow_events",
-        "uw_api_stats",
-        "ticker_cache",
     }
     actual_names = {name.split(".")[-1] for name in xenon_metadata.tables.keys()}
     assert expected.issubset(actual_names), f"Missing: {expected - actual_names}"

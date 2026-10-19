@@ -32,11 +32,11 @@ def test_test_writes_are_invisible_after_rollback(pg_session):
     """
     pg_session.execute(
         text(
-            "INSERT INTO xenon.ticker_cache (ticker, cache_type, data) VALUES ('__phase2_isolation_probe__', 'phase2_test', '{}'::jsonb)"
+            "INSERT INTO xenon.user_watchlist (id, user_id, symbol) VALUES ('__phase2_isolation_probe__', 'phase2_test', 'PROBE')"
         )
     )
     seen = pg_session.execute(
-        text("SELECT count(*) FROM xenon.ticker_cache WHERE ticker = '__phase2_isolation_probe__'")
+        text("SELECT count(*) FROM xenon.user_watchlist WHERE id = '__phase2_isolation_probe__'")
     ).scalar()
     assert seen == 1, "INSERT was not visible inside its own transaction"
 
@@ -44,7 +44,7 @@ def test_test_writes_are_invisible_after_rollback(pg_session):
 def test_no_leak_from_previous_test(pg_session):
     """If the previous test's INSERT leaked, this test sees a row and fails."""
     leaked = pg_session.execute(
-        text("SELECT count(*) FROM xenon.ticker_cache WHERE ticker = '__phase2_isolation_probe__'")
+        text("SELECT count(*) FROM xenon.user_watchlist WHERE id = '__phase2_isolation_probe__'")
     ).scalar()
     assert leaked == 0, (
         "Previous test's INSERT leaked across the rollback boundary — pg_session txn rollback is broken."
@@ -66,14 +66,14 @@ def test_app_engine_writes_visible_inside_test_txn(app_engine_bound_to_test):
     with app_engine.connect() as conn:
         conn.execute(
             text(
-                "INSERT INTO xenon.ticker_cache (ticker, cache_type, data) VALUES ('__phase2_app_engine_probe__', 'phase2_test', '{}'::jsonb)"
+                "INSERT INTO xenon.user_watchlist (id, user_id, symbol) VALUES ('__phase2_app_engine_probe__', 'phase2_test', 'PROBE')"
             )
         )
         conn.commit()  # app code commits internally — must NOT escape the test txn
 
     # Visible inside the test's session because both share the connection
     seen = app_engine_bound_to_test.execute(
-        text("SELECT count(*) FROM xenon.ticker_cache WHERE ticker = '__phase2_app_engine_probe__'")
+        text("SELECT count(*) FROM xenon.user_watchlist WHERE id = '__phase2_app_engine_probe__'")
     ).scalar()
     assert seen == 1, (
         "App-engine commit was not visible to test session — "
