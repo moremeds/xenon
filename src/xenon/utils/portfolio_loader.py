@@ -85,7 +85,6 @@ def load_portfolio_payload_sync(*, scope: AccountScope | None = None) -> dict[st
 def load_account_snapshots_history_sync(*, scope: AccountScope, limit: int = 5) -> list[dict[str, Any]]:
     """Return the most recent N account_snapshots rows for the given scope, desc.
 
-    Sync mirror of `xenon.db.queries.portfolio.get_account_snapshots_history`.
     Used by sync subprocesses (ib_sync entry-date fallback) after the JSON
     cutoff — see the PG migration plan.
     """

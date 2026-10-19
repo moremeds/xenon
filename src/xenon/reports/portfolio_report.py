@@ -3,21 +3,20 @@
 Portfolio Report Generator — Full Status Report
 
 Connects directly to IB, fetches live prices + dark pool flow,
-computes P&L, thesis checks, risk flags, and generates a comprehensive
+computes P&L, risk flags, and generates a comprehensive
 HTML report that opens automatically in the browser.
 
 Uses the portfolio template at:
   .pi/skills/html-report/portfolio-template.html
 
-Sections (8 required):
+Sections:
   1. Header — status dot, status text, timestamp
-  2. Summary Metrics — 6 cards (net liq, P&L, deployed, margin, positions, kelly)
+  2. Summary Metrics — 6 cards (net liq, P&L, deployed, margin, positions)
   3. Quick-Stat Badges — expiring, at-stop, winners counts
   4. Attention Callouts — expiring, at-stop, winners, undefined risk
-  5. Thesis Check — entry flow vs current flow with today-highlighted sparklines
-  6. All Positions Table — sorted by DTE
-  7. Dark Pool Flow — all tickers with today-highlighted sparklines
-  8. Footer — data sources, summary
+  5. All Positions Table — sorted by DTE
+  6. Dark Pool Flow — all tickers with today-highlighted sparklines
+  7. Footer — data sources, summary
 
 Usage:
   xenon-portfolio-report              # Generate and open
@@ -26,7 +25,6 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import subprocess
 import sys
@@ -43,10 +41,9 @@ from typing import Any, Dict, List, Optional, Tuple
 PROJECT_DIR = Path(__file__).resolve().parents[3]
 _VENV_BIN = PROJECT_DIR / ".venv" / "bin"
 
-from xenon.clients.ib_client import DEFAULT_HOST
+from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 
 TEMPLATE_PATH = PROJECT_DIR / ".pi/skills/html-report/portfolio-template.html"
-TRADE_LOG_PATH = PROJECT_DIR / "data/trade_log.json"
 REPORTS_DIR = PROJECT_DIR / "reports"
 
 TODAY = date.today()
@@ -58,15 +55,11 @@ TODAY_STR = TODAY.strftime("%Y-%m-%d")
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def connect_ib(port: int = 4001, client_id: int = 55):
-    """Connect to IB Gateway/TWS."""
-    from ib_async import IB
-
-    from xenon.utils.ib_connection import assert_broker_endpoint_allowed
-
-    ib = IB()
-    assert_broker_endpoint_allowed(DEFAULT_HOST, port)
-    ib.connect(DEFAULT_HOST, port, clientId=client_id)
+def connect_ib(port: int = DEFAULT_GATEWAY_PORT):
+    """Connect to IB Gateway/TWS with an auto-allocated (subprocess-range) client id."""
+    client = IBClient()
+    client.connect(host=DEFAULT_HOST, port=port, client_id="auto")
+    ib = client.ib
     ib.reqMarketDataType(4)  # frozen data fallback
     return ib
 
@@ -436,14 +429,6 @@ def _multi_leg(sym, exp, legs):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def load_trade_log() -> Dict[str, Dict]:
-    if not TRADE_LOG_PATH.exists():
-        return {}
-    with open(TRADE_LOG_PATH) as f:
-        data = json.load(f)
-    return {t["ticker"]: t for t in data.get("trades", []) if t.get("decision") == "EXECUTED" and "close_date" not in t}
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # HTML HELPERS
 # ═══════════════════════════════════════════════════════════════════════════
@@ -489,12 +474,6 @@ def status_pill(pnl_pct, dte):
     return '<span class="pill">ACTIVE</span>'
 
 
-def thesis_pill(s):
-    m = {"INTACT": "positive", "WEAKENING": "warning", "BROKEN": "negative"}
-    cls = m.get(s, "")
-    return f'<span class="pill pill-{cls}">{s}</span>' if cls else f'<span class="pill">{s}</span>'
-
-
 def build_sparkline(days: List[Dict]) -> str:
     """Build a sparkline of flow bars. Today's bar gets the `today` CSS class
     which adds a white outline ring, making it instantly visible."""
@@ -534,43 +513,12 @@ def build_today_cell(today_data: Optional[Dict]) -> str:
     return f'<span class="flow-dir {cls}">{ratio:.0%}</span><span class="today-tag">LIVE</span>'
 
 
-def check_thesis(symbol: str, trade: Dict, flow: Dict) -> Tuple[str, str]:
-    """Compare entry flow to current flow."""
-    edge = trade.get("edge_analysis", {})
-    entry_type = edge.get("edge_type", "")
-    entry_dp_dir = edge.get("dp_flow", "")
-    current_dir = flow.get("direction", "NO_DATA")
-    current_ratio = flow.get("buy_ratio", 0)
-    today = flow.get("today")
-    today_dir = today["direction"] if today else "NO_DATA"
-    today_ratio = today["buy_ratio"] if today else 0
-
-    # IV plays — flow is context, not the edge
-    if "IV" in entry_type and "FLOW" not in entry_type:
-        return "INTACT", f"IV play — flow not required (currently {current_dir} {current_ratio:.0%})"
-
-    if entry_dp_dir == "ACCUMULATION":
-        if today_dir == "DISTRIBUTION":
-            return "BROKEN", f"Today DISTRIBUTION ({today_ratio:.0%}) — was ACCUMULATION at entry"
-        if today_dir == "NEUTRAL" and current_dir != "ACCUMULATION":
-            return "WEAKENING", f"Today NEUTRAL ({today_ratio:.0%}) — accumulation fading"
-        if current_dir == "ACCUMULATION":
-            return "INTACT", f"Still ACCUMULATION ({current_ratio:.0%}), today {today_ratio:.0%}"
-    if entry_dp_dir == "DISTRIBUTION":
-        if today_dir == "ACCUMULATION":
-            return "BROKEN", f"Today ACCUMULATION ({today_ratio:.0%}) — was DISTRIBUTION at entry"
-        if current_dir == "DISTRIBUTION":
-            return "INTACT", f"Still DISTRIBUTION ({current_ratio:.0%})"
-
-    return "INTACT", f"Current: {current_dir} ({current_ratio:.0%})"
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # HTML SECTION BUILDERS
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def build_metrics_html(account: Dict, grouped: List[Dict], trade_log: Dict) -> str:
+def build_metrics_html(account: Dict, grouped: List[Dict]) -> str:
     net_liq = float(account.get("NetLiquidation", 0))
     cash = float(account.get("TotalCashValue", 0))
     gross = float(account.get("GrossPositionValue", 0))
@@ -584,13 +532,6 @@ def build_metrics_html(account: Dict, grouped: List[Dict], trade_log: Dict) -> s
     defined = sum(1 for g in grouped if g["risk"] == "defined")
     undefined = sum(1 for g in grouped if g["risk"] == "undefined")
     equity = sum(1 for g in grouped if g["risk"] == "equity")
-
-    kelly_sizes = [
-        t.get("kelly_calculation", {}).get("actual_size_pct", 0)
-        for t in trade_log.values()
-        if t.get("kelly_calculation", {}).get("actual_size_pct")
-    ]
-    avg_kelly = sum(kelly_sizes) / len(kelly_sizes) if kelly_sizes else 0
 
     return f"""
       <div class="metric">
@@ -617,11 +558,6 @@ def build_metrics_html(account: Dict, grouped: List[Dict], trade_log: Dict) -> s
         <div class="metric-label">Positions</div>
         <div class="metric-value">{n}</div>
         <div class="metric-change">{defined} defined · {undefined} undefined · {equity} equity</div>
-      </div>
-      <div class="metric">
-        <div class="metric-label">Evaluated / Kelly</div>
-        <div class="metric-value">{len(kelly_sizes)}</div>
-        <div class="metric-change">Avg size: {avg_kelly:.1f}% · Cap: 2.5%</div>
       </div>
     """
 
@@ -686,52 +622,6 @@ def build_attention_html(grouped: List[Dict]) -> str:
     return "\n".join(parts)
 
 
-def build_thesis_html(grouped: List[Dict], trade_log: Dict, flow_data: Dict) -> str:
-    rows = []
-    for g in grouped:
-        sym = g["symbol"]
-        trade = trade_log.get(sym)
-        flow = flow_data.get(sym)
-        if not trade or not flow or flow.get("direction") in ("ERROR", "NO_DATA", "NO_TOKEN"):
-            continue
-        status, detail = check_thesis(sym, trade, flow)
-        edge_type = trade.get("edge_analysis", {}).get("edge_type", "N/A")[:32]
-        spark = build_sparkline(flow.get("days", []))
-        today = flow.get("today")
-        today_cell = build_today_cell(today)
-        rows.append(f"""
-        <tr>
-          <td><strong>{sym}</strong></td>
-          <td>{edge_type}</td>
-          <td>{spark}</td>
-          <td>{today_cell}</td>
-          <td class="text-center">{thesis_pill(status)}</td>
-          <td class="text-small">{detail}</td>
-        </tr>""")
-
-    if not rows:
-        return ""  # No logged positions with flow data — omit section
-
-    return f"""
-    <div class="section-header">🔬 Thesis Check — Entry Flow vs Current Flow</div>
-    <div class="panel">
-      <table>
-        <thead>
-          <tr>
-            <th>Ticker</th>
-            <th>Edge Type</th>
-            <th>5-Day Flow (→ Today)</th>
-            <th>Today</th>
-            <th class="text-center">Thesis</th>
-            <th>Detail</th>
-          </tr>
-        </thead>
-        <tbody>{"".join(rows)}</tbody>
-      </table>
-    </div>
-    """
-
-
 def build_positions_html(grouped: List[Dict]) -> str:
     rows = []
     for g in grouped:
@@ -785,7 +675,7 @@ def build_flow_html(grouped: List[Dict], flow_data: Dict) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def generate_report(grouped, account, flow_data, trade_log, timestamp, market_open) -> str:
+def generate_report(grouped, account, flow_data, timestamp, market_open) -> str:
     """Assemble the full report by filling in the template."""
     template = TEMPLATE_PATH.read_text()
 
@@ -822,10 +712,10 @@ def generate_report(grouped, account, flow_data, trade_log, timestamp, market_op
         "{{STATUS_TEXT}}": status_txt,
         "{{FRESHNESS_CLASS}}": freshness_cls,
         "{{FRESHNESS_TEXT}}": freshness_txt,
-        "{{METRICS_HTML}}": build_metrics_html(account, grouped, trade_log),
+        "{{METRICS_HTML}}": build_metrics_html(account, grouped),
         "{{QUICK_STATS_HTML}}": quick_html,
         "{{ATTENTION_HTML}}": build_attention_html(grouped),
-        "{{THESIS_SECTION_HTML}}": build_thesis_html(grouped, trade_log, flow_data),
+        "{{THESIS_SECTION_HTML}}": "",
         "{{POSITION_ROWS_HTML}}": build_positions_html(grouped),
         "{{FLOW_ROWS_HTML}}": build_flow_html(grouped, flow_data),
         "{{FOOTER_SUMMARY}}": f"{len(grouped)} positions · {fc(net_liq)} net liq · {deployed_pct:.0f}% deployed",
@@ -846,7 +736,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate portfolio HTML report with live IB data")
     parser.add_argument("--no-open", action="store_true", help="Don't open in browser")
     parser.add_argument("--sync", action="store_true", help="Also sync portfolio.json from IB")
-    parser.add_argument("--port", type=int, default=4001, help="IB port (default: 4001)")
+    parser.add_argument("--port", type=int, default=DEFAULT_GATEWAY_PORT, help="IB port (default: resolved from XENON_TRADING_MODE)")
     parser.add_argument("--output", type=str, help="Custom output path")
     args = parser.parse_args()
 
@@ -887,13 +777,9 @@ def main():
     has_today = sum(1 for v in flow_data.values() if v.get("today"))
     print(f"  ✓ {flow_ok}/{len(all_syms)} tickers | {has_today} include today's data")
 
-    # 4. Trade log
-    trade_log = load_trade_log()
-    print(f"  ✓ {len(trade_log)} open logged trades")
-
     # Generate
     print("[4/4] Generating HTML report...")
-    html = generate_report(grouped, account, flow_data, trade_log, timestamp, market_open)
+    html = generate_report(grouped, account, flow_data, timestamp, market_open)
 
     REPORTS_DIR.mkdir(exist_ok=True)
     out = Path(args.output) if args.output else REPORTS_DIR / f"portfolio-{TODAY_STR}.html"

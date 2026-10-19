@@ -57,7 +57,7 @@ def test_fetch_ib_nav_series_writes_source_close(monkeypatch, pg_test_engine):
     # so the binding read at call time is urllib.request.urlopen — patch the
     # module attr, not the local re-bind.
     with patch("urllib.request.urlopen", fake_urlopen), patch("time.sleep"):
-        from xenon.reports.portfolio_performance import fetch_ib_nav_series
+        from xenon.jobs.ib_nav_flex import fetch_ib_nav_series
 
         entries = fetch_ib_nav_series()
 
@@ -128,7 +128,7 @@ def test_fetch_ib_nav_series_csv_format_writes_source_close(monkeypatch, pg_test
         return _R(_SAMPLE_FLEX_CSV)
 
     with patch("urllib.request.urlopen", fake_urlopen), patch("time.sleep"):
-        from xenon.reports.portfolio_performance import fetch_ib_nav_series
+        from xenon.jobs.ib_nav_flex import fetch_ib_nav_series
 
         entries = fetch_ib_nav_series()
 

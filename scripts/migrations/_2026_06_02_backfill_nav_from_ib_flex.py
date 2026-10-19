@@ -213,7 +213,7 @@ def fetch_via_flex_api(scope: Any) -> int:
     if not os.environ.get("IB_FLEX_TOKEN") or not os.environ.get("IB_FLEX_NAV_QUERY_ID"):
         print("FLEX_NOT_CONFIGURED: missing IB_FLEX_TOKEN or IB_FLEX_NAV_QUERY_ID", file=sys.stderr)
         return 2
-    from xenon.reports.portfolio_performance import fetch_ib_nav_series
+    from xenon.jobs.ib_nav_flex import fetch_ib_nav_series
 
     print(f"scope: broker={scope.broker} env={scope.account_env} account={scope.broker_account}")
     print("polling IB Flex Web Service (up to 300s)...")

@@ -4,8 +4,7 @@
 Default behavior:
 - read changed files from `git diff --name-only <base>`
 - keep only repo-local Python files
-- map changed source files to matching tests under `scripts/tests/` and
-  `scripts/trade_blotter/`
+- map changed source files to matching tests under `scripts/tests/`
 - execute pytest only for those resolved targets
 
 The resolver is intentionally conservative:
@@ -25,7 +24,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-TEST_ROOTS = (ROOT / "scripts" / "tests", ROOT / "src" / "xenon" / "trade_blotter")
+TEST_ROOTS = (ROOT / "scripts" / "tests",)
 
 
 def _rel_repo_path(path: str | Path) -> Path | None:
@@ -45,9 +44,7 @@ def is_repo_python_file(path: str | Path) -> bool:
 
 
 def is_test_file(rel_path: Path) -> bool:
-    return rel_path.name.startswith("test_") and (
-        rel_path.parts[:2] == ("scripts", "tests") or rel_path.parts[:3] == ("src", "xenon", "trade_blotter")
-    )
+    return rel_path.name.startswith("test_") and rel_path.parts[:2] == ("scripts", "tests")
 
 
 def module_aliases(rel_path: Path) -> list[str]:
@@ -97,7 +94,6 @@ def resolve_pytest_targets(changed_files: list[str | Path]) -> list[str]:
         stem = rel.stem
         direct_candidates = [
             ROOT / "scripts" / "tests" / f"test_{stem}.py",
-            ROOT / "src" / "xenon" / "trade_blotter" / f"test_{stem}.py",
         ]
         for candidate in direct_candidates:
             if candidate.exists():

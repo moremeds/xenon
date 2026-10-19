@@ -42,11 +42,10 @@ dependencies = [
 ]
 
 [project.scripts]
-xenon-api                = "xenon.api.server:main"
 xenon-blotter            = "xenon.trade_blotter.cli:main"
 xenon-blotter-history    = "xenon.trade_blotter.flex_query:main"
 xenon-market-hours       = "xenon.utils.market_hours:main"
-xenon-presets            = "xenon.utils.presets:main"
+xenon-api                = "xenon.api.server:main"
 xenon-ib-place-order     = "xenon.execution.ib_place_order:main"
 xenon-ib-order-manage    = "xenon.execution.ib_order_manage:main"
 xenon-ib-orders          = "xenon.execution.ib_orders:main"
@@ -61,8 +60,6 @@ xenon-futu-history-sync  = "xenon.cli.futu_history_sync:main"
 xenon-futu-statement-sync = "xenon.cli.futu_statement_sync:main"
 xenon-portfolio-report   = "xenon.reports.portfolio_report:main"
 xenon-portfolio-attrib   = "xenon.reports.portfolio_attribution:main"
-xenon-portfolio-perf     = "xenon.reports.portfolio_performance:main"
-xenon-perf-explainer     = "xenon.reports.performance_explainer_report:main"
 xenon-nav-flex-refresh   = "xenon.jobs.nav_flex_refresh:main"
 xenon-nav-reconcile      = "xenon.jobs.nav_reconcile:main"
 

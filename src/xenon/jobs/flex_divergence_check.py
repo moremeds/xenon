@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import insert, select
 
+from xenon.api.guards import is_read_only
 from xenon.api.subprocess import run_module
 from xenon.db.engine import get_sync_engine
 from xenon.db.queries.blotter import compare_blotter_rows, fetch_blotter_pg
@@ -128,6 +129,15 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true", help="Insert a flex_divergence_runs row.")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
+
+    # --apply writes xenon.flex_divergence_runs. Refuse under XENON_READ_ONLY=1
+    # (a `dev.sh live` session must not write run rows). Dry run stays allowed.
+    if args.apply and is_read_only():
+        print(
+            "READ_ONLY: XENON_READ_ONLY=1 — refusing to --apply a flex_divergence_runs row.",
+            file=sys.stderr,
+        )
+        return 3
 
     scope = resolve_from_env()
     start_utc, end_utc = yesterday_session_window()

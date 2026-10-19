@@ -81,7 +81,7 @@ def test_fetch_ib_nav_series_ingests_cash_transactions(monkeypatch, pg_test_engi
     monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DUQ999999")
 
     with patch("urllib.request.urlopen", _fake_urlopen_factory(_MULTI_SECTION_CSV)), patch("time.sleep"):
-        from xenon.reports.portfolio_performance import fetch_ib_nav_series
+        from xenon.jobs.ib_nav_flex import fetch_ib_nav_series
 
         entries = fetch_ib_nav_series()
 
@@ -149,7 +149,7 @@ def test_fetch_ib_nav_series_no_cash_section_still_works(monkeypatch, pg_test_en
     monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DUQ999999")
 
     with patch("urllib.request.urlopen", _fake_urlopen_factory(nav_only)), patch("time.sleep"):
-        from xenon.reports.portfolio_performance import fetch_ib_nav_series
+        from xenon.jobs.ib_nav_flex import fetch_ib_nav_series
 
         entries = fetch_ib_nav_series()
 
@@ -170,7 +170,7 @@ def test_fetch_ib_nav_series_no_cash_section_still_works(monkeypatch, pg_test_en
 
 def test_split_ib_flex_csv_sections_handles_unquoted_headers():
     """The splitter must match both quoted and unquoted ClientAccountID headers."""
-    from xenon.reports.portfolio_performance import _split_ib_flex_csv_sections
+    from xenon.jobs.ib_nav_flex import _split_ib_flex_csv_sections
 
     body = (
         "ClientAccountID,ReportDate,Total\n"
@@ -186,7 +186,7 @@ def test_split_ib_flex_csv_sections_handles_unquoted_headers():
 
 def test_parse_cash_transactions_filters_non_deposit_rows():
     """Only Deposits/Withdrawals rows should round-trip; Dividends/Fees/etc must be filtered."""
-    from xenon.reports.portfolio_performance import _parse_ib_cash_transactions_section
+    from xenon.jobs.ib_nav_flex import _parse_ib_cash_transactions_section
 
     section = [
         '"ClientAccountID","Date/Time","Type","Description","Amount","CurrencyPrimary","Symbol","AssetClass","TransactionID"',
@@ -209,7 +209,7 @@ def test_parse_cash_transactions_account_filter_rejects_cross_scope():
     with the wrong scope. account_env mismatch is a silent corruption
     risk that broker_account scope columns exist specifically to prevent.
     """
-    from xenon.reports.portfolio_performance import _parse_ib_cash_transactions_section
+    from xenon.jobs.ib_nav_flex import _parse_ib_cash_transactions_section
 
     section = [
         '"ClientAccountID","Date/Time","Type","Description","Amount","CurrencyPrimary","Symbol","AssetClass","TransactionID"',
@@ -255,7 +255,7 @@ def test_fetch_ib_nav_series_skips_cross_account_rows(monkeypatch, pg_test_engin
     monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DUQ999999")
 
     with patch("urllib.request.urlopen", _fake_urlopen_factory(cross_account_csv)), patch("time.sleep"):
-        from xenon.reports.portfolio_performance import fetch_ib_nav_series
+        from xenon.jobs.ib_nav_flex import fetch_ib_nav_series
 
         entries = fetch_ib_nav_series()
 

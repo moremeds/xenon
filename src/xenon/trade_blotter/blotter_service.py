@@ -54,7 +54,7 @@ class IBFetcher(ExecutionFetcher):
     - Completed orders
     """
 
-    def __init__(self, host: str = DEFAULT_HOST, port: int = DEFAULT_GATEWAY_PORT, client_id: int = 90):
+    def __init__(self, host: str = DEFAULT_HOST, port: int = DEFAULT_GATEWAY_PORT, client_id: int | str = "auto"):
         self.host = host
         self.port = port
         self.client_id = client_id
@@ -342,7 +342,7 @@ def create_blotter_service(
     source: str = "ib",
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_GATEWAY_PORT,
-    client_id: int = 90,
+    client_id: int | str = "auto",
     flex_token: str = None,
     flex_query_id: str = None,
 ) -> BlotterService:
@@ -353,7 +353,7 @@ def create_blotter_service(
         source: "ib" for real-time or "flex" for historical
         host: IB Gateway/TWS host
         port: IB Gateway/TWS port
-        client_id: IB client ID
+        client_id: IB client ID, or "auto" for the subprocess range (default)
         flex_token: Flex Web Service token (for flex source)
         flex_query_id: Flex Query ID (for flex source)
     """

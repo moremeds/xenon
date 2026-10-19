@@ -4186,8 +4186,13 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
 
 
 def main() -> None:
+    import argparse
+
     import uvicorn
 
+    argparse.ArgumentParser(
+        prog="xenon-api", description="Run the FastAPI bridge on 127.0.0.1:8321 with reload (dev)."
+    ).parse_args()
     uvicorn.run(
         "xenon.api.server:app",
         host="127.0.0.1",

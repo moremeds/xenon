@@ -66,8 +66,9 @@ Surfaces that gate on the flag:
 - **FastAPI write routes** — return 403 early: `POST /orders/place`, `POST /orders/cancel`, `POST /orders/modify` (`server.py`), `POST /journal` (`routes/journal.py`). `GET` siblings stay open.
 - **Lifespan tasks** — `_run_rehydrate_on_boot`, `_run_fills_replay_on_boot`, and `_maybe_start_activity_poller` are skipped with a warning log when the flag is set. The Wizard Risk Alert still evaluates but records no event. The poller task handle on `app.state.ib_activity_poller_task` is `None` in that case; shutdown logic already tolerates `None`.
 - **Writer modules** — `xenon.execution.ib_sync._save_portfolio_to_postgres` and `_append_nav_snapshot` are no-ops. Any new persistence helper called from this package or from a subprocess CLI invoked by the lifespan must short-circuit on the flag, not silently write.
+- **Writer CLIs** — `xenon-nav-flex-refresh`, `xenon-futu-statement-sync` and `flex_divergence_check --apply` exit 3 with a `READ_ONLY:` message before any DB or broker work.
 
-Tests: `src/xenon/api/tests/test_read_only_mode.py` (routes), `scripts/tests/test_ib_sync_read_only.py` (writer no-ops).
+Tests: `src/xenon/api/tests/test_read_only_mode.py` (routes), `scripts/tests/test_ib_sync_read_only.py` (writer no-ops), `scripts/tests/test_writer_entry_points_read_only.py` (writer CLIs).
 
 ## Cancel / Modify Failure Propagation
 

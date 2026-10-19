@@ -4,7 +4,7 @@ Deterministic trade reconciliation and P&L calculation for Interactive Brokers.
 
 ## Features
 
-- **Real-time fills** via IB API (`blotter.py`)
+- **Real-time fills** via IB API (`blotter_service.py`, `cli.py`)
 - **Historical trades** via IB Flex Query (`flex_query.py`)
 - **Spread identification** (put spreads, call spreads, risk reversals, collars)
 - **Commission tracking** included in all P&L calculations
@@ -73,10 +73,10 @@ trade_blotter/
 ├── models.py           # Data models (Execution, Trade, Spread, TradeBlotter)
 ├── blotter_service.py  # IBFetcher, FlexQueryFetcher, BlotterService
 ├── cli.py              # CLI for real-time blotter
-├── flex_query.py       # CLI for historical data
-├── test_blotter.py     # Unit tests (25 tests)
-└── test_integration.py # Integration tests (4 tests)
+└── flex_query.py       # CLI for historical data
 ```
+
+Unit tests live in `scripts/tests/test_trade_blotter_core.py` (and sibling `test_blotter_*.py`).
 
 ## Data Models
 
@@ -121,21 +121,16 @@ All calculations use Python `Decimal` for precision.
 ## Testing
 
 ```bash
-# Unit tests
-cd scripts/trade_blotter
-python3.13 -m pytest test_blotter.py -v
-
-# Integration tests (requires IB connection)
-python3.13 test_integration.py
+uv run pytest scripts/tests/test_trade_blotter_core.py -v
 ```
 
 ## CLI Reference
 
-### blotter.py (real-time)
+### xenon-blotter (real-time)
 ```
 --host        IB host (default: 127.0.0.1)
---port        IB port (default: 4001)
---client-id   IB client ID (default: 88)
+--port        IB port (default: resolved from XENON_TRADING_MODE)
+--client-id   IB client ID (default: auto, subprocess range)
 --json        Output as JSON
 --summary     P&L summary only
 --verbose     Show execution details

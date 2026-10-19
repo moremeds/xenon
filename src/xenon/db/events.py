@@ -7,9 +7,8 @@ import re
 from typing import Callable
 
 import asyncpg
-from sqlalchemy import insert, select
+from sqlalchemy import insert
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import AsyncConnection
 
 from xenon.db.schema import outbox
 
@@ -26,20 +25,6 @@ def _validate_channel(channel: str) -> None:
         raise ValueError(f"Invalid NOTIFY channel: {channel!r}")
 
 
-async def emit(
-    conn: AsyncConnection,
-    *,
-    channel: str,
-    source: str,
-    payload: dict,
-) -> int:
-    _validate_channel(channel)
-    result = await conn.execute(
-        insert(outbox).values(channel=channel, source=source, payload=payload).returning(outbox.c.id)
-    )
-    return result.scalar()
-
-
 def emit_outbox_in_txn(
     conn: Connection,
     *,
@@ -51,18 +36,6 @@ def emit_outbox_in_txn(
     _validate_channel(channel)
     result = conn.execute(insert(outbox).values(channel=channel, source=source, payload=payload).returning(outbox.c.id))
     return int(result.scalar_one())
-
-
-async def get_events_since(
-    conn: AsyncConnection,
-    *,
-    channel: str,
-    since_id: int,
-    limit: int = 100,
-) -> list[dict]:
-    stmt = select(outbox).where(outbox.c.channel == channel, outbox.c.id > since_id).order_by(outbox.c.id).limit(limit)
-    result = await conn.execute(stmt)
-    return [dict(row._mapping) for row in result]
 
 
 class EventSubscriber:

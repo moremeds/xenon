@@ -406,6 +406,11 @@ def place_order(params: dict) -> dict:
 
 
 def main():
+    if {"-h", "--help"} & set(sys.argv[1:]):
+        print("usage: xenon-ib-place-order --json '{...}'")
+        print("Place one order from a JSON payload (symbol, action, quantity, limitPrice, ...).")
+        print("Normally invoked by the FastAPI order route, not by hand.")
+        return
     if "--json" not in sys.argv:
         print(json.dumps({"status": "error", "message": "Usage: --json '{...}'"}))
         sys.exit(1)

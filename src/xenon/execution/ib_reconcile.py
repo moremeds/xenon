@@ -15,6 +15,7 @@ Actions detected:
 - Closed positions still present in the latest snapshot
 """
 
+import argparse
 import hashlib
 import json
 import os
@@ -558,8 +559,12 @@ def generate_reconciliation_report(new_trades: list, discrepancies: dict) -> dic
     return report
 
 
-def main():
+def main(argv: list[str] | None = None):
     """Main reconciliation routine."""
+    argparse.ArgumentParser(
+        prog="xenon-ib-reconcile",
+        description="Reconcile the latest Postgres portfolio snapshot against IB positions and trades.",
+    ).parse_args(argv)
     log("Starting IB trade reconciliation...")
 
     # Paths

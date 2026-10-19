@@ -15,7 +15,7 @@ import sys
 from datetime import datetime
 from decimal import Decimal
 
-from xenon.clients.ib_client import DEFAULT_HOST
+from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST
 from xenon.trade_blotter.blotter_service import IBFetcher, create_blotter_service
 from xenon.trade_blotter.formatting import format_currency, format_pnl
 from xenon.trade_blotter.models import Trade, TradeBlotter
@@ -218,8 +218,10 @@ def blotter_to_dict(blotter: TradeBlotter) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Trade Blotter - IB Trade Reconciliation")
     parser.add_argument("--host", default=DEFAULT_HOST, help="IB Gateway/TWS host")
-    parser.add_argument("--port", type=int, default=4001, help="IB Gateway/TWS port")
-    parser.add_argument("--client-id", type=int, default=88, help="IB client ID")
+    parser.add_argument(
+        "--port", type=int, default=DEFAULT_GATEWAY_PORT, help="IB Gateway/TWS port (default: from XENON_TRADING_MODE)"
+    )
+    parser.add_argument("--client-id", default="auto", help='IB client ID, or "auto" (default) for the subprocess range')
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     parser.add_argument("--summary", action="store_true", help="Show P&L summary only")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show execution details")
@@ -232,7 +234,7 @@ def main():
             source="ib",
             host=args.host,
             port=args.port,
-            client_id=args.client_id,
+            client_id=int(args.client_id) if str(args.client_id).isdigit() else args.client_id,
         )
 
         blotter = service.build_blotter()

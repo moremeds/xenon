@@ -2,7 +2,7 @@
 
 Incident (INV-test-db-leak, 2026-10): local pytest runs wrote fixture rows
 (u1/a1, cid-W2, dev-probe/synthetic, DU0000000, ...) into prod ``core_dev``.
-Mechanism: an import-time singleton (``uw_api_stats.stats``) cached a sync
+Mechanism: an import-time singleton (``get_sync_engine()`` at module import) cached a sync
 engine bound to the ``.env`` DATABASE_URL during collection; the autouse
 fixtures kept that cached engine whenever the test DB looked "offline"; and
 "offline" was triggered by any TRUNCATE error or by a worker DB that could
