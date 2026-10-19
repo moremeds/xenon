@@ -22,7 +22,7 @@ import sys
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import select
 
@@ -30,6 +30,7 @@ from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HO
 from xenon.db.engine import get_sync_engine
 from xenon.db.schema import account_snapshots
 from xenon.execution.account_scope import AccountScope, resolve_from_env, row_in_account
+from xenon.execution.ib_connect import connect_ib
 from xenon.execution.orders_store import record_fill, update_fill_commission
 from xenon.execution.trade_aggregator import aggregate_trade_from_fills
 
@@ -42,17 +43,6 @@ def log(msg: str, level: str = "info"):
     timestamp = datetime.now().strftime("%H:%M:%S")
     prefix = {"info": "ℹ", "warn": "⚠", "error": "✗", "success": "✓"}.get(level, "•")
     print(f"[{timestamp}] {prefix} {msg}")
-
-
-def connect_ib(port: int = DEFAULT_GATEWAY_PORT, client_id: int = CLIENT_IDS["ib_reconcile"]) -> Optional[IBClient]:
-    """Connect to IB Gateway/TWS."""
-    try:
-        client = IBClient()
-        client.connect(host=DEFAULT_HOST, port=port, client_id=client_id)
-        return client
-    except Exception as e:
-        log(f"IB connection failed: {e}", "error")
-        return None
 
 
 def load_portfolio_snapshot(*, scope: AccountScope | None = None) -> dict:
@@ -583,7 +573,13 @@ def main():
         return
 
     # Connect to IB
-    client = connect_ib()
+    try:
+        client = connect_ib(
+            DEFAULT_HOST, DEFAULT_GATEWAY_PORT, CLIENT_IDS["ib_reconcile"], exit_on_failure=False, quiet=True
+        )
+    except Exception as e:
+        log(f"IB connection failed: {e}", "error")
+        client = None
     if not client:
         log("Cannot connect to IB Gateway - skipping reconciliation", "warn")
         return

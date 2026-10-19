@@ -381,7 +381,7 @@ async def _restart_docker() -> Dict:
 
     For running containers, issue docker compose restart. Docker's own
     restart: unless-stopped policy handles crash recovery — this is only
-    for explicit user-initiated restarts via POST /ib/restart.
+    for explicit user-initiated restarts.
     """
     container_state, _ = await _docker_container_state()
 
@@ -492,7 +492,7 @@ async def ensure_ib_gateway() -> Dict:
 
 
 async def restart_ib_gateway() -> Dict:
-    """Restart IB Gateway. Used by POST /ib/restart and recovery paths."""
+    """Restart IB Gateway. Used by recovery paths."""
     async with _restart_lock:
         if is_cloud_mode():
             return {

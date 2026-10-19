@@ -74,23 +74,6 @@ class TestSubscriptionTracking:
 
         assert len(client._subscriptions) == 2
 
-    @patch("xenon.clients.ib_client.IB")
-    def test_clear_subscriptions(self, MockIB):
-        """clear_subscriptions should empty the tracking list."""
-        mock_ib = MockIB.return_value
-        mock_ib.isConnected.return_value = True
-        mock_ib.reqMktData.return_value = MagicMock()
-
-        client = IBClient()
-        client.connect(client_id=1)
-
-        client.get_quote(MagicMock(), snapshot=False)
-        assert len(client._subscriptions) == 1
-
-        client.clear_subscriptions()
-        assert len(client._subscriptions) == 0
-
-
 # ---------------------------------------------------------------------------
 # Disconnect handler
 # ---------------------------------------------------------------------------

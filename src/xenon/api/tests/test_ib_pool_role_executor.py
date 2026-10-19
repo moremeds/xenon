@@ -170,7 +170,7 @@ async def test_run_sync_after_connect_runs_on_same_thread(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_disconnect_all_then_connect_all_succeeds(monkeypatch):
-    """The /ib/restart endpoint and the auto-restart wrapper both call
+    """The auto-restart wrapper calls
     disconnect_all() then connect_all() on the SAME pool instance. If
     disconnect_all leaves executors in a shut-down state, the next
     connect_all hits ``RuntimeError: cannot schedule new futures after
@@ -251,7 +251,6 @@ def test_acquire_callers_dispatch_via_run_sync_not_to_thread():
 
     # Each entry: (callable, expected role for run_sync dispatch)
     targets = [
-        (server_mod._fetch_ib_expiry_candidates, "data"),
         (server_mod._fetch_quote_snapshot, "data"),
         (server_mod._fetch_order_quote_snapshot, "data"),
         (server_mod._qualify_order_con_id, "data"),

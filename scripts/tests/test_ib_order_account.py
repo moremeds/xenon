@@ -95,39 +95,13 @@ def test_modify_keeps_existing_order_account(MockIB):
     order = _new_order("U2222222")
     order.orderId = 42
 
-    client.modify_order(MagicMock(), order, lmt_price=1.5)
     # ib_order_manage's modify path calls place_order directly with trade.order.
     client.place_order(MagicMock(), order)
 
-    assert mock_ib.placeOrder.call_count == 2
-    for call in mock_ib.placeOrder.call_args_list:
-        assert call.args[1].account == "U2222222"
-        assert call.args[1].orderId == 42
-
-
-@patch("xenon.clients.ib_client.IB")
-def test_bracket_order_stamps_account_on_every_leg(MockIB):
-    client, mock_ib = _connected_client(MockIB, ["U1111111", "U2222222"])
-    legs = [_new_order(), _new_order(), _new_order()]
-    for i, leg in enumerate(legs, start=1):
-        leg.orderId = i  # ib.bracketOrder pre-assigns order ids
-    mock_ib.bracketOrder.return_value = legs
-
-    client.place_bracket_order(MagicMock(), "BUY", 1, 1.0, 2.0, 0.5, account="U2222222")
-
-    assert mock_ib.placeOrder.call_count == 3
-    assert [c.args[1].account for c in mock_ib.placeOrder.call_args_list] == ["U2222222"] * 3
-
-
-@patch("xenon.clients.ib_client.IB")
-def test_bracket_order_unmanaged_account_places_nothing(MockIB):
-    client, mock_ib = _connected_client(MockIB, ["U1111111", "U2222222"])
-    mock_ib.bracketOrder.return_value = [_new_order(), _new_order(), _new_order()]
-
-    with pytest.raises(IBOrderAccountError):
-        client.place_bracket_order(MagicMock(), "BUY", 1, 1.0, 2.0, 0.5, account="U9999999")
-
-    mock_ib.placeOrder.assert_not_called()
+    mock_ib.placeOrder.assert_called_once()
+    sent = mock_ib.placeOrder.call_args.args[1]
+    assert sent.account == "U2222222"
+    assert sent.orderId == 42
 
 
 # ---------------------------------------------------------------------------
@@ -265,17 +239,3 @@ def test_combo_wizard_adapter_stamps_account(monkeypatch):
 
     _, order = ib.place_order.call_args.args
     assert order.account == "U2222222"
-
-
-def test_ib_execute_stamps_env_scope_account(monkeypatch):
-    from xenon.execution import ib_execute
-
-    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
-    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU0000000")
-    executor = ib_execute.OrderExecutor("127.0.0.1", 4002, 1)
-    executor.client = MagicMock()
-
-    executor.place_order(MagicMock(), "BUY", 1, 1.0)
-
-    _, order = executor.client.place_order.call_args.args
-    assert order.account == "DU0000000"

@@ -337,7 +337,7 @@ specific broker account.
 - **FastAPI routes:** `AccountScope.resolve_from_app_state(app.state)`
   reads `app.state.{trading_mode, account}` populated by the lifespan guard.
   Helper: `xenon.api.guards.get_account_scope` (FastAPI dependency).
-- **Sync subprocesses (`ib_sync`, `ib_execute`, monitor daemons):**
+- **Sync subprocesses (`ib_sync`, monitor daemons):**
   `resolve_from_env()` reads `XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`.
   The IB sync path should set `XENON_BROKER_ACCOUNT` from
   `managedAccounts()[0]` at connect time.

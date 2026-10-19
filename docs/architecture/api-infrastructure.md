@@ -18,7 +18,7 @@ Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xeno
 
 | File                   | Purpose                                                                                                                                    |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `server.py`            | 26 endpoints, CORS, Clerk JWT auth middleware, IB pool, health, auto-restart. `POST /performance/background` = fire-and-forget, 202, dedup |
+| `server.py`            | Endpoints, Clerk JWT auth middleware, IB pool, health, auto-restart. Server-to-server only: no CORS middleware |
 | `auth.py`              | Clerk JWT verification — JWKS validation, single-tenant allowlist (`ALLOWED_USER_IDS`), graceful bypass when unconfigured                  |
 | `ws_ticket.py`         | Short-lived single-use WS tickets (30s TTL) — avoids passing JWTs in WebSocket URLs                                                        |
 | `ib_pool.py`           | Role-based IB pool (sync/orders/data), auto-reconnect                                                                                      |
@@ -59,7 +59,7 @@ All FastAPI routes are protected by Clerk JWT middleware. Next.js routes are pro
 
 ## IB Gateway Auto-Recovery
 
-Startup: check port 4001 + CLOSE_WAIT detection (`lsof`), restart if needed, poll 45s. Runtime: IB subprocess errors trigger Gateway health check FIRST — only restart if port not listening or CLOSE_WAIT detected. Subprocess failures from client ID collisions, VOL errors, or transient timeouts do NOT trigger restart. Restart script snapshots pre-existing PIDs and only force-kills those that survived SIGTERM (prevents killing newly-spawned processes). Manual: `POST /ib/restart`. Health: `GET /health` returns `upstream_dead: true` when CLOSE_WAIT detected.
+Startup: check port 4001 + CLOSE_WAIT detection (`lsof`), restart if needed, poll 45s. Runtime: IB subprocess errors trigger Gateway health check FIRST — only restart if port not listening or CLOSE_WAIT detected. Subprocess failures from client ID collisions, VOL errors, or transient timeouts do NOT trigger restart. Restart script snapshots pre-existing PIDs and only force-kills those that survived SIGTERM (prevents killing newly-spawned processes). Health: `GET /health` returns `upstream_dead: true` when CLOSE_WAIT detected.
 
 ### Health Check
 
@@ -80,7 +80,7 @@ Gateway runs on a Hetzner VM accessible via Tailscale MagicDNS at `ib-gateway:40
 
 **VPS IB Gateway GUI requirement:** "Allow connections from localhost only" must be **unchecked** in Configure → API → Settings (via VNC at `localhost:5900`). This setting persists in the Docker volume. Without it, Tailscale connections are rejected with `ECONNRESET`.
 
-**Cloud mode behavior:** Health check = TCP port probe only. No local restart, no CLOSE_WAIT detection, no docker/launchd lifecycle management. `POST /ib/restart` returns 503 with "manage it on the remote host". Stale tick detection in the WS relay disconnects and reconnects (no restart attempt).
+**Cloud mode behavior:** Health check = TCP port probe only. No local restart, no CLOSE_WAIT detection, no docker/launchd lifecycle management. `restart_ib_gateway` restarts nothing and returns `restarted: False`, `gateway_mode: "cloud"` and an error telling the operator to manage it on the remote host. Stale tick detection in the WS relay disconnects and reconnects (no restart attempt).
 
 **Management commands** (local Mac via Tailscale SSH, or directly on VPS):
 

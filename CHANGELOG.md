@@ -5,6 +5,18 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+### Removed
+
+- `POST /ib/restart`, `POST /performance` and `POST /performance/background` (no caller in `web/` or `scripts/`; `GET /performance` and `GET /attribution` stay) and the FastAPI CORS middleware (the browser never calls FastAPI; Next.js proxies server-side).
+- `xenon-ib-execute` (`execution/ib_execute.py`), a parallel place-and-monitor path with no preflight, naked-short, quote, idempotency or read-only guard, and no in-repo caller. Place orders through `POST /orders/place`.
+- `execution/contract_normalize.py` (tests were its only importer) and `quote_guard.check()` (the server calls `check_market_hours` and `check_payload`).
+- Twelve `IBClient` methods with no prod caller: `reconnect`, `clear_subscriptions`, `get_portfolio`, `get_account_summary`, `get_pnl_single`, `place_bracket_order`, `modify_order`, `get_open_trades`, `get_trades`, `get_order_status`, `get_option_price`, `wait_for_fill`.
+- Dead `server.py` helpers: the internals-skew expiry cluster (it called three undefined functions), `_SCAN_TYPE_MAP`, `_coerce_float`, `_series_span_days`, `_empty_discover_payload`, `_empty_cri_payload`, the route-level `app.state.broker` branches on `/orders/place` and `/orders/replace` (`ensure_order_allowed` stays the single broker guard), unused imports, and `perf_cache.warm`.
+
+### Changed
+
+- One shared `connect_ib` (`execution/ib_connect.py`) replaces the three copies in `ib_sync`, `ib_orders` and `ib_reconcile`. `ib_orders` now prints the `ib_sync` success and troubleshooting text.
+
 ### Fixed
 
 - `deploy/compose.prod.yml`: the realtime service now sets `WS_HOST=0.0.0.0`. Since 0.9.0 the relay binds `127.0.0.1` by default, so inside the container the published port refused argon, apex and the browser. The web healthcheck now probes `/` instead of the removed `/sign-in` page. Prod was hot-fixed with the same two lines on 2026-10-19.
