@@ -4,11 +4,9 @@ All tests mock ib_async.IB so no real IB connection is needed.
 Follows Red/Green TDD: tests written first, implementation follows.
 """
 
-import asyncio
 import logging
-import math
 from datetime import datetime
-from unittest.mock import MagicMock, PropertyMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -424,7 +422,7 @@ class TestOrderOperations:
 
         client = IBClient()
         client.connect(client_id=0)
-        result = client.cancel_order(trade.order)
+        client.cancel_order(trade.order)
 
         mock_ib.cancelOrder.assert_called_once_with(trade.order)
 
@@ -518,7 +516,6 @@ class TestMarketData:
 
         # snapshot=True should be passed through
         mock_ib.reqMktData.assert_called_once()
-        call_args = mock_ib.reqMktData.call_args
         # Snapshot is a positional or keyword arg
         assert quote is not None
 
@@ -703,7 +700,7 @@ class TestFlexQuery:
 
         client = IBClient()
         client.connect(client_id=1)
-        result = client.run_flex_query(query_id=123456, token="test_token")
+        client.run_flex_query(query_id=123456, token="test_token")
 
         MockFlexReport.assert_called_once_with(token="test_token", queryId=123456)
 

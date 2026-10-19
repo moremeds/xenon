@@ -18,7 +18,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from xenon.execution.universe import UNIVERSE, is_index, is_known
+from xenon.execution.universe import is_index, is_known
 
 
 class ReasonCode(StrEnum):

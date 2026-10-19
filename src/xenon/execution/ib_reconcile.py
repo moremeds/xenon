@@ -18,9 +18,7 @@ Actions detected:
 import argparse
 import hashlib
 import json
-import os
-import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -625,7 +623,7 @@ def main(argv: list[str] | None = None):
 
         # Log summary
         if report["needs_attention"]:
-            log(f"⚠️  Reconciliation needed:", "warn")
+            log("⚠️  Reconciliation needed:", "warn")
             if new_trades:
                 log(f"   • {len(new_trades)} new trades to log", "warn")
                 for t in new_trades:

@@ -6,7 +6,6 @@ import pytest
 from xenon.execution.universe import (
     INDEX_UNIVERSE,
     UNIVERSE,
-    UniverseEntry,
     get_multiplier,
     is_index,
     is_known,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 from decimal import Decimal
 from typing import Any

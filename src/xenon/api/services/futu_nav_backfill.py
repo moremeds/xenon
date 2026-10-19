@@ -30,18 +30,15 @@ from __future__ import annotations
 
 import logging
 import re
-from collections import defaultdict, deque
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
 
-import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from xenon.api.services.futu_closed_trades import match_closed_lots
 from xenon.db.queries.futu_history import list_cashflows, list_trades
-from xenon.db.schema import nav_history
 from xenon.execution.account_scope import AccountScope
 
 logger = logging.getLogger(__name__)

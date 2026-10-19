@@ -22,7 +22,6 @@ import asyncio
 import os
 from datetime import date
 
-import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 

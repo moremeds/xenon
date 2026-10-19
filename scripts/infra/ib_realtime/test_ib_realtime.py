@@ -14,7 +14,6 @@ import asyncio
 import json
 import sys
 from datetime import datetime
-from typing import Optional
 
 # Test results tracking
 class TestResults:
@@ -219,7 +218,7 @@ async def test_websocket_server(server_url: str):
                 else:
                     results.fail("Subscribe confirmation", "Never received")
                 if got_price:
-                    results.ok("Price update", f"AAPL received")
+                    results.ok("Price update", "AAPL received")
                 else:
                     results.fail("Price update", "Never received")
                     
@@ -276,7 +275,7 @@ async def test_websocket_server(server_url: str):
                         msg = await asyncio.wait_for(ws.recv(), timeout=2)
                         data = json.loads(msg)
                         if data.get("type") == "error":
-                            results.ok("Error handling", f"Got error for invalid action")
+                            results.ok("Error handling", "Got error for invalid action")
                             got_error = True
                             break
                     except asyncio.TimeoutError:

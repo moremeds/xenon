@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
-from typing import Iterable, Optional
+from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 

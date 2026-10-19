@@ -14,7 +14,7 @@ from sqlalchemy import desc, select
 
 from xenon.api.guards import get_broker_scope
 from xenon.db.engine import get_sync_engine
-from xenon.db.schema import futu_order_fees, futu_orders, futu_trades, order_fills, order_submissions
+from xenon.db.schema import futu_orders, futu_trades, order_fills, order_submissions
 from xenon.execution.account_scope import AccountScope
 
 router = APIRouter()

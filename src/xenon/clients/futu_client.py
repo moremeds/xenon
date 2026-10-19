@@ -639,7 +639,6 @@ class FutuClient:
             raise FutuDataError("accinfo_query returned empty DataFrame")
 
         row = data.iloc[0]
-        get = self._safe_float
         maybe = self._maybe_float
 
         # Capture every column Futu returns so the TS adapter can map fields

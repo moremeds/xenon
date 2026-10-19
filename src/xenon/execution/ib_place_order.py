@@ -14,10 +14,9 @@ import json
 import os
 import re
 import sys
-from pathlib import Path
 
 try:
-    from ib_async import ComboLeg, Contract, LimitOrder, Option, OrderStatus, Stock, TagValue, util
+    from ib_async import ComboLeg, Contract, LimitOrder, Option, OrderStatus, Stock, TagValue
 except ImportError:
     print(json.dumps({"status": "error", "message": "ib_async not installed"}))
     sys.exit(1)

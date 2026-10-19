@@ -16,7 +16,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, insert, text
+from sqlalchemy import create_engine, insert
 
 from xenon.db.schema import account_snapshots
 

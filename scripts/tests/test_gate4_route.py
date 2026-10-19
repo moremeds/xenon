@@ -25,7 +25,7 @@ from sqlalchemy import create_engine, select, text
 from xenon._test_db import sync_test_db_url as _sync_url
 from xenon.api import server as server_mod
 from xenon.api.subprocess import ScriptResult
-from xenon.db.schema import account_snapshots, order_submissions
+from xenon.db.schema import order_submissions
 
 SCOPE = {"broker": "IB", "account_env": "paper", "broker_account": "DU0000000"}
 NOW = datetime.now(timezone.utc)

@@ -14,7 +14,6 @@ event loop ``_connect_in_thread`` set up stays current for every later call.
 
 from __future__ import annotations
 
-import asyncio
 import threading
 from unittest.mock import MagicMock
 

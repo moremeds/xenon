@@ -424,7 +424,6 @@ def test_insufficient_shares_when_working_sell_exists(client, monkeypatch, tmp_p
     consumes held shares. With held=100 and a PENDING sell of 100 in the
     store, a new SELL 1 SPY must BLOCK with INSUFFICIENT_SHARES.
     """
-    import json as _json
 
     _insert_portfolio_snapshot(
         {

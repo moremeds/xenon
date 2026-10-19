@@ -10,7 +10,7 @@ Validates that:
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -243,7 +243,7 @@ class TestRandomizedStart:
 
     def test_auto_allocate_start_varies(self):
         """Multiple auto-allocate calls should not always start at the same ID."""
-        from xenon.clients.ib_client import IBClient, SUBPROCESS_ID_RANGE
+        from xenon.clients.ib_client import IBClient
 
         observed_first_ids = set()
         for _ in range(20):

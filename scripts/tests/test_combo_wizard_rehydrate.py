@@ -9,7 +9,6 @@ reached ratio * totalQuantity.
 
 from __future__ import annotations
 
-import os
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -28,7 +27,6 @@ pytestmark = pytest.mark.committed_db
 from sqlalchemy import create_engine, text
 
 from xenon.db.queries import combo_wizard as cwq
-from xenon.execution import orders_store
 from xenon.execution.combo_wizard import rehydrate as wiz_rehydrate
 
 # --------------------------------------------------------------------------

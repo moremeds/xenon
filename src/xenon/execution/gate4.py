@@ -64,7 +64,6 @@ from xenon.execution import coverage, orders_store
 from xenon.execution.orders_store import (
     ATTEMPT_BODY_MISMATCH,
     RequestRow,
-    _canon_json,
     _request_body_matches,
     ensure_writable,
 )

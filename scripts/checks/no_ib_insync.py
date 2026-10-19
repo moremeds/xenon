@@ -111,7 +111,7 @@ def main() -> int:
         return 0
 
     print("FAIL: ib_insync references found in active code or current docs.")
-    print(f"      Migrate these to ib_async (PR #81 migrated the project on 2026-05-03).")
+    print("      Migrate these to ib_async (PR #81 migrated the project on 2026-05-03).")
     print()
     print(f"{len(violations)} violation(s):")
     for rel, lineno, line in violations:

@@ -6,7 +6,6 @@ via client_factory) so no live OpenD is required.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest

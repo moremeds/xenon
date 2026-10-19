@@ -5,11 +5,11 @@ All tests mock ib_async.IB — no real IB connection needed.
 """
 
 import logging
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from xenon.clients.ib_client import IBClient, IBConnectionError
+from xenon.clients.ib_client import IBClient
 
 # Mock-transport tests — bypass the broker *boundary* check; the socket
 # denylist still refuses any real dial.

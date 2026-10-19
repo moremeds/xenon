@@ -1,6 +1,4 @@
 """Tests for pure functions in ib_orders.py and ib_sync.py."""
-import math
-import pytest
 from unittest.mock import MagicMock
 
 from xenon.execution.ib_orders import (

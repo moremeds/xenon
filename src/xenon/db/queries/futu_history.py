@@ -16,7 +16,7 @@ server-side after settlement).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Iterable, Sequence
+from typing import Iterable, Sequence
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert

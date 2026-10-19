@@ -1,4 +1,3 @@
-import pytest
 
 from xenon.db.queries import watchlist
 

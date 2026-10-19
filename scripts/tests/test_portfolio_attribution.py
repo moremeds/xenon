@@ -8,11 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from xenon.reports.portfolio_attribution import (
     classify_trade,
-    classify_edge_type,
     build_attribution,
-    _is_closed,
-    _get_pnl,
-    _get_risk_type,
 )
 
 

@@ -1,5 +1,4 @@
 """Tests for trade_blotter formatting — verify single source of truth."""
-import pytest
 from decimal import Decimal
 
 

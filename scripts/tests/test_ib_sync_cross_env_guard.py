@@ -1,6 +1,6 @@
 """ib_sync._append_nav_snapshot cross-env guard (Decisions §13 + correction #2)."""
 
-from datetime import date, datetime
+from datetime import datetime
 
 import pytest
 # Phase 2 carve-out: this module's tests open their own SQLAlchemy engine

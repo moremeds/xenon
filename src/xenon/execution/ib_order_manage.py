@@ -18,7 +18,6 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Iterator, Literal, NoReturn, Optional
 
 from xenon.clients.ib_client import (

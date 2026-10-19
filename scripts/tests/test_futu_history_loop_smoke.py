@@ -12,8 +12,6 @@ including disposal on the way out.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
-from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pytest

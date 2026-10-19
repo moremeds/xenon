@@ -3,12 +3,10 @@
 RED/GREEN TDD: All tests written first, then client implemented.
 Uses unittest.mock to avoid any real API calls.
 """
-import json
 import os
-import time
 
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 from xenon.clients.uw_client import (
     UWClient,

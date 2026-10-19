@@ -27,7 +27,7 @@ import os
 import sys
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional
 from urllib.error import HTTPError, URLError
@@ -65,7 +65,7 @@ class FlexQueryFetcher:
 
     def fetch_executions(self, days_back: int = 30) -> List[Execution]:
         """Fetch executions from Flex Query."""
-        print(f"Requesting Flex Query report...")
+        print("Requesting Flex Query report...")
 
         # Step 1: Request the report
         request_url = f"{self.FLEX_SERVICE_URL}.SendRequest"

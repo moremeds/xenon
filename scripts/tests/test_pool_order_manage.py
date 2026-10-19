@@ -5,7 +5,7 @@ connection (clientId=0, master) instead of spawning subprocess scripts.
 Master client can manage ALL orders regardless of which clientId placed them.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 import pytest
 
 
@@ -197,7 +197,7 @@ class TestPoolModifyOrder:
         client.get_open_orders.side_effect = [[trade], [modified]]
         client.ib.client.clientId = 0
 
-        result = await pool_modify_order(
+        await pool_modify_order(
             client, order_id=10, perm_id=12345, new_quantity=50
         )
         # Verify the VOL fields were reset before place_order was called

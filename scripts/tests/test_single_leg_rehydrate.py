@@ -23,7 +23,7 @@ pytestmark = pytest.mark.committed_db
 
 from sqlalchemy import create_engine, text
 
-from xenon.execution import orders_store, single_leg_rehydrate
+from xenon.execution import orders_store
 from xenon.execution.orders_store import RequestRow, init_store, reserve_attempt
 from xenon.execution.single_leg_rehydrate import (
     ReconcileDecision,
@@ -442,7 +442,7 @@ def test_rehydrate_qualifies_leg_contracts_when_metadata_missing(db_path):
     Unknown / Long Unknown Unknown)' for any combo whose close happened
     while Xenon was down.
     """
-    sid = _make_working_row(
+    _make_working_row(
         db_path,
         ticker="SPX",
         perm_id="P-bag-enrich",
