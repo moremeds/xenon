@@ -253,6 +253,14 @@ def test_incomplete_observation_fails_closed():
     assert "view_incomplete" in out.reasons
 
 
+@pytest.fixture(autouse=True)
+def _market_closed(monkeypatch):
+    """Pin the staleness clock: gate4 uses a 300 s limit in RTH and 1800 s
+    otherwise, so fixtures dated "5 minutes ago" passed only outside market
+    hours. Tests that exercise staleness set the CLOSED limit explicitly."""
+    monkeypatch.setattr(gate4, "_market_open_now", lambda: False)
+
+
 def test_snapshot_missing_observation_fails_closed():
     # Pre-PR-03b snapshot: pass never attested read completeness.
     _seed_snapshot({"positions": [_stock("SPY", 100)]})
