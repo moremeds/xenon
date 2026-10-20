@@ -39,13 +39,15 @@ def main():
     parser.add_argument("--symbol", required=True)
     parser.add_argument("--expiry", default=None, help="If provided, fetch strikes for this expiry")
     parser.add_argument("--port", type=int, default=4001)
-    parser.add_argument("--client-id", type=int, default=27)
+    parser.add_argument(
+        "--client-id", type=int, default=None, help="Explicit clientId (default: base + 27, see CLIENT_IDS)"
+    )
     args = parser.parse_args()
 
     client = IBClient()
 
     try:
-        client.connect(port=args.port, client_id=args.client_id)
+        client.connect(port=args.port, client_id=args.client_id, client_name="ib_option_chain")
 
         # Qualify the underlying to get a valid conId (required by reqSecDefOptParams)
         contract, sec_type = underlying_contract(args.symbol)

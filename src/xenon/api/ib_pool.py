@@ -1,7 +1,8 @@
 """IB connection pool with role-based persistent connections.
 
 Maintains long-lived IBClient connections keyed by role (sync, orders, data).
-Each role maps to a specific client_id as defined in IBClient.CLIENT_IDS.
+Each role maps to ``XENON_IB_CLIENT_ID_BASE`` + its ``POOL_ROLES`` offset; only
+this module opens those ids (``IBClient.connect(pool_role=...)``).
 asyncio.Lock per role ensures serialized access (IB socket is not concurrent-safe).
 """
 
@@ -18,7 +19,15 @@ from typing import Any, Callable, Dict, Iterator, Optional
 
 logger = logging.getLogger("xenon.ib_pool")
 
-from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST, POOL_ROLES, IBClient
+from xenon.clients.ib_client import (
+    DEFAULT_GATEWAY_PORT,
+    DEFAULT_HOST,
+    POOL_ROLES,
+    READINESS_UNKNOWN,
+    IBClient,
+    client_id_base,
+    pool_client_id,
+)
 
 # ---------------------------------------------------------------------------
 # Owner-clientId registry (F5)
@@ -72,11 +81,76 @@ def acquire_owner(client_id: int, timeout_ms: int = 2000) -> Iterator[None]:
             _busy_owners.discard(client_id)
 
 
+# Database names that identify the production stack. Base 0 (the prod clientId
+# block) belongs to the prod DB only; every other DB must use another base.
+PROD_DATABASE_NAMES = frozenset({"core_dev"})
+
+
+def _database_name(database_url: Optional[str]) -> Optional[str]:
+    if not database_url:
+        return None
+    try:
+        from sqlalchemy.engine import make_url
+
+        url = make_url(database_url)
+    except Exception:  # noqa: BLE001 — unparseable: unknown, treated as non-prod
+        return None
+    override = url.query.get("dbname")
+    if isinstance(override, (tuple, list)):
+        override = override[-1] if override else None
+    return override or url.database
+
+
+def check_client_id_base_mapping(database_url: Optional[str], *, test_session: bool = False) -> int:
+    """Refuse an unsafe ``XENON_IB_CLIENT_ID_BASE`` ↔ database pairing (A5).
+
+    Called once at API startup, before the pool connects.
+
+    - prod DB (``core_dev``) → base must be 0;
+    - any other DB, or none → base must not be 0, so a dev API never opens
+      the prod pool ids (3/4/5) on a shared gateway (``dev.sh`` exports 100).
+
+    ``test_session`` (the pytest broker guard, ``XENON_TEST_BROKER_GUARD=1``)
+    allows base 0 with a non-prod DB: the guard already refuses every gateway
+    but the local paper one. This is an operational contract, not fencing —
+    two environments that share a base can still collide.
+
+    Returns the base; raises ``RuntimeError`` on a mismatch.
+    """
+    base = client_id_base()
+    dbname = _database_name(database_url)
+    if dbname in PROD_DATABASE_NAMES:
+        if base != 0:
+            raise RuntimeError(
+                f"XENON_IB_CLIENT_ID_BASE={base} with the prod database {dbname!r}: "
+                "the prod stack uses base 0 — refusing to start"
+            )
+        return base
+    if base == 0 and not test_session:
+        raise RuntimeError(
+            f"XENON_IB_CLIENT_ID_BASE=0 (prod clientId block) with non-prod database {dbname!r}: "
+            "set another base (dev.sh exports 100) — refusing to start"
+        )
+    return base
+
+
+def _role_for_client_id(client_id: int) -> str:
+    for role in POOL_ROLES:
+        if pool_client_id(role) == client_id:
+            return role
+    raise ValueError(f"clientId {client_id} is not a pool role id in this environment")
+
+
 def _connect_in_thread(host: str, port: int, client_id: int, timeout: int = 5) -> IBClient:
-    """Connect an IBClient in a thread with its own event loop.
+    """Connect a pool-role IBClient in a thread with its own event loop.
 
     ib_async needs an event loop in the connecting thread. When called
     from asyncio.to_thread(), the thread has no loop by default.
+
+    After the socket is up the connection starts at broker readiness
+    ``unknown``; one open-orders round trip (A4) runs here, on the same
+    thread, so a healthy gateway reports ``ready`` at once and a gateway in
+    an outage stays ``unknown``. A failed round trip never fails the connect.
     """
     import asyncio as _aio
 
@@ -86,7 +160,8 @@ def _connect_in_thread(host: str, port: int, client_id: int, timeout: int = 5) -
         _aio.set_event_loop(_aio.new_event_loop())
 
     client = IBClient()
-    client.connect(host=host, port=port, client_id=client_id, timeout=timeout)
+    client.connect(host=host, port=port, client_id=client_id, timeout=timeout, pool_role=_role_for_client_id(client_id))
+    client.confirm_broker_ready()
     return client
 
 
@@ -164,7 +239,8 @@ class IBPool:
 
         status = {}
         loop = asyncio.get_running_loop()
-        for i, (role, client_id) in enumerate(POOL_ROLES.items()):
+        for i, role in enumerate(POOL_ROLES):
+            client_id = pool_client_id(role)
             # IB Gateway rate-limits rapid successive connections — stagger by 1s
             if i > 0:
                 await asyncio.sleep(1)
@@ -256,7 +332,7 @@ class IBPool:
             if self.is_connected(role):
                 return self._clients[role]
 
-            client_id = POOL_ROLES[role]
+            client_id = pool_client_id(role)
             try:
                 client = _connect_in_thread(self._host, self._port, client_id, 5)
             except Exception as exc:
@@ -280,7 +356,7 @@ class IBPool:
 
     async def _reconnect(self, role: str) -> bool:
         """Attempt to reconnect a disconnected role on its pinned worker."""
-        client_id = POOL_ROLES[role]
+        client_id = pool_client_id(role)
         loop = asyncio.get_running_loop()
         try:
             client = await loop.run_in_executor(
@@ -323,12 +399,24 @@ class IBPool:
             functools.partial(fn, *args, **kwargs),
         )
 
+    def broker_readiness(self, role: str) -> str:
+        """Broker readiness of a role's connection (A4), separate from the socket.
+
+        ``unknown`` whenever the socket is down or no client exists — a socket
+        replacement always restarts at ``unknown``.
+        """
+        if not self.is_connected(role):
+            return READINESS_UNKNOWN
+        state = getattr(self._clients.get(role), "broker_readiness", READINESS_UNKNOWN)
+        return state if isinstance(state, str) else READINESS_UNKNOWN
+
     def status(self) -> dict:
         """Return pool status for health endpoint."""
         return {
             role: {
                 "connected": self.is_connected(role),
-                "client_id": POOL_ROLES[role],
+                "broker_readiness": self.broker_readiness(role),
+                "client_id": pool_client_id(role),
             }
             for role in POOL_ROLES
         }

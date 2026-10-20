@@ -32,7 +32,7 @@ class TestSubscriptionTracking:
         mock_ib.reqMktData.return_value = MagicMock()
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         contract = MagicMock()
         client.get_quote(contract, snapshot=False, generic_ticks="233")
@@ -50,7 +50,7 @@ class TestSubscriptionTracking:
         mock_ib.reqMktData.return_value = MagicMock()
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         contract = MagicMock()
         client.get_quote(contract, snapshot=True)
@@ -65,7 +65,7 @@ class TestSubscriptionTracking:
         mock_ib.reqMktData.return_value = MagicMock()
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         c1, c2, c3 = MagicMock(), MagicMock(), MagicMock()
         client.get_quote(c1, snapshot=False)
@@ -90,7 +90,7 @@ class TestDisconnectHandler:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         # Simulate disconnect — reconnect succeeds on first try
         mock_ib.connect.reset_mock()
@@ -107,7 +107,7 @@ class TestDisconnectHandler:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         # Make reconnect fail repeatedly, then succeed
         mock_ib.connect.reset_mock()
@@ -135,7 +135,7 @@ class TestDisconnectHandler:
         mock_ib.reqMktData.return_value = MagicMock()
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         # Add subscriptions
         c1 = MagicMock()
@@ -162,7 +162,7 @@ class TestDisconnectHandler:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         # Manually set flag
         client._reconnecting = True
@@ -181,7 +181,7 @@ class TestDisconnectHandler:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         # All reconnect attempts fail
         mock_ib.connect.reset_mock()
@@ -200,7 +200,7 @@ class TestDisconnectHandler:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         mock_ib.connect.reset_mock()
         client._on_disconnect()
@@ -215,7 +215,7 @@ class TestDisconnectHandler:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         mock_ib.connect.reset_mock()
         mock_ib.connect.side_effect = ConnectionRefusedError("refused")
@@ -233,7 +233,7 @@ class TestDisconnectHandler:
         mock_ib.reqMktData.return_value = MagicMock()
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         c1 = MagicMock()
         client.get_quote(c1, snapshot=False)
@@ -252,7 +252,7 @@ class TestDisconnectHandler:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         # All reconnect attempts fail
         mock_ib.connect.reset_mock()

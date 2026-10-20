@@ -25,7 +25,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
+from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient, client_id_base
 from xenon.db.engine import get_sync_engine
 from xenon.db.schema import account_snapshots
 from xenon.execution.account_scope import AccountScope, resolve_from_env, row_in_account
@@ -578,7 +578,11 @@ def main(argv: list[str] | None = None):
     # Connect to IB
     try:
         client = connect_ib(
-            DEFAULT_HOST, DEFAULT_GATEWAY_PORT, CLIENT_IDS["ib_reconcile"], exit_on_failure=False, quiet=True
+            DEFAULT_HOST,
+            DEFAULT_GATEWAY_PORT,
+            client_id_base() + CLIENT_IDS["ib_reconcile"],
+            exit_on_failure=False,
+            quiet=True,
         )
     except Exception as e:
         log(f"IB connection failed: {e}", "error")

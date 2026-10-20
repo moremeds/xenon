@@ -28,7 +28,7 @@ def _connected_client(MockIB, managed: list[str]) -> tuple[IBClient, MagicMock]:
     mock_ib.managedAccounts.return_value = list(managed)
     mock_ib.placeOrder.side_effect = lambda contract, order: SimpleNamespace(order=order, contract=contract)
     client = IBClient()
-    client.connect(client_id=2)
+    client.connect(client_id=92)
     return client, mock_ib
 
 

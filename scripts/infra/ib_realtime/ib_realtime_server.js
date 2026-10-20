@@ -56,6 +56,7 @@ import { LRUCache } from "../../lib/lru-cache.js";
 import { RateLimiter } from "../../lib/rate-limiter.js";
 import { createSubscriberRegistry } from "./subscriber_registry.js";
 import { authorizeUpgrade } from "./ws_upgrade_auth.js";
+import { resolveRelayClientIds } from "./client_id_zone.js";
 
 const DEFAULT_WS_PORT = 8765;
 const DEFAULT_IB_HOST = process.env.IB_GATEWAY_HOST || "127.0.0.1";
@@ -81,7 +82,7 @@ function parseArgs(argv) {
     port: DEFAULT_WS_PORT,
     ibHost: DEFAULT_IB_HOST,
     ibPort: DEFAULT_IB_PORT,
-    ibClientId: 10, // RELAY_ID_RANGE start (10-19)
+    ibClientId: null, // default XENON_IB_CLIENT_ID_BASE + 10 (relay zone +10-19)
     verbose: false,
   };
 
@@ -263,11 +264,13 @@ function verbose(...args) {
   if (cli.verbose) console.log(`\x1b[90m[verbose]\x1b[0m`, ...args);
 }
 
-const IB_CLIENT_ID_POOL = [
-  cli.ibClientId,
-  cli.ibClientId + 1,
-  cli.ibClientId + 2,
-];
+let IB_CLIENT_ID_POOL;
+try {
+  IB_CLIENT_ID_POOL = resolveRelayClientIds({ env: process.env, cliClientId: cli.ibClientId });
+} catch (error) {
+  console.error(`FATAL: ${error.message}`);
+  process.exit(2);
+}
 let activeClientIdIndex = 0;
 
 let ib = createIBClient(IB_CLIENT_ID_POOL[0]);

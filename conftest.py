@@ -78,6 +78,12 @@ os.environ.setdefault("XENON_AUTH_ALLOW_DEV_OPEN", "1")
 # `.env` carries `live`, which must never leak into test children.
 os.environ["XENON_TRADING_MODE"] = "paper"
 
+# PR-10 clientId block: pin base 0 so a shell that exported dev.sh's 100 does
+# not shift every expected id. Tests that need another base set it per test.
+# The API startup base↔DB check accepts base 0 with the test DB only while
+# XENON_TEST_BROKER_GUARD=1 (below) — the scoped test mapping.
+os.environ["XENON_IB_CLIENT_ID_BASE"] = "0"
+
 # Test-session broker guard: activates the boundary allowlist in
 # `xenon.utils.ib_connection` and both socket layers for the whole process.
 # Hard-set at import — before collection, fixtures, or test-module imports —
@@ -91,9 +97,7 @@ os.environ["XENON_TEST_BROKER_GUARD"] = "1"
 _BROKER_GUARD_DIR = str(Path(__file__).resolve().parent / "scripts" / "tests" / "broker_guard")
 _pythonpath = os.environ.get("PYTHONPATH", "")
 if _BROKER_GUARD_DIR not in _pythonpath.split(os.pathsep):
-    os.environ["PYTHONPATH"] = (
-        _BROKER_GUARD_DIR + os.pathsep + _pythonpath if _pythonpath else _BROKER_GUARD_DIR
-    )
+    os.environ["PYTHONPATH"] = _BROKER_GUARD_DIR + os.pathsep + _pythonpath if _pythonpath else _BROKER_GUARD_DIR
 
 # Broker API ports: IB Gateway live 4001 / paper 4002, TWS live 7496 /
 # paper 7497. While the guard env is set, a dial to any of them on any host

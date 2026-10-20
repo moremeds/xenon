@@ -218,19 +218,29 @@ class TestExplicitClientId:
             assert cid == 99
 
     def test_client_name_lookup_still_works(self):
-        """client_name should resolve to the registry value."""
-        from xenon.clients.ib_client import IBClient, POOL_ROLES
+        """client_name resolves to base + the registry offset."""
+        from xenon.clients.ib_client import CLIENT_IDS, IBClient
 
         client = IBClient()
         mock_ib = MagicMock()
         client._ib = mock_ib
 
-        client.connect(client_name="sync", timeout=1)
+        client.connect(client_name="fetch_analyst_ratings", timeout=1)
 
         called_id = mock_ib.connect.call_args[1].get("clientId")
         if called_id is None:
             called_id = mock_ib.connect.call_args[0][2]
-        assert called_id == POOL_ROLES["sync"]
+        assert called_id == CLIENT_IDS["fetch_analyst_ratings"]
+
+    def test_pool_role_name_is_not_a_client_name(self):
+        """PR-10 / A5: a pool role name no longer resolves outside the pool."""
+        from xenon.clients.ib_client import IBClient
+
+        client = IBClient()
+        client._ib = MagicMock()
+        with pytest.raises(ValueError, match="Unknown client name"):
+            client.connect(client_name="sync", timeout=1)
+        client._ib.connect.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -280,3 +290,157 @@ class TestPoolRoles:
         lo, hi = POOL_ID_RANGE
         for role, cid in POOL_ROLES.items():
             assert lo <= cid <= hi
+
+
+# ---------------------------------------------------------------------------
+# 5. PR-10 / A5 — XENON_IB_CLIENT_ID_BASE zones, enforced at IBClient.connect
+# ---------------------------------------------------------------------------
+
+
+def _mock_client():
+    from xenon.clients.ib_client import IBClient
+
+    client = IBClient()
+    client._ib = MagicMock()
+    return client
+
+
+def _called_id(client):
+    call = client._ib.connect.call_args
+    return call[1].get("clientId") if call[1].get("clientId") is not None else call[0][2]
+
+
+class TestClientIdBaseZones:
+    @pytest.mark.parametrize("raw", ["50", "900", "-100", "abc", "1e2", "150"])
+    def test_invalid_base_is_refused_before_connect(self, monkeypatch, raw):
+        from xenon.clients.ib_client import ClientIdNotAllowed
+
+        monkeypatch.setenv("XENON_IB_CLIENT_ID_BASE", raw)
+        client = _mock_client()
+        with pytest.raises(ClientIdNotAllowed):
+            client.connect(client_id="auto", timeout=1)
+        client._ib.connect.assert_not_called()
+
+    @pytest.mark.parametrize(("raw", "base"), [(None, 0), ("", 0), ("0", 0), ("100", 100), (" 800 ", 800)])
+    def test_base_values(self, monkeypatch, raw, base):
+        from xenon.clients.ib_client import client_id_base
+
+        if raw is None:
+            monkeypatch.delenv("XENON_IB_CLIENT_ID_BASE", raising=False)
+        else:
+            monkeypatch.setenv("XENON_IB_CLIENT_ID_BASE", raw)
+        assert client_id_base() == base
+
+    @pytest.mark.parametrize(("base", "role", "expected"), [("0", "orders", 4), ("100", "orders", 104), ("100", "sync", 103), ("800", "data", 805)])
+    def test_pool_role_connect_uses_base_offset(self, monkeypatch, base, role, expected):
+        monkeypatch.setenv("XENON_IB_CLIENT_ID_BASE", base)
+        client = _mock_client()
+        client.connect(pool_role=role, timeout=1)
+        assert _called_id(client) == expected
+
+    def test_pool_role_with_wrong_id_is_refused(self, monkeypatch):
+        from xenon.clients.ib_client import ClientIdNotAllowed
+
+        monkeypatch.setenv("XENON_IB_CLIENT_ID_BASE", "100")
+        client = _mock_client()
+        with pytest.raises(ClientIdNotAllowed, match="must use clientId 104"):
+            client.connect(client_id=4, pool_role="orders", timeout=1)
+        with pytest.raises(ClientIdNotAllowed, match="never 'auto'"):
+            client.connect(client_id="auto", pool_role="orders", timeout=1)
+        client._ib.connect.assert_not_called()
+
+    @pytest.mark.parametrize("cid", [0, 3, 4, 5, 9])
+    def test_pool_zone_ids_refused_without_pool_role(self, monkeypatch, cid):
+        """Only the pool may open pool ids — incl. master clientId 0 at base 0."""
+        from xenon.clients.ib_client import ClientIdNotAllowed
+
+        monkeypatch.delenv("XENON_IB_CLIENT_ID_BASE", raising=False)
+        client = _mock_client()
+        with pytest.raises(ClientIdNotAllowed, match="pool zone"):
+            client.connect(client_id=cid, timeout=1)
+        client._ib.connect.assert_not_called()
+
+    @pytest.mark.parametrize(("base", "cid"), [("0", 10), ("0", 12), ("0", 19), ("100", 110), ("100", 119)])
+    def test_explicit_relay_id_from_python_is_refused(self, monkeypatch, base, cid):
+        from xenon.clients.ib_client import ClientIdNotAllowed
+
+        monkeypatch.setenv("XENON_IB_CLIENT_ID_BASE", base)
+        client = _mock_client()
+        with pytest.raises(ClientIdNotAllowed, match="relay zone"):
+            client.connect(client_id=cid, timeout=1)
+        client._ib.connect.assert_not_called()
+
+    @pytest.mark.parametrize("cid", [4, 26, 99, 204, 990, 999])
+    def test_other_environment_ids_refused(self, monkeypatch, cid):
+        """At base 100 the prod block (0-99), other blocks and 900+ are off limits."""
+        from xenon.clients.ib_client import ClientIdNotAllowed
+
+        monkeypatch.setenv("XENON_IB_CLIENT_ID_BASE", "100")
+        client = _mock_client()
+        with pytest.raises(ClientIdNotAllowed, match="outside this environment"):
+            client.connect(client_id=cid, timeout=1)
+        client._ib.connect.assert_not_called()
+
+    @pytest.mark.parametrize("cid", [120, 126, 149, 150, 199])
+    def test_own_block_non_pool_ids_allowed(self, monkeypatch, cid):
+        monkeypatch.setenv("XENON_IB_CLIENT_ID_BASE", "100")
+        client = _mock_client()
+        client.connect(client_id=cid, timeout=1)
+        assert _called_id(client) == cid
+
+    def test_auto_allocates_inside_the_base_block(self, monkeypatch):
+        monkeypatch.setenv("XENON_IB_CLIENT_ID_BASE", "100")
+        seen = set()
+        for _ in range(30):
+            client = _mock_client()
+            client.connect(client_id="auto", timeout=1)
+            seen.add(_called_id(client))
+        assert seen and all(120 <= cid <= 149 for cid in seen)
+
+    def test_client_name_resolves_relative_to_base(self, monkeypatch):
+        monkeypatch.setenv("XENON_IB_CLIENT_ID_BASE", "100")
+        client = _mock_client()
+        client.connect(client_name="ib_option_chain", timeout=1)
+        assert _called_id(client) == 127
+
+    @pytest.mark.parametrize("name", ["ib_sync", "ib_orders", "cri_scanner", "ib_realtime_server"])
+    def test_registry_names_in_pool_or_relay_zone_are_refused(self, monkeypatch, name):
+        from xenon.clients.ib_client import ClientIdNotAllowed
+
+        monkeypatch.delenv("XENON_IB_CLIENT_ID_BASE", raising=False)
+        client = _mock_client()
+        with pytest.raises(ClientIdNotAllowed):
+            client.connect(client_name=name, timeout=1)
+        client._ib.connect.assert_not_called()
+
+    @patch("xenon.clients.ib_client.time.sleep")
+    def test_reconnect_rechecks_allocation(self, _sleep, monkeypatch):
+        """_on_disconnect goes through the same check (A5: reconnects covered)."""
+        from xenon.clients.ib_client import ClientIdNotAllowed
+
+        monkeypatch.delenv("XENON_IB_CLIENT_ID_BASE", raising=False)
+        client = _mock_client()
+        client.connect(client_id=91, timeout=1)
+        client._ib.connect.reset_mock()
+        monkeypatch.setenv("XENON_IB_CLIENT_ID_BASE", "100")
+        with pytest.raises(ClientIdNotAllowed):
+            client._on_disconnect()
+        client._ib.connect.assert_not_called()
+
+    @patch("xenon.clients.ib_client.time.sleep")
+    def test_pool_reconnect_keeps_its_pool_role(self, _sleep, monkeypatch):
+        monkeypatch.setenv("XENON_IB_CLIENT_ID_BASE", "100")
+        client = _mock_client()
+        client.connect(pool_role="orders", timeout=1)
+        client._ib.connect.reset_mock()
+        client._on_disconnect()
+        assert _called_id(client) == 104
+
+    def test_order_manage_classifies_refused_owner_id_as_ownership(self):
+        """A subprocess asked to reconnect as a pool/relay/other-base owner id
+        is refused locally and maps to 409 ownership, never a connect."""
+        from xenon.clients.ib_client import ClientIdNotAllowed
+        from xenon.execution.ib_order_manage import classify_failure
+
+        assert classify_failure(None, ClientIdNotAllowed("clientId 4 is in the pool zone")) == "ownership"
+

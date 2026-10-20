@@ -50,7 +50,8 @@ from xenon.api.guards import (
     require_mode_verified,
 )
 from xenon.api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_mode, is_docker_mode, restart_ib_gateway
-from xenon.api.ib_pool import IBPool
+from xenon.api.ib_pool import IBPool, check_client_id_base_mapping
+from xenon.utils.ib_connection import TEST_BROKER_GUARD_ENV
 from xenon.api.pool_order_manage import pool_cancel_order, pool_modify_order  # noqa: F401  (PR-10 decides)
 from xenon.api.routes.historical import router as historical_router
 from xenon.api.routes.journal import router as journal_router
@@ -619,6 +620,13 @@ async def lifespan(app: FastAPI):
         yield
         logger.info("Xenon API test mode shut down")
         return
+
+    # A5: refuse an unsafe clientId base ↔ database pairing before anything
+    # dials the gateway (base 0 only with core_dev; dev.sh exports 100).
+    check_client_id_base_mapping(
+        os.environ.get("DATABASE_URL"),
+        test_session=os.environ.get(TEST_BROKER_GUARD_ENV) == "1",
+    )
 
     # Ensure IB Gateway is running before connecting pool
     gw_status = await ensure_ib_gateway()

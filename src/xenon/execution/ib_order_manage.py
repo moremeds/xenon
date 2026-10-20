@@ -24,6 +24,7 @@ from xenon.clients.ib_client import (
     CLIENT_IDS,
     DEFAULT_GATEWAY_PORT,
     DEFAULT_HOST,
+    ClientIdNotAllowed,
     IBClient,
     IBConnectionError,
 )
@@ -53,6 +54,10 @@ def classify_failure(
         if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
             return "connection"
         if _is_clientid_in_use(exc):
+            return "ownership"
+        if isinstance(exc, ClientIdNotAllowed):
+            # The owner id is outside this environment's allowed zone (pool
+            # role id, relay id, another base): never reached, not ours.
             return "ownership"
         if isinstance(exc, IBConnectionError):
             # Typed client failure after retries — the gateway could not be
