@@ -52,6 +52,29 @@ async def test_connect_all_dials_base_offsets(monkeypatch):
     assert dialed == [103, 104, 105]
 
 
+@pytest.mark.asyncio
+async def test_connect_all_keeps_the_startup_326_cause(monkeypatch):
+    from xenon.clients.ib_client import ClientIdInUse
+
+    monkeypatch.setenv("XENON_IB_CLIENT_ID_BASE", "100")
+
+    def fake_connect(host, port, client_id, timeout):
+        if client_id == 104:
+            raise ClientIdInUse(client_id, "326")
+        return _fake_client(True, READINESS_READY)
+
+    monkeypatch.setattr(ib_pool_mod, "_connect_in_thread", fake_connect)
+    monkeypatch.setattr(ib_pool_mod.asyncio, "sleep", AsyncMock())
+    pool = IBPool()
+    try:
+        status = await pool.connect_all()
+    finally:
+        await pool.disconnect_all()
+    assert status == {"sync": True, "orders": False, "data": True}
+    assert isinstance(pool.connect_errors["orders"], ClientIdInUse)
+    assert set(pool.connect_errors) == {"orders"}
+
+
 def test_connect_in_thread_opens_pool_role_and_runs_round_trip(monkeypatch):
     calls = {}
 
@@ -94,6 +117,7 @@ _DEV = "postgresql+psycopg://u:p@db.example:5432/core_test"
         ("200", "postgresql+psycopg://u:p@127.0.0.1/xenon_local", False),
         ("0", _DEV, True),  # scoped test mapping (pytest broker guard on)
         ("0", None, True),
+        ("0", _PROD + "?sslmode=require&connect_timeout=5", False),
     ],
 )
 def test_mapping_accepts_safe_pairs(monkeypatch, base, url, test_session):
@@ -108,8 +132,16 @@ def test_mapping_accepts_safe_pairs(monkeypatch, base, url, test_session):
         ("100", _PROD, True, "prod database"),  # the test scope never relaxes the prod side
         ("0", _DEV, False, "non-prod database"),
         ("0", None, False, "non-prod database"),
-        ("0", "not a url", False, "non-prod database"),
-        ("100", _DEV + "?dbname=core_dev", False, "prod database"),
+        ("0", "not a url", False, "not a parseable"),
+        ("100", "not a url", True, "not a parseable"),
+        # F5 (Astra T1–T3): a query key that can re-route the connection is
+        # refused whichever way it points; so is a URL without a database.
+        ("100", _DEV + "?dbname=core_dev", False, "re-route"),
+        ("0", _PROD + "?dbname=core_test", False, "re-route"),
+        ("100", "postgresql+asyncpg://u@127.0.0.1/core_test?database=core_dev", False, "re-route"),
+        ("0", "postgresql+asyncpg://u@127.0.0.1/core_dev?database=core_test", False, "re-route"),
+        ("100", "postgresql+asyncpg://u@127.0.0.1/core_test?host=db.example", True, "re-route"),
+        ("100", "postgresql+asyncpg://u@127.0.0.1/", False, "names no database"),
     ],
 )
 def test_mapping_refuses_unsafe_pairs(monkeypatch, base, url, test_session, match):

@@ -38,19 +38,34 @@ ORDERS_ROLE = "orders"
 PROD_DATABASE_NAMES = frozenset({"core_dev"})
 
 
+# Query keys that cannot re-route the connection. Anything else (asyncpg
+# `database`, libpq `dbname`, `host`, `service`, `dsn`, ...) can point the
+# engine at another database than the URL path shows, so the base check
+# refuses it: allowlist, not blocklist (same keys as the pytest DB guard in
+# xenon._test_db).
+_SAFE_QUERY_KEYS = frozenset({"sslmode", "sslrootcert", "sslcert", "sslkey", "connect_timeout", "application_name"})
+
+
 def _database_name(database_url: Optional[str]) -> Optional[str]:
+    """The database the engine will connect to; None when no URL is set.
+
+    Raises ``ValueError`` when that is not certain: unparseable URL, no
+    database in the path, or a query key that can override the routing.
+    """
     if not database_url:
         return None
-    try:
-        from sqlalchemy.engine import make_url
+    from sqlalchemy.engine import make_url
 
+    try:
         url = make_url(database_url)
-    except Exception:  # noqa: BLE001 — unparseable: unknown, treated as non-prod
-        return None
-    override = url.query.get("dbname")
-    if isinstance(override, (tuple, list)):
-        override = override[-1] if override else None
-    return override or url.database
+    except Exception as exc:  # noqa: BLE001 — sqlalchemy raises ArgumentError / ValueError
+        raise ValueError(f"DATABASE_URL is not a parseable database URL ({type(exc).__name__})") from exc
+    routing = sorted(k for k in url.query if k not in _SAFE_QUERY_KEYS)
+    if routing:
+        raise ValueError(f"DATABASE_URL query params {routing} can re-route the connection to another database")
+    if not url.database:
+        raise ValueError("DATABASE_URL names no database")
+    return url.database
 
 
 def check_client_id_base_mapping(database_url: Optional[str], *, test_session: bool = False) -> int:
@@ -70,7 +85,10 @@ def check_client_id_base_mapping(database_url: Optional[str], *, test_session: b
     Returns the base; raises ``RuntimeError`` on a mismatch.
     """
     base = client_id_base()
-    dbname = _database_name(database_url)
+    try:
+        dbname = _database_name(database_url)
+    except ValueError as exc:
+        raise RuntimeError(f"{exc}: cannot map XENON_IB_CLIENT_ID_BASE={base} to a database — refusing to start") from exc
     if dbname in PROD_DATABASE_NAMES:
         if base != 0:
             raise RuntimeError(
@@ -152,6 +170,9 @@ class IBPool:
         # ib_async raises ``no current event loop``.
         self._role_executors: Dict[str, ThreadPoolExecutor] = {}
         self._connected: Dict[str, bool] = {}
+        # Last startup connect failure per role (e.g. ClientIdInUse / 326),
+        # so the orders supervisor can latch its halt with the real cause.
+        self.connect_errors: Dict[str, BaseException] = {}
 
         for role in POOL_ROLES:
             self._locks[role] = asyncio.Lock()
@@ -213,6 +234,7 @@ class IBPool:
                     self._clients[role] = client
                     self._connected[role] = True
                     status[role] = True
+                    self.connect_errors.pop(role, None)
                     logger.info("IB pool: %s connected (client_id=%d)", role, client_id)
                     break
                 except Exception as e:
@@ -222,6 +244,7 @@ class IBPool:
                     else:
                         self._connected[role] = False
                         status[role] = False
+                        self.connect_errors[role] = e
                         logger.warning("IB pool: %s failed to connect after 3 attempts: %s", role, e)
 
         return status

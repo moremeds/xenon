@@ -555,11 +555,11 @@ def cancel_order_on_client(
     inv = _Invocation(amend_stage="not_sent")
     return _run_core(
         inv,
-        lambda: _cancel_body(client, order_id, perm_id, account, client_id, ensure_owner or _refuse_foreign_owner),
+        lambda: _cancel_body(client, inv, order_id, perm_id, account, client_id, ensure_owner or _refuse_foreign_owner),
     )
 
 
-def _cancel_body(client, order_id, perm_id, account, client_id, ensure_owner) -> NoReturn:
+def _cancel_body(client, inv, order_id, perm_id, account, client_id, ensure_owner) -> NoReturn:
     trade = _locate_trade(client, order_id, perm_id, account=account, client_id=client_id)
     if trade is None:
         _reply(
@@ -590,6 +590,9 @@ def _cancel_body(client, order_id, perm_id, account, client_id, ensure_owner) ->
 
     client.ib.errorEvent += on_error
     try:
+        # From here on the cancel may have reached IB: only an explicit IB
+        # reject code proves it was not applied.
+        inv.amend_stage = "unconfirmed"
         client.cancel_order(trade.order)
         latest_trade = trade
 
@@ -621,16 +624,17 @@ def _cancel_body(client, order_id, perm_id, account, client_id, ensure_owner) ->
                     f"IB rejected cancel: {fatal[0][1]}",
                     classification=classify_failure(fatal[0][0]),
                     upstream={"code": fatal[0][0], "message": fatal[0][1]},
+                    amend_outcome="rejected",
                     **_identity_notes(refreshed_trade, account),
                 )
 
         final_status = latest_trade.orderStatus.status if latest_trade is not None else trade.orderStatus.status
         _reply(
             "error",
-            f"Cancel failed — order still {final_status}",
+            f"Cancel not confirmed — order still {final_status}; check working orders",
             orderId=trade.order.orderId,
             finalStatus=final_status,
-            classification="ib_reject",
+            classification="unconfirmed",
             **_identity_notes(latest_trade or trade, account),
         )
     finally:

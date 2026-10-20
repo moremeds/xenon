@@ -2898,7 +2898,9 @@ def _map_ib_reject_status(upstream_code: Any) -> int:
 def _classify_to_http(data: dict) -> tuple[int, str]:
     """Map an order-action reply classification → (http_status, reason_code)."""
     classification = data.get("classification")
-    if classification in ("connection", "send_window_closed"):
+    if classification in ("connection", "send_window_closed", "unconfirmed"):
+        # "unconfirmed": the action reached IB without an ack (amend_outcome
+        # carries it); the routes treat it as uncertain, never as a reject.
         return 503, ReasonCode.IB_CONNECTION.value
     if classification == BROKER_DISCONNECTED:
         return 503, ReasonCode.IB_BROKER_DISCONNECTED.value

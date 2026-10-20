@@ -169,8 +169,8 @@ async def test_broker_ready_again_after_1102_admits():
 
 
 async def test_healthy_admission_then_loss_while_queued_sends_nothing():
-    """Admitted while ready; broker lost before the job reaches its send →
-    the pre-send round trip refuses: zero sends, not_sent."""
+    """Admitted while ready; broker lost before the job starts → the round
+    trip before the core refuses: the core never runs, zero sends."""
     owner, pool = _owner()
     hold, entered, release = _blocker(pool)
     busy = asyncio.ensure_future(pool.run_sync("orders", hold))
@@ -183,7 +183,7 @@ async def test_healthy_admission_then_loss_while_queued_sends_nothing():
     await busy
     reply = await task
     assert (reply["classification"], reply["amend_outcome"]) == (BROKER_DISCONNECTED, "not_sent")
-    assert len(calls) == 1 and pool.client.sent == []
+    assert calls == [] and pool.client.sent == []
 
 
 async def test_halt_latched_while_queued_sends_nothing():
@@ -362,3 +362,155 @@ async def test_executor_shutdown_cancels_queued_job_as_not_sent():
     await busy
     reply = await task
     assert reply["amend_outcome"] == "not_sent" and calls == []
+
+
+# -- F1–F3 (Astra T1–T3): the broker round trip runs before the core ----------
+
+
+def _mock_orders_client(trade):
+    """A MagicMock orders client over the T2 core fakes, READY by default."""
+    from scripts.tests.test_order_cores import _client
+
+    client = _client([[trade]] * 12)
+    client.broker_readiness = "ready"
+    client.readiness_generation = 0
+    client.readiness = "ready"  # FakePool.broker_readiness reads this
+    client.confirm_broker_ready.return_value = "ready"
+    return client
+
+
+async def test_round_trip_cannot_rewrite_the_modified_order():
+    """F1: ib_async's wrapper.openOrder overwrites the cached trade.order
+    (totalQuantity / lmtPrice / auxPrice / orderType) on every open-orders
+    round trip. The round trip now runs before the core mutates the order, so
+    the transmitted order keeps the requested price and quantity."""
+    from scripts.tests.test_order_cores import _trade
+    from xenon.execution.ib_order_manage import modify_order_on_client
+
+    trade = _trade(lmt_price=20.0)
+    client = _mock_orders_client(trade)
+
+    def round_trip(timeout=5.0):
+        trade.order.lmtPrice, trade.order.totalQuantity = 20.0, 5  # wrapper.openOrder
+        return "ready"
+
+    client.confirm_broker_ready.side_effect = round_trip
+    sent = []
+    client.place_order.side_effect = lambda _c, order: sent.append((order.lmtPrice, order.totalQuantity))
+    owner, _ = _owner(FakePool(client))
+
+    await owner.run(lambda c: modify_order_on_client(c, 10, 12345, new_price=21.5, new_quantity=7), timeout=5)
+
+    assert sent == [(21.5, 7)]
+
+
+async def test_modify_at_send_by_is_never_sent_after_send_by():
+    """F2: nothing blocks between the core's send_by check and placeOrder. A
+    slow round trip uses up the window BEFORE the check, so the modify is
+    refused (send_window_closed) instead of being sent late."""
+    import time
+    from datetime import datetime, timedelta, timezone
+
+    from scripts.tests.test_order_cores import _trade
+    from xenon.execution.ib_order_manage import modify_order_on_client
+
+    trade = _trade()
+    client = _mock_orders_client(trade)
+    client.confirm_broker_ready.side_effect = lambda timeout=5.0: (time.sleep(0.2), "ready")[1]
+    sent_at = []
+    client.place_order.side_effect = lambda *_a: sent_at.append(datetime.now(timezone.utc))
+    owner, _ = _owner(FakePool(client))
+    send_by = datetime.now(timezone.utc) + timedelta(milliseconds=50)
+
+    reply = await owner.run(lambda c: modify_order_on_client(c, 10, 12345, new_price=21.5, send_by=send_by), timeout=5)
+
+    assert all(t < send_by for t in sent_at)
+    assert sent_at == [] and reply["classification"] == "send_window_closed"
+    assert reply["amend_outcome"] == "not_sent"
+
+
+async def test_readiness_event_during_the_core_refuses_the_send():
+    """F1: before_send does no I/O; a 1100/2110/1101 the core's own polling
+    processed since the round trip (generation moved) refuses the send."""
+    owner, pool = _owner()
+
+    def core(client):
+        pool.client.generation += 1  # e.g. 1101 processed while the core polled
+        client.place_order("contract", "order")
+        return {"status": "ok"}
+
+    reply = await owner.run(core, timeout=2)
+    assert (reply["classification"], reply["amend_outcome"]) == (BROKER_DISCONNECTED, "not_sent")
+    assert pool.client.sent == []
+
+
+async def test_before_send_does_no_round_trip():
+    owner, pool = _owner()
+    core, _ = _sending_core()
+    await owner.run(core, timeout=2)
+    assert pool.client.ready_checks == 1 and len(pool.client.sent) == 1
+
+
+async def test_ready_once_then_probe_timeout_refuses_with_nothing_sent():
+    """F3: a real IBClient that was READY once, then its round trip times out
+    → the owner refuses IB_BROKER_DISCONNECTED, not_sent, zero sends."""
+    from unittest.mock import MagicMock
+
+    from xenon.clients.ib_client import IBClient
+
+    client = IBClient()
+    client._ib = MagicMock()
+    client._ib.isConnected.return_value = True
+    client._ib.run.return_value = []
+    assert client.confirm_broker_ready(timeout=0.01) == "ready"
+    client._ib.run.side_effect = TimeoutError("probe timed out")
+    client.readiness = "ready"  # FakePool.broker_readiness: admission passes
+    owner, _ = _owner(FakePool(client))
+    core, calls = _sending_core()
+
+    reply = await owner.run(core, timeout=2)
+
+    assert (reply["classification"], reply["amend_outcome"]) == (BROKER_DISCONNECTED, "not_sent")
+    assert calls == []
+    client._ib.placeOrder.assert_not_called()
+
+
+@pytest.mark.parametrize("event", ["socket_loss", "1102_then_failed_probe"])
+async def test_ready_then_loss_sends_nothing(event):
+    from unittest.mock import MagicMock
+
+    from xenon.clients.ib_client import IBClient
+
+    client = IBClient()
+    client._ib = MagicMock()
+    client._ib.isConnected.return_value = True
+    client._ib.run.return_value = []
+    assert client.confirm_broker_ready(timeout=0.01) == "ready"
+    if event == "socket_loss":
+        client._ib.isConnected.return_value = False
+    else:
+        client._on_error(-1, 1100, "lost")
+        client._on_error(-1, 1102, "restored")
+        client._ib.run.side_effect = ConnectionError("socket closed")
+    client.readiness = "ready"
+    owner, _ = _owner(FakePool(client))
+    core, calls = _sending_core()
+
+    reply = await owner.run(core, timeout=2)
+
+    assert reply["amend_outcome"] == "not_sent" and calls == []
+    client._ib.placeOrder.assert_not_called()
+
+
+async def test_startup_326_latches_halt_with_that_cause_and_no_reconnect():
+    """Optional Astra note: the pool's startup ClientIdInUse is the halt
+    reason, even when every role is down (e.g. stale sockets of an old api
+    still hold the ids after a redeploy)."""
+    owner, pool = _owner(port_listening=False)
+    pool.connect_errors = {"orders": ClientIdInUse(4, "326")}
+    pool.connected.update(orders=False, sync=False, data=False)
+    owner.start()
+    assert await _wait_for(lambda: owner.halted)
+    assert "in use by another process at startup" in owner.status()["halt_reason"]
+    assert pool.reconnects == []
+    await owner.stop()

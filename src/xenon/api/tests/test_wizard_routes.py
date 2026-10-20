@@ -747,10 +747,10 @@ def test_protect_refused_when_orders_disconnected_without_reconnect(client, fill
 
 
 def test_protect_broker_not_ready_at_send_sends_nothing(client, filled_session, protect_owner):
-    """Admitted (socket up, readiness not LOST) but the pre-send round trip
-    does not confirm the broker → refused right before the TP send."""
+    """Admitted (socket up, readiness not LOST) but the round trip before the
+    core does not confirm the broker → refused before protect runs."""
     protect_owner.pool.client.readiness = "unknown"
     resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
     assert (resp.status_code, resp.json()["reason_code"]) == (503, "IB_BROKER_DISCONNECTED")
-    assert protect_owner.calls == [filled_session]
+    assert protect_owner.calls == []
     assert protect_owner.pool.client.sent == []

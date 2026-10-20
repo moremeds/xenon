@@ -97,7 +97,22 @@ def test_cancel_core_fatal_error_removes_listener(capsys):
 
     assert result["status"] == "error"
     assert result["upstream"]["code"] == 10147
-    assert result["amend_outcome"] == "not_sent"
+    # A real IB reject code after the send: rejected, never unconfirmed.
+    assert result["amend_outcome"] == "rejected"
+    _assert_pure(client, capsys)
+
+
+def test_cancel_core_without_ack_is_unconfirmed_not_reject(capsys):
+    """F4 (Astra T1–T3): the cancel was sent and IB never acknowledged it
+    (order still Submitted after the poll) — that is not an IB reject."""
+    t = _trade()
+    client = _client([[t]] * 12)
+
+    result = cancel_order_on_client(client, 10, 12345)
+
+    assert result["status"] == "error"
+    assert (result["classification"], result["amend_outcome"]) == ("unconfirmed", "unconfirmed")
+    client.cancel_order.assert_called_once_with(t.order)
     _assert_pure(client, capsys)
 
 

@@ -856,28 +856,48 @@ class IBClient:
             # Restored but data lost: ready only after a fresh round trip.
             self._set_readiness(READINESS_UNKNOWN)
 
-    def _note_round_trip(self, generation: int) -> None:
-        """Promote unknown -> ready if no readiness event arrived meanwhile."""
-        if generation == self._readiness_generation and self._readiness == READINESS_UNKNOWN:
+    @property
+    def readiness_generation(self) -> int:
+        """Bumped by every readiness change; an unchanged value means no
+        1100/2110/1101/1102 or socket replacement arrived in between."""
+        return self._readiness_generation
+
+    def _note_round_trip(self, generation: int) -> bool:
+        """Promote unknown -> ready if no readiness event arrived meanwhile.
+
+        Returns False when an event moved readiness during the round trip.
+        """
+        if generation != self._readiness_generation:
+            return False
+        if self._readiness == READINESS_UNKNOWN:
             self._set_readiness(READINESS_READY)
+        return True
 
     def confirm_broker_ready(self, timeout: float = DEFAULT_READINESS_PROBE_TIMEOUT_S) -> str:
-        """Run one open-orders round trip and return the resulting readiness.
+        """Run one open-orders round trip and return the readiness it proves.
 
         Only a completed open-orders request counts as evidence; an open
         socket or ``reqCurrentTime`` does not (the gateway answers those
-        locally during an outage). A timeout or error leaves the state as it
-        was. Runs on the caller's thread — pool callers use the role executor.
+        locally during an outage). READY is returned only when THIS call's
+        round trip completed and no readiness event moved the state during
+        it. A timeout, socket error or a concurrent event returns UNKNOWN (or
+        LOST) without changing the stored state. Runs on the caller's thread
+        — pool callers use the role executor.
         """
+
+        def unproven() -> str:
+            return READINESS_LOST if self._readiness == READINESS_LOST else READINESS_UNKNOWN
+
         if not self.is_connected():
-            return self._readiness
+            return unproven()
         generation = self._readiness_generation
         try:
             self._ib.run(self._ib.reqAllOpenOrdersAsync(), timeout=timeout)
         except Exception as exc:  # noqa: BLE001 — timeout / socket error: no evidence
             self.logger.warning("IB readiness round trip failed (%s): %r", self._readiness, exc)
-            return self._readiness
-        self._note_round_trip(generation)
+            return unproven()
+        if not self._note_round_trip(generation):
+            return unproven()
         return self._readiness
 
     # -- market data --------------------------------------------------------

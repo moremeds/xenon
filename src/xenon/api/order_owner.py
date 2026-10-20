@@ -18,9 +18,11 @@ Three parts:
   latched ``ORDERS_HALTED``: zero reconnect attempts, CRITICAL log, red
   ``/health``, until an operator restarts the API.
 
-Right before any send (place, modify, cancel, wizard protect) the worker
-re-checks the halt latch and does a fresh broker round trip
+Before the core runs, the worker does one fresh broker round trip
 (``IBClient.confirm_broker_ready``); not READY → refused, zero sends (A4).
+Right before any send (place, modify, cancel, wizard protect) a non-blocking
+check refuses when the halt latch is set or any readiness event (1100, 2110,
+1101, socket replacement) arrived since that round trip.
 """
 
 from __future__ import annotations
@@ -229,9 +231,9 @@ class OrderOwner:
         except BaseException:  # pragma: no cover — _execute never raises
             reply = _unconfirmed("Order action crashed") if inv.sent else _not_sent("Order action crashed")
         if inv.sent and reply.get("status") != "ok" and reply.get("amend_outcome") in (None, "not_sent"):
-            # Possibly transmitted and nothing proves it was not applied.
-            if reply.get("classification") != "ib_reject":
-                reply = {**reply, "amend_outcome": "unconfirmed"}
+            # Possibly transmitted and nothing proves it was not applied: only
+            # an explicit IB reject (amend_outcome "rejected") keeps it terminal.
+            reply = {**reply, "amend_outcome": "unconfirmed"}
         inv.finish()
         _settle(settle, reply)
         return reply
@@ -243,11 +245,19 @@ class OrderOwner:
         if client is None or not self._pool.is_connected(ORDERS_ROLE):
             return _not_sent("IB orders connection is down; nothing was sent", BROKER_DISCONNECTED)
 
+        # The broker round trip runs HERE, before the core touches the order
+        # or checks send_by: an open-orders round trip lets ib_async rewrite
+        # the cached trade.order (wrapper.openOrder), and it can block.
+        if client.confirm_broker_ready() != READINESS_READY:
+            return _not_sent("IB broker connectivity not confirmed; nothing was sent", BROKER_DISCONNECTED)
+        generation = client.readiness_generation
+
         def before_send() -> None:
+            """Non-blocking: no socket I/O between the core's checks and the send."""
             if self._halt is not None:
                 raise OwnerRefused(ORDERS_HALTED, f"Order actions halted: {self._halt}; nothing was sent")
-            if client.confirm_broker_ready() != READINESS_READY:
-                raise OwnerRefused(BROKER_DISCONNECTED, "IB broker connectivity not confirmed; nothing was sent")
+            if client.broker_readiness != READINESS_READY or client.readiness_generation != generation:
+                raise OwnerRefused(BROKER_DISCONNECTED, "IB broker connectivity changed; nothing was sent")
             inv.mark_sent()
 
         try:
@@ -313,6 +323,12 @@ class OrderOwner:
         return not any(self._pool.is_connected(r) for r in ("sync", "data"))
 
     async def _on_loss(self, *, broker_loss_seen: bool) -> None:
+        startup_error = getattr(self._pool, "connect_errors", {}).pop(ORDERS_ROLE, None)
+        if isinstance(startup_error, ClientIdInUse):
+            self._latch_halt(
+                f"clientId {pool_client_id(ORDERS_ROLE)} was in use by another process at startup ({startup_error})"
+            )
+            return
         restart_noted, self._gateway_restart_noted = self._gateway_restart_noted, False
         outage = (
             broker_loss_seen

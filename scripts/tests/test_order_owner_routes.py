@@ -227,3 +227,57 @@ def test_broker_lost_refuses_modify_with_ib_broker_disconnected(client, broker_c
     assert _row()["legs"]["pending_amend_id"] is None
     _order_owner.client.readiness = "ready"  # 1102
     assert _modify(client, 2).status_code == 200
+
+
+# -- F4 (Astra T1–T3): a sent cancel without an ack is uncertain ------------
+
+
+def _real_cancel_core_without_ack(monkeypatch, pool, order_id, perm_id):
+    """The real cancel core on a fake orders client whose open orders keep
+    showing the order as Submitted: cancelOrder sent, never acknowledged."""
+    from scripts.tests.test_order_cores import _client, _trade
+    from xenon.execution import ib_order_manage
+
+    trade = _trade(order_id=order_id, perm_id=perm_id, client_id=OWNER_ID)
+    trade.order.account = "DU0000000"
+    orders_client = _client([[trade]] * 12, client_id=OWNER_ID)
+    orders_client.readiness = orders_client.broker_readiness = "ready"
+    orders_client.readiness_generation = 0
+    orders_client.confirm_broker_ready.return_value = "ready"
+    monkeypatch.setattr(server_mod, "ib_order_manage", ib_order_manage)
+    pool.client = orders_client
+    return orders_client
+
+
+def test_cancel_sent_without_ack_is_uncertain_not_a_reject(
+    client, broker_calls, fresh_quote, _order_owner, monkeypatch
+):
+    _placed(client)
+    orders_client = _real_cancel_core_without_ack(monkeypatch, _order_owner, 4242, 777001)
+    resp = client.post("/orders/cancel", json={"orderId": 4242, "permId": 777001})
+    body = resp.json()
+    assert (resp.status_code, body["reason_code"]) == (503, "IB_CONNECTION")
+    assert (body["detail"]["classification"], body["detail"]["amend_outcome"]) == ("unconfirmed", "unconfirmed")
+    orders_client.cancel_order.assert_called_once()
+    assert _row()["state"] != "CANCELLED"
+
+
+def test_replace_cancel_sent_without_ack_marks_unknown_and_places_nothing(client, fresh_quote, monkeypatch):
+    from scripts.tests.test_gate4_route import _Broker, _original, _replace_body
+    from scripts.tests.test_gate4_route import _row as _attempt_row
+
+    broker = _Broker()
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", broker)
+    from scripts.tests.order_owner_fakes import install_runner_cores
+
+    _owner, pool = install_runner_cores(monkeypatch)
+    target = _original(client, broker)
+    orders_client = _real_cancel_core_without_ack(monkeypatch, pool, target["orderId"], target["permId"])
+
+    resp = client.post("/orders/replace", json=_replace_body(target, "rep-noack"))
+
+    assert (resp.status_code, resp.json()["reason_code"]) == (502, "PLACE_OUTCOME_UNKNOWN")
+    assert resp.json()["replacement_placed"] is False
+    orders_client.cancel_order.assert_called_once()
+    assert broker.places == 0
+    assert _attempt_row("rep-noack")["state"] == "UNKNOWN"

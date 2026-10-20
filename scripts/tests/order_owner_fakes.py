@@ -37,14 +37,22 @@ class FakeOrdersClient:
         self.readiness = READINESS_READY
         self.sent: list[tuple] = []
         self.ready_checks = 0
+        self.generation = 0  # bump to simulate a readiness event (1100/2110/1101)
+        self.on_probe = None  # runs inside the open-orders round trip
         self.ib = SimpleNamespace(client=SimpleNamespace(clientId=orders_id()), sleep=lambda _s: None)
 
     @property
     def broker_readiness(self) -> str:
         return self.readiness
 
+    @property
+    def readiness_generation(self) -> int:
+        return self.generation
+
     def confirm_broker_ready(self, timeout: float = 5.0) -> str:
         self.ready_checks += 1
+        if self.on_probe is not None:
+            self.on_probe()
         return self.readiness
 
     def place_order(self, *args, **kwargs):

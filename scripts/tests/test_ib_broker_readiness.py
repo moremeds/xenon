@@ -144,3 +144,53 @@ def test_auto_connect_also_resets():
     client.confirm_broker_ready()
     client.connect(client_id="auto", timeout=1)
     assert client.broker_readiness == READINESS_UNKNOWN
+
+
+# -- F3 (Astra T1–T3): a failed round trip never returns READY --------------
+
+
+def test_failed_round_trip_after_ready_returns_unknown_and_keeps_state():
+    """Ready once, then the probe times out: no evidence → UNKNOWN to the
+    caller. The stored state is not promoted and not rewritten."""
+    client = _connected_client()
+    assert client.confirm_broker_ready() == READINESS_READY
+    generation = client.readiness_generation
+    client._ib.run.side_effect = TimeoutError("probe timed out")
+    assert client.confirm_broker_ready(timeout=0.01) == READINESS_UNKNOWN
+    assert client.readiness_generation == generation
+
+
+def test_failed_round_trip_keeps_lost():
+    client = _connected_client()
+    _event(client, 1100)
+    client._ib.run.side_effect = TimeoutError("probe timed out")
+    assert client.confirm_broker_ready(timeout=0.01) == READINESS_LOST
+    assert client.broker_readiness == READINESS_LOST
+
+
+def test_1102_then_failed_round_trip_is_not_ready():
+    client = _connected_client()
+    _event(client, 1100)
+    _event(client, 1102)
+    assert client.broker_readiness == READINESS_READY
+    client._ib.run.side_effect = ConnectionError("socket closed")
+    assert client.confirm_broker_ready(timeout=0.01) == READINESS_UNKNOWN
+
+
+def test_1102_during_round_trip_is_not_this_calls_evidence():
+    client = _connected_client()
+
+    def run_with_restore(*_a, **_k):
+        _event(client, 1100)
+        _event(client, 1102)
+        return []
+
+    client._ib.run.side_effect = run_with_restore
+    assert client.confirm_broker_ready() == READINESS_UNKNOWN
+
+
+def test_ready_then_socket_loss_is_not_ready():
+    client = _connected_client()
+    assert client.confirm_broker_ready() == READINESS_READY
+    client._ib.isConnected.return_value = False
+    assert client.confirm_broker_ready() == READINESS_UNKNOWN
