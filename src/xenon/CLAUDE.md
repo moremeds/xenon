@@ -76,7 +76,7 @@ Key rules:
    - unit test for combo action/ratio/net-price semantics
    - browser test for displayed combo net price and submitted payload
 4. **Trace the full path before fixing:**
-   - chain builder → `/api/orders/place` → FastAPI bridge → `src/xenon/execution/ib_place_order.py`
+   - chain builder → `/api/orders/place` → FastAPI bridge → order owner → `src/xenon/execution/ib_place_order.py::place_order_on_client`
    - verify whether the bug is UI state, payload semantics, or IB combo behavior before patching
 
 ## Naked Short Protection (Gate 4)
@@ -112,7 +112,7 @@ Key rules:
 
 `src/xenon/execution/` — all IB order/fill logic:
 
-- `ib_place_order.py`, `ib_order_manage.py` (cancel/modify via subprocess; see `api/CLAUDE.md`)
+- `ib_place_order.py`, `ib_order_manage.py` — connected-client order cores (place / cancel / modify). They run only on the API's order owner (pool `orders`, clientId base+4); no CLI, no own connection. See `api/CLAUDE.md` § Order owner
 - `orders_store.py` — Postgres-backed public facade for `order_submissions` and `order_events`; preserve its function signatures
 - `single_leg_rehydrate.py` — three-source reconcile (orders DB, IB open orders, position monitor). Invoked in FastAPI lifespan on boot; exposed for testing via `POST /dev/rehydrate/synthetic`.
 - `naked_short_audit.py` — post-sync audit (shadow mode: log + service_health, no cancels)
@@ -144,8 +144,6 @@ Postgres is primary for portfolio, orders, NAV, trades, and journal entries. Fil
 | ------------------------- | --------------------------------------------------------------------- |
 | `xenon-api`               | Dev launcher: FastAPI on 127.0.0.1:8321 with reload (prod uses uvicorn in the api image) |
 | `xenon-ib-sync`           | Pull live portfolio + open orders from IB into Postgres               |
-| `xenon-ib-place-order`    | Subprocess placeholder for the place-order path                       |
-| `xenon-ib-order-manage`   | Subprocess for cancel/modify (uses original clientId)                 |
 | `xenon-ib-orders`         | Inspect IB open orders                                                |
 | `xenon-ib-option-chain`   | Fetch options chain for a symbol (used by `/options/chain`)           |
 | `xenon-ib-market-depth`   | L2 order-book snapshot for a contract (used by `/market-depth`)       |

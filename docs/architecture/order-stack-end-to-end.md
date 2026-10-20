@@ -12,6 +12,8 @@
 - `src/xenon/CLAUDE.md` — naked-short table, combo guardrails, broker scope.
 - `docs/reference/order-path-incident-history.md` — chronological log of every non-trivial bug. Read before touching this surface.
 
+> **PR-10 update (2026-10-20) — read first.** Layer 3 below (order-write subprocesses `xenon-ib-place-order` / `xenon-ib-order-manage`, clientIds 20–49, reconnect as the original clientId) is gone. Place, cancel, modify and wizard protect now run in-process on the API pool `orders` connection (clientId base+4) through the order owner (`src/xenon/api/order_owner.py`); the cores are `place_order_on_client`, `cancel_order_on_client` and `modify_order_on_client`. Orders not placed by that connection get 409 `ORDER_NOT_OWNED`. Current rules: `src/xenon/api/CLAUDE.md` § Order owner; deployment and cutover: `docs/runbooks/pr10-order-owner-cutover.md`. Sections that describe the subprocess layer (TL;DR, §3.3–3.4, §8, §13.12) are historical until this document is rewritten.
+
 > **TL;DR** — The path is `OrderTab → /api/orders/place (Next.js) → POST /orders/place (FastAPI) → 8-stage validation pipeline → subprocess (xenon-ib-place-order) → IB Gateway → ack persisted via orders_store.mark_submitted → activity poller mirrors fills/external-modify back to Postgres → UI re-renders from the next /orders GET (no live WS push for order events; WS is price-only)`. The most fragile parts are: (1) **no continuous PENDING reaper** — hangs leave phantoms until restart (§13.11), (2) **subprocess concurrency unbounded** — clientId range 20–49 exhaustible under load (§13.12), (3) the in-process bypass class — `_orders_*_from_body` and the `submit_combo` parallel route both skip route-level Depends or reproduce gates inline (§13.13), (4) the cancel/modify clientId scoping — pool can see but not cancel, (5) **fill-to-toast latency up to ~120 s** from double-polling — order-event WS push would compress this to sub-second (§13.15), (6) the late-arriving CommissionReport coupling, and (7) the TWS-cancel-not-mirrored gap in the activity poller.
 
 ---
@@ -568,14 +570,14 @@ The structured warning log on tick rejections (`ib_place_order.py:152–167`) is
 
 | Range          | Owner              | Purpose                                                    |
 | -------------- | ------------------ | ---------------------------------------------------------- |
-| 0–9            | `ib_pool.py`       | Persistent connections (sync, orders, data) for read paths |
-| 20–49          | `client_id="auto"` | On-demand subprocesses (place, manage, quote, reconcile)   |
+| 0–9            | `ib_pool.py`       | Persistent connections (sync, orders, data); `orders` (4) places, cancels and modifies every Xenon order (PR-10) |
+| 20–49          | `client_id="auto"` | On-demand read/data subprocesses (quote, reconcile); no order writes since PR-10 |
 | (other ranges) | special-purpose    | see `docs/architecture/api-infrastructure.md`              |
 
 This separation matters because:
 
 - **Pool clients (0–9) can SEE all open orders via `reqAllOpenOrders` but cannot cancel/modify them** (IB returns Error 10147 on cancel, Error 103 on modify).
-- Cancel and modify subprocesses must **reconnect as the original `clientId` that placed the order** (`ib_order_manage.py` reads `trade.order.clientId` from the open-order snapshot before executing). This is the lesson encoded in `src/xenon/api/CLAUDE.md` Cancel/Modify rule 1.
+- Since PR-10 the `orders` connection places every Xenon order, so it can cancel and modify them itself. An order with another `clientId` is refused with 409 `ORDER_NOT_OWNED` (manage it in TWS / IBKR Mobile); nothing reconnects as another clientId. See `src/xenon/api/CLAUDE.md` § Order owner.
 
 ### 8.2 BAG construction
 

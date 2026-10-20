@@ -17,6 +17,16 @@ Why `run --rm api` and not a new service: api already has the right env_file, vo
 Why the Watchtower label override: `run` copies the service labels, including `watchtower.enable=true`. Without the override Watchtower could recreate the one-off container mid-run on a new image.
 
 
+## IB clientId blocks (PR-10 deployment contract)
+
+| Gateway | Environment | `XENON_IB_CLIENT_ID_BASE` | Host / supervisor |
+|---|---|---|---|
+| Live, mini `:4001` | prod | `0` (this compose file) | `/opt/xenon` Docker stack, Watchtower |
+| Live, mini `:4001` (read-only) or paper, laptop `:4002` | dev | `100` (`scripts/infra/dev.sh`, `docker-compose.yml`) | MacBook |
+| any | second dev stack | another base (`200`-`800`, step 100) | — or stopped |
+
+Pool `sync`/`orders`/`data` = base+3/4/5 (`orders` places, cancels and modifies every Xenon order), relay base+10..19, `auto` base+20..49 (read/data only). The api refuses a base that does not match its database. `api` has `stop_grace_period: 60s` and Watchtower `WATCHTOWER_TIMEOUT: 60s` so the api can disconnect from IB before it is killed. Cutover, stale-socket check and `ORDERS_HALTED` recovery: `docs/runbooks/pr10-order-owner-cutover.md`.
+
 ## Operator rollout checklist
 
 Names and booleans only: never print secret values. `docker-compose` below is `/opt/homebrew/bin/docker-compose`; run `export PATH=/opt/homebrew/bin:$PATH` first. The repo copy is on the laptop; the mini path is `/opt/xenon`.

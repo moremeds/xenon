@@ -249,7 +249,7 @@ class ComboWizardIbAdapter:
 
         # Build BAG. Citation: ib_async/contract.py:418 — class Bag(Contract)
         # A plain Contract with secType='BAG' is the idiom already used in
-        # src/xenon/execution/ib_place_order.py:65-80.
+        # src/xenon/execution/ib_place_order.py (place_order_on_client).
         combo = Contract()
         combo.symbol = str(legs[0].get("symbol") or "") if legs else ""
         combo.secType = "BAG"
@@ -313,7 +313,7 @@ class ComboWizardIbAdapter:
         # rehydrate BAG per-leg aggregator keys on permId, so emitting 0/None
         # here would break combo fill detection. Poll briefly for the real
         # value using the ib_async idiom (ib.sleep yields the event loop
-        # without blocking). Matches ib_place_order.py:138 which also waits
+        # without blocking). Matches ib_place_order.place_order_on_client, which also waits
         # after place_order before reading permId.
         order_id = getattr(getattr(trade, "order", None), "orderId", None)
         perm_id = _wait_for_perm_id(self._ib, trade)
