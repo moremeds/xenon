@@ -1,4 +1,4 @@
-"""Tests for ib_order_manage.py — mocks IBClient connection."""
+"""Tests for the ib_order_manage cores (via scripts/tests/order_core_shims.py) — mocked IBClient."""
 
 import json
 import sys
@@ -10,7 +10,7 @@ import pytest
 # Add scripts dir to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from xenon.execution.ib_order_manage import find_trade, cancel_order, modify_order, output
+from scripts.tests.order_core_shims import cancel_order, find_trade, modify_order
 
 
 # ─── Helpers ────────────────────────────────────────────
@@ -99,28 +99,21 @@ class TestCancelOrder:
             cancel_order(client, 99, 88, "127.0.0.1", 4001)
         assert exc.value.code == 1
 
-    def test_cancel_reconnects_as_original_client_id(self):
-        """When cancel script connects as clientId 0 but order was placed by clientId 9,
-        it should disconnect + reconnect as clientId 9 before cancelling."""
+    def test_cancel_refuses_an_order_of_another_client_id(self, capsys):
+        """PR-10: a connected client never reconnects as the placer. An order
+        placed by another clientId is refused (ownership), nothing is sent."""
         t = make_trade(status="Submitted")
-        t.order.clientId = 9  # Order placed by different client
-
-        def side_effect(order):
-            t.orderStatus.status = "Cancelled"
-
+        t.order.clientId = 9  # Order placed by a different client
         client = make_client([t])
-        client.ib.client.clientId = 0  # Connected as clientId 0
-        client.cancel_order = MagicMock(side_effect=side_effect)
-        # After reconnect, find_trade should still find the trade
-        client.get_open_orders.return_value = [t]
+        client.ib.client.clientId = 0
 
         with pytest.raises(SystemExit) as exc:
             cancel_order(client, 10, 12345, "127.0.0.1", 4001)
-        assert exc.value.code == 0
-        # Should have disconnected and reconnected as clientId 9
-        client.disconnect.assert_called_once()
-        client.connect.assert_called_once_with(host="127.0.0.1", port=4001, client_id=9)
-        client.cancel_order.assert_called_once_with(t.order)
+        assert exc.value.code == 1
+        assert json.loads(capsys.readouterr().out)["classification"] == "ownership"
+        client.disconnect.assert_not_called()
+        client.connect.assert_not_called()
+        client.cancel_order.assert_not_called()
 
     def test_cancel_same_client_id_no_reconnect(self):
         """When cancel script is already connected as the right clientId, no reconnect needed."""
@@ -373,29 +366,3 @@ class TestModifyOrder:
 
 # ─── output ─────────────────────────────────────────────
 
-
-class TestOutput:
-    def test_output_ok(self, capsys):
-        with pytest.raises(SystemExit) as exc:
-            output("ok", "done")
-        assert exc.value.code == 0
-        captured = capsys.readouterr()
-        data = json.loads(captured.out)
-        assert data["status"] == "ok"
-        assert data["message"] == "done"
-
-    def test_output_error(self, capsys):
-        with pytest.raises(SystemExit) as exc:
-            output("error", "fail")
-        assert exc.value.code == 1
-        captured = capsys.readouterr()
-        data = json.loads(captured.out)
-        assert data["status"] == "error"
-
-    def test_output_extra_fields(self, capsys):
-        with pytest.raises(SystemExit):
-            output("ok", "done", orderId=42, newPrice=22.5)
-        captured = capsys.readouterr()
-        data = json.loads(captured.out)
-        assert data["orderId"] == 42
-        assert data["newPrice"] == 22.5

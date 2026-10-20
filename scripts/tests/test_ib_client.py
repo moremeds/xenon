@@ -194,7 +194,8 @@ class TestConstants:
         assert isinstance(CLIENT_IDS, dict)
         assert "ib_sync" in CLIENT_IDS
         assert "ib_order" in CLIENT_IDS
-        assert "ib_order_manage" in CLIENT_IDS
+        # PR-10: no order-write CLI ids remain (the API's orders role owns them).
+        assert "ib_order_manage" not in CLIENT_IDS and "ib_place_order" not in CLIENT_IDS
 
     def test_default_ports(self):
         # DEFAULT_HOST comes from env/dotenv — verify it's a non-empty string

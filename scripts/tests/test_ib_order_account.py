@@ -177,14 +177,14 @@ def cli(monkeypatch):
     _FakeCliClient.placed_order = None
     _FakeCliClient.raise_on_place = None
     _FakeCliClient.emit_error = None
-    monkeypatch.setattr(ib_place_order, "IBClient", _FakeCliClient)
-    return ib_place_order
+    # PR-10: no CLI; the place core runs on a connected client.
+    return SimpleNamespace(place_order=lambda params: ib_place_order.place_order_on_client(_FakeCliClient(), params))
 
 
 _STOCK = {"type": "stock", "symbol": "SPY", "action": "BUY", "quantity": 1, "limitPrice": 1.0}
 
 
-def test_cli_stamps_payload_account_over_env(cli, monkeypatch):
+def test_core_stamps_payload_account_over_env(cli, monkeypatch):
     monkeypatch.setenv("XENON_BROKER_ACCOUNT", "U1111111")
 
     result = cli.place_order({**_STOCK, "account": "U2222222"})
@@ -193,15 +193,17 @@ def test_cli_stamps_payload_account_over_env(cli, monkeypatch):
     assert _FakeCliClient.placed_order.account == "U2222222"
 
 
-def test_cli_falls_back_to_env_scope_account(cli, monkeypatch):
+def test_core_never_falls_back_to_the_env_account(cli, monkeypatch):
+    """PR-10: the route always forwards the scope account; a missing one is
+    empty and IBClient.place_order fails closed (no env fallback)."""
     monkeypatch.setenv("XENON_BROKER_ACCOUNT", "U1111111")
 
     cli.place_order(dict(_STOCK))
 
-    assert _FakeCliClient.placed_order.account == "U1111111"
+    assert _FakeCliClient.placed_order.account == ""
 
 
-def test_cli_account_error_returns_reason_code(cli):
+def test_core_account_error_returns_reason_code(cli):
     _FakeCliClient.raise_on_place = IBOrderAccountError("ACCOUNT_NOT_MANAGED", "account 'U9' is not managed")
 
     result = cli.place_order({**_STOCK, "account": "U9"})
@@ -211,7 +213,7 @@ def test_cli_account_error_returns_reason_code(cli):
     assert "not managed" in result["message"]
 
 
-def test_cli_maps_ib_435_to_account_unresolved(cli):
+def test_core_maps_ib_435_to_account_unresolved(cli):
     _FakeCliClient.emit_error = (435, "You must specify an account.")
 
     result = cli.place_order({**_STOCK, "account": "U2222222"})

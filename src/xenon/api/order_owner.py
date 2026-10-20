@@ -33,7 +33,7 @@ import threading
 from typing import Any, Callable, Optional
 
 from xenon.api.ib_pool import ORDERS_ROLE
-from xenon.clients.ib_client import READINESS_LOST, READINESS_READY, ClientIdInUse, pool_client_id
+from xenon.clients.ib_client import READINESS_LOST, READINESS_READY, ClientIdInUse, SendRefused, pool_client_id
 
 logger = logging.getLogger("xenon.order_owner")
 
@@ -76,7 +76,7 @@ class Invocation:
         self._move(("started", "sent"), "done")
 
 
-class OwnerRefused(Exception):
+class OwnerRefused(SendRefused):
     """Refusal raised right before a send: nothing was transmitted."""
 
     def __init__(self, classification: str, message: str) -> None:

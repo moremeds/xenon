@@ -15,8 +15,7 @@ from xenon.clients.ib_client import (
     IBClient,
     IBConnectionError,
 )
-from xenon.execution import ib_order_manage
-from xenon.execution.ib_order_manage import _is_clientid_in_use, _reconnect_as_owner, classify_failure
+from xenon.execution.ib_order_manage import _is_clientid_in_use, classify_failure
 
 
 pytestmark = pytest.mark.usefixtures("bypass_broker_boundary")
@@ -81,23 +80,15 @@ def test_explicit_326_raises_typed_error_without_retry(monkeypatch):
     assert sleeps == []
 
 
-def test_typed_error_is_ownership_and_409_path(capsys, monkeypatch):
+def test_typed_error_is_ownership_and_409_path():
+    """ClientIdInUse classifies as ownership (409). PR-10 removed the CLI
+    owner-reconnect retry loop; the order owner halts on it instead
+    (src/xenon/api/tests/test_order_owner.py)."""
     from xenon.clients.ib_client import ClientIdInUse
 
     exc = ClientIdInUse(95)
     assert _is_clientid_in_use(exc)
     assert classify_failure(None, exc) == "ownership"
-
-    # Owner reconnect: real IBClient + FakeIB, retries 3x then ownership.
-    monkeypatch.setattr(ib_order_manage.time, "sleep", lambda *_a, **_k: None)
-    fake = FakeIB(busy_ids={95})
-    client = make_client(fake)
-    with pytest.raises(SystemExit) as se:
-        _reconnect_as_owner(client, "127.0.0.1", 4002, 95)
-    assert se.value.code == 1
-    out = capsys.readouterr().out
-    assert '"classification": "ownership"' in out
-    assert fake.attempted == [95, 95, 95]
 
 
 def test_non_326_timeout_unchanged(monkeypatch):

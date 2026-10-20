@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from xenon.clients.ib_client import IBConnectionError
-from xenon.execution import ib_order_manage, ib_place_order
+from xenon.execution import ib_place_order
 from xenon.execution.ib_order_manage import cancel_order_on_client, modify_order_on_client
 
 
@@ -196,20 +196,6 @@ def test_modify_core_rejected_reply_removes_listener(capsys):
     assert result["amend_outcome"] == "rejected"
     assert result["upstream"]["code"] == 201
     _assert_pure(client, capsys)
-
-
-def test_cli_adapters_keep_the_reconnect_hook(monkeypatch):
-    """The CLI adapter (subprocess) still re-identifies as the owner."""
-    seen = []
-    monkeypatch.setattr(
-        ib_order_manage, "_reconnect_as_owner_core", lambda c, h, p, owner: seen.append((h, p, owner))
-    )
-    t = _trade(client_id=26)
-    client = _client([[t], [t], []], client_id=20)
-    with pytest.raises(SystemExit) as exc:
-        ib_order_manage.cancel_order(client, 10, 12345, "127.0.0.1", 4002)
-    assert exc.value.code == 0
-    assert seen == [("127.0.0.1", 4002, 26)]
 
 
 # --- place --------------------------------------------------------------------

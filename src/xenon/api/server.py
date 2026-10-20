@@ -70,7 +70,7 @@ from xenon.db.queries.blotter import blotter_has_trades, fetch_blotter_pg, fetch
 from xenon.db.schema import account_snapshots, order_events, order_submissions
 from xenon.execution import gate4, ib_order_manage, orders_store, preflight, quote_guard, quote_tokens
 from xenon.execution.account_scope import IBAccountSelectionError, resolve_from_app_state, select_ib_account
-from xenon.execution.ib_place_order import TERMINAL_STATUSES, is_hard_error
+from xenon.execution import ib_place_order
 from xenon.execution.preflight import (
     PortfolioView,
     PreflightRequest,
@@ -2652,7 +2652,7 @@ async def _place_reserved(body: dict, submission_id: str, scope: dict):
             submission_id=submission_id,
             ib_order_id=str(order_id),
             perm_id=str(perm_id),
-            placing_client_id=26,
+            placing_client_id=pool_client_id("orders"),
             expected_states=("PENDING",),
         )
         return {
@@ -2666,61 +2666,94 @@ async def _place_reserved(body: dict, submission_id: str, scope: dict):
         }
 
     # Place on the account the reservation row was stamped with — never on an
-    # account named by the request body, never on IB's default. The
-    # subprocess fails closed if it is legacy_unknown or not managed.
-    # submission_id becomes orderRef "xo:<submission_id>" (recovery key); a
-    # body-supplied orderRef is dropped.
-    cli_body = {k: v for k, v in body.items() if k != "orderRef"}
-    order_json = json.dumps({**cli_body, "account": scope["broker_account"], "submission_id": submission_id})
-    # Budget: connect (10 s) + qualify + ack wait (5 s combo) must fit with
-    # margin — a kill mid-place leaves the order's fate unknown.
-    result = await _run_ib_script_with_recovery(
-        "xenon-ib-place-order", ["--json", order_json], timeout=_PLACE_SUBPROCESS_TIMEOUT_S
+    # account named by the request body, never on IB's default. The core
+    # fails closed if it is legacy_unknown or not managed. submission_id
+    # becomes orderRef "xo:<submission_id>" (recovery key); a body-supplied
+    # orderRef is dropped.
+    params = {
+        **{k: v for k, v in body.items() if k != "orderRef"},
+        "account": scope["broker_account"],
+        "submission_id": submission_id,
+    }
+    if order_owner is None:
+        return _finish_place(submission_id, _owner_unavailable_reply())
+    settled: dict = {}
+
+    def settle(reply: dict) -> None:
+        # Runs exactly once: on the orders worker for a started job (even
+        # when this request is gone), else here for a job that never started.
+        settled["response"] = _finish_place(submission_id, reply)
+
+    await order_owner.run(
+        lambda client: ib_place_order.place_order_on_client(client, params),
+        timeout=_PLACE_TIMEOUT_S,
+        settle=settle,
     )
-    if not result.ok and result.spawned:
-        # Timeout (SIGKILL), crash, or a Gateway drop after the CLI started:
-        # IB may hold the order. Never FAILED without broker evidence (OP-1).
-        logger.warning("place subprocess failed after spawn: submission=%s error=%s", submission_id, result.error)
-        return _place_outcome_unknown(submission_id, result.data or {})
-    if not result.ok:
-        # Refused before the CLI started (cooldown / Gateway down / spawn
-        # failure): nothing reached IB, so the reservation is released.
+    if "response" in settled:
+        return settled["response"]
+    # Deadline after the job started: IB may hold the order. The worker
+    # still owns the final write (PENDING / UNKNOWN → WORKING / REJECTED).
+    logger.warning("place: deadline after start, outcome pending on the worker: submission=%s", submission_id)
+    return _place_outcome_unknown(submission_id, {})
+
+
+# Owner classifications that prove nothing was sent → reason code on the
+# FAILED row and the 503 body (a known 5xx code is terminal in the web).
+_PLACE_NOT_SENT_REASONS = {
+    "connection": ReasonCode.IB_CONNECTION,
+    BROKER_DISCONNECTED: ReasonCode.IB_BROKER_DISCONNECTED,
+    ORDERS_HALTED: ReasonCode.ORDERS_HALTED,
+}
+
+
+def _owner_unavailable_reply() -> dict:
+    return {
+        "status": "error",
+        "message": "Order owner is not running; nothing was sent",
+        "classification": BROKER_DISCONNECTED,
+        "amend_outcome": "not_sent",
+    }
+
+
+def _finish_place(submission_id: str, reply: dict) -> Any:
+    """Persist one place outcome and build its response (A3). Runs on the
+    orders worker for a started job, so it never depends on the request.
+
+    - owner refusal / abandoned before start (``amend_outcome: not_sent``)
+      → FAILED, 503 with IB_CONNECTION / IB_BROKER_DISCONNECTED /
+      ORDERS_HALTED: nothing was sent;
+    - possibly sent, not confirmed (``amend_outcome: unconfirmed``) →
+      UNKNOWN (PENDING only), uncertain 502;
+    - otherwise the core's result through the verdict. Final writes accept
+      PENDING or UNKNOWN (the request may have marked UNKNOWN at its
+      deadline) and never overwrite a state the poller set from broker
+      evidence. The placing clientId stored is always the owner's.
+    """
+    owner_id = pool_client_id("orders")
+    outcome = reply.get("amend_outcome")
+    if outcome == "not_sent" and reply.get("classification") in _PLACE_NOT_SENT_REASONS:
+        reason = _PLACE_NOT_SENT_REASONS[reply["classification"]].value
         orders_store.mark_terminal(
             submission_id=submission_id,
             state="FAILED",
-            reason_code="SUBPROCESS_ERROR",
+            reason_code=reason,
             filled_qty=0,
             avg_fill_price=None,
             expected_states=("PENDING",),
         )
-        # Top-level reason_code: an explicit "not sent" the UI treats as final.
-        return JSONResponse(
-            status_code=502,
-            content={"detail": result.error, "reason_code": ReasonCode.SUBPROCESS_ERROR.value},
-        )
-    verdict = _place_verdict(result.data)
+        return JSONResponse(status_code=503, content={"detail": reply.get("message"), "reason_code": reason})
+    if outcome == "unconfirmed":
+        logger.warning("place: possibly sent, unconfirmed: submission=%s (%s)", submission_id, reply.get("message"))
+        return _place_outcome_unknown(submission_id, {**reply, "clientId": owner_id})
+    return _place_result(submission_id, reply, owner_id)
+
+
+def _place_result(submission_id: str, data: dict, owner_id: int) -> Any:
+    """Verdict + persistence for a place-core result."""
+    final_states = ("PENDING", "UNKNOWN")
+    verdict = _place_verdict(data)
     if verdict == "unknown":
-        return _place_outcome_unknown(submission_id, result.data or {})
-    if verdict == "accepted" and result.data.get("status") == "error":
-        # Legacy payload (no ``outcome``): IB holds the order (permId > 0,
-        # non-terminal status, notice-only code) though the CLI said error.
-        # Never mark it REJECTED: the user would retry and place a duplicate.
-        logger.warning(
-            "IB order accepted despite CLI error: submission=%s ib_code=%s status=%s permId=%s",
-            submission_id,
-            result.data.get("code"),
-            result.data.get("initialStatus"),
-            result.data.get("permId"),
-        )
-        _record_place_event(
-            submission_id,
-            {
-                "ib_code": result.data.get("code"),
-                "ib_message": result.data.get("message"),
-                "initial_status": result.data.get("initialStatus"),
-            },
-        )
-        result.data = {**result.data, "status": "ok"}
+        return _place_outcome_unknown(submission_id, {**data, "clientId": owner_id})
     if verdict == "rejected":
         # B6 — write a reason_code the UI toast map can resolve. Most IB
         # rejections collapse to IB_REJECT, but tick-rule rejections
@@ -2728,11 +2761,15 @@ async def _place_reserved(body: dict, submission_id: str, scope: dict):
         # actionable message instead of raw IB error text. The raw IB
         # numeric code + message always go into the orders_events audit
         # row so we don't lose the info.
-        ib_code = result.data.get("code")
-        ib_message = result.data.get("message", "Order failed")
-        account_reason = result.data.get("reason_code")
-        if account_reason in (ReasonCode.ACCOUNT_UNRESOLVED.value, ReasonCode.ACCOUNT_NOT_MANAGED.value):
-            reason_code = account_reason
+        ib_code = data.get("code")
+        ib_message = data.get("message", "Order failed")
+        core_reason = data.get("reason_code")
+        if core_reason in (
+            ReasonCode.ACCOUNT_UNRESOLVED.value,
+            ReasonCode.ACCOUNT_NOT_MANAGED.value,
+            ReasonCode.INVALID_ORDER_BODY.value,
+        ):
+            reason_code = core_reason
         elif str(ib_code) == "110":
             reason_code = ReasonCode.LIMIT_OFF_TICK.value
             logger.warning(
@@ -2743,16 +2780,16 @@ async def _place_reserved(body: dict, submission_id: str, scope: dict):
         else:
             reason_code = ReasonCode.IB_REJECT.value
         # Conditional: a poller that already saw this order at IB wins, and
-        # then the CLI's "rejected" is contradicted by broker evidence.
+        # then the core's "rejected" is contradicted by broker evidence.
         if not orders_store.mark_terminal(
             submission_id=submission_id,
             state="REJECTED",
             reason_code=reason_code,
             filled_qty=0,
             avg_fill_price=None,
-            expected_states=("PENDING",),
+            expected_states=final_states,
         ):
-            logger.warning("place: CLI rejected but row %s already moved on; not rejecting", submission_id)
+            logger.warning("place: core rejected but row %s already moved on; not rejecting", submission_id)
             return JSONResponse(status_code=502, content={**_PLACE_UNKNOWN_BODY, "submission_id": submission_id})
         try:
             orders_store.record_event(
@@ -2771,18 +2808,19 @@ async def _place_reserved(body: dict, submission_id: str, scope: dict):
             status_code=502,
             content={"detail": ib_message, "reason_code": reason_code},
         )
-    # The CLI returns the clientId it really placed with ("auto" allocates
-    # one); cancel / modify must reuse it. 26 is only the legacy fallback.
+    if data.get("clientId") not in (None, owner_id):
+        logger.warning("place: core reported clientId %s, owner is %s", data.get("clientId"), owner_id)
+    data = {**data, "clientId": owner_id}
     try:
-        # PENDING only: the activity poller may already have bound (WORKING)
-        # or finished (FILLED) this row from broker evidence; never demote it.
+        # PENDING / UNKNOWN only: the activity poller may already have bound
+        # (WORKING) or finished (FILLED) this row from broker evidence;
+        # never demote it.
         orders_store.mark_submitted(
             submission_id=submission_id,
-            ib_order_id=str(result.data.get("orderId") or ""),
-            perm_id=str(result.data.get("permId") or ""),
-            # clientId 0 is a real IB client; only a missing value falls back.
-            placing_client_id=int(result.data["clientId"]) if result.data.get("clientId") is not None else 26,
-            expected_states=("PENDING",),
+            ib_order_id=str(data.get("orderId") or ""),
+            perm_id=str(data.get("permId") or ""),
+            placing_client_id=owner_id,
+            expected_states=final_states,
         )
     except Exception as exc:
         # IB accepted the order: report it (never a 5xx that invites a
@@ -2790,24 +2828,23 @@ async def _place_reserved(body: dict, submission_id: str, scope: dict):
         logger.error("place: IB accepted but persist failed: submission=%s", submission_id, exc_info=True)
         _record_place_event(submission_id, {"persist_error": str(exc)})
         return {
-            **result.data,
+            **data,
             "submission_id": submission_id,
             "persist_warning": "Order accepted by IB but not saved; it will be reconciled from IB.",
         }
-    if result.data.get("ibNotices"):
-        _record_place_event(submission_id, {"notices": result.data["ibNotices"]})
-    return result.data
+    if data.get("ibNotices"):
+        _record_place_event(submission_id, {"notices": data["ibNotices"]})
+    return data
 
 
 def _place_verdict(data: dict | None) -> str:
-    """``accepted`` | ``rejected`` | ``unknown`` for a place CLI result.
+    """``accepted`` | ``rejected`` | ``unknown`` for a place-core result.
 
-    The CLI's explicit ``outcome`` (from the ordered ib_async Trade.log) is
+    The core's explicit ``outcome`` (from the ordered ib_async Trade.log) is
     trusted: ``accepted`` / ``unconfirmed`` → accepted (stored WORKING),
-    ``rejected`` → rejected. Payloads without ``outcome`` (older CLI, or an
-    error raised before placement) fall back conservatively: an error with
-    permId > 0 and a non-terminal status is never REJECTED — accepted when
-    its code is a notice, UNKNOWN when it is a hard error.
+    ``rejected`` → rejected; ``status: uncertain`` → unknown. Every result
+    after ``placeOrder`` carries an outcome or ``uncertain``, so a
+    ``status: error`` without one is a pre-send error → rejected.
 
     A WORKING row is then updated by the activity poller / fill mirror, but
     the activity-mirror sweep (``sweep_disappeared_orders``) skips an empty
@@ -2822,16 +2859,8 @@ def _place_verdict(data: dict | None) -> str:
         return "unknown"
     if outcome == "rejected":
         return "rejected"
-    if outcome in ("accepted", "unconfirmed"):
+    if outcome in ("accepted", "unconfirmed") or data.get("status") != "error":
         return "accepted"
-    if data.get("status") != "error":
-        return "accepted"
-    try:
-        perm_id = int(data.get("permId") or 0)
-    except (TypeError, ValueError):
-        perm_id = 0
-    if perm_id > 0 and str(data.get("initialStatus") or "") not in TERMINAL_STATUSES:
-        return "unknown" if is_hard_error(data.get("code")) else "accepted"
     return "rejected"
 
 
@@ -4089,15 +4118,14 @@ _IB_CONN_REFUSED_PATTERNS = (
     "request timed out",
 )
 
-# Cooldown: after an IB subprocess fails with a connection error, skip
-# subsequent attempts for this many seconds to avoid churn. Tracked per
-# traffic class — order-mutating entries and data/read entries get separate
-# timestamps so a failure in one class never blocks the other.
+# Cooldown: after an IB data subprocess fails with a connection error, skip
+# subsequent attempts for this many seconds to avoid churn. Order writes
+# never spawn (PR-10: they run on the order owner).
 _IB_SCRIPT_COOLDOWN_SECS = 15.0
-# connect timeout 10 s + qualify + ack wait 5 s (combo) ≈ 15 s; 30 s leaves margin.
-_PLACE_SUBPROCESS_TIMEOUT_S = 30
-_IB_ORDER_ENTRIES = frozenset({"xenon-ib-place-order", "xenon-ib-order-manage"})
-_ib_last_failure: dict[str, float] = {"data": 0.0, "order": 0.0}
+_ib_last_failure: dict[str, float] = {"data": 0.0}
+# The order owner's wait for one place: readiness round trip + qualify + ack
+# wait (5 s combo) + queueing behind another order action.
+_PLACE_TIMEOUT_S = 30
 
 
 def _is_ib_connection_error(error_msg: str) -> bool:
@@ -4119,37 +4147,24 @@ def _pool_has_any_connection() -> bool:
     return False
 
 
-def _send_window_closed(args: list) -> bool:
-    """True when args carry `--send-by <iso>` and that instant has passed."""
-    if "--send-by" not in args:
-        return False
-    i = args.index("--send-by")
-    try:
-        send_by = datetime.fromisoformat(str(args[i + 1]))
-    except (IndexError, ValueError):
-        return True  # malformed fence: fail closed, send nothing
-    return datetime.now(timezone.utc) >= send_by
-
-
 async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 30) -> ScriptResult:
-    """Run an IB-dependent xenon-* entry point with pre-flight health check and cooldown.
+    """Run an IB-dependent xenon-* DATA entry point with pre-flight health
+    check and cooldown. Order writes never come here (order owner).
 
     Three layers of fast-fail:
     1. Cooldown: if a recent IB script failed, skip for _IB_SCRIPT_COOLDOWN_SECS
     2. Pool check: if pool is disconnected, verify Gateway before spawning
     3. Post-failure: verify Gateway health before restarting
     """
-    kind = "order" if entry in _IB_ORDER_ENTRIES else "data"
 
-    # Layer 1: Cooldown — skip if a recent failure occurred in this lane
+    # Layer 1: Cooldown — skip if a recent failure occurred
     now = time.monotonic()
-    last_failure = _ib_last_failure.get(kind, 0.0)
+    last_failure = _ib_last_failure["data"]
     if last_failure > 0 and (now - last_failure) < _IB_SCRIPT_COOLDOWN_SECS:
         elapsed = now - last_failure
         logger.debug(
-            "Skipping %s — IB %s cooldown active (%.1fs since last failure, %ds cooldown)",
+            "Skipping %s — IB cooldown active (%.1fs since last failure, %ds cooldown)",
             entry,
-            kind,
             elapsed,
             _IB_SCRIPT_COOLDOWN_SECS,
         )
@@ -4166,7 +4181,7 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
         upstream_dead = gw_status.get("upstream_dead", False)
 
         if not port_ok or upstream_dead:
-            _ib_last_failure[kind] = now
+            _ib_last_failure["data"] = now
             logger.warning(
                 "Skipping %s — Gateway down (port=%s, upstream_dead=%s), pool disconnected",
                 entry,
@@ -4179,24 +4194,15 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
                 spawned=False,
             )
 
-    if _send_window_closed(args):
-        # Cooldown / gateway probe delayed the spawn past the amend's send-by
-        # instant: never start a sender Gate 4 already counts as finished.
-        return ScriptResult(
-            ok=False,
-            error="Modify send window closed before the IB request was sent. Retry the change.",
-            spawned=False,
-        )
-
     result = await run_entry_point(entry, args, timeout=timeout)
 
     # Clear cooldown on success
     if result.ok:
-        _ib_last_failure[kind] = 0.0
+        _ib_last_failure["data"] = 0.0
 
     if not result.ok and _is_ib_connection_error(result.error):
         # Set cooldown to prevent churn from repeated failures
-        _ib_last_failure[kind] = time.monotonic()
+        _ib_last_failure["data"] = time.monotonic()
 
         # Verify Gateway is actually down before restarting
         gw_status = await check_ib_gateway()
@@ -4237,7 +4243,7 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
             gw_result = await restart_ib_gateway()
 
             if gw_result.get("restarted") and gw_result.get("port_listening"):
-                _ib_last_failure[kind] = 0.0  # Clear cooldown after successful restart
+                _ib_last_failure["data"] = 0.0  # Clear cooldown after successful restart
                 if ib_pool:
                     # orders is left to the order owner's supervisor (A2):
                     # the restart is noted so its socket loss is an outage.
@@ -4245,21 +4251,8 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
                         order_owner.note_gateway_restart()
                     await ib_pool.disconnect_all(roles=("sync", "data"))
                     await ib_pool.connect_all(roles=("sync", "data"))
-                if kind == "order":
-                    # OP-1: the first attempt may have reached IB before the
-                    # connection dropped — resending could duplicate the order.
-                    logger.warning(
-                        "IB Gateway restarted; NOT resending order entry %s (possible duplicate)",
-                        entry,
-                    )
-                    result = ScriptResult(
-                        ok=False,
-                        error="IB Gateway restarted; order request NOT resent — check open orders before retrying",
-                        spawned=result.spawned,
-                    )
-                else:
-                    logger.info("IB Gateway restarted, retrying %s", entry)
-                    result = await run_entry_point(entry, args, timeout=timeout)
+                logger.info("IB Gateway restarted, retrying %s", entry)
+                result = await run_entry_point(entry, args, timeout=timeout)
             else:
                 logger.error("IB Gateway restart failed: %s", gw_result)
                 result = ScriptResult(

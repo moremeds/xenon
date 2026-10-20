@@ -4,13 +4,15 @@
 connection; ``install_owner`` puts a real ``OrderOwner`` over them on
 ``server.order_owner``.
 
-``install_runner_cores`` replaces the two connected-client cores the server
-calls with a fake that answers through ``server._run_ib_script_with_recovery`` — looked
-up at call time, so a test that patches that runner drives cancel/modify
-the same way it drives /orders/place. The fake translates the core kwargs
-into the legacy order-manage argument list only so those tests can keep
-asserting the identity tuple; nothing is spawned. ``ScriptResult`` maps to
-the owner lifecycle:
+``install_runner_cores`` replaces the three connected-client cores the
+server calls (place, cancel, modify) with fakes that answer through
+``server._run_ib_script_with_recovery`` — looked up at call time, so a test
+that patches that runner drives every order action the way the pre-PR-10
+route tests did. The runner is data-only in production; the entry names
+``xenon-ib-place-order`` / ``xenon-ib-order-manage`` and the argument lists
+are test LABELS only (those CLIs no longer exist), kept so the existing
+suites keep asserting payloads and identity tuples. Nothing is spawned.
+``ScriptResult`` maps to the owner lifecycle:
 
 - ``ok=True``                  → the reply dict (sent first unless the reply
                                  proves nothing was sent);
@@ -21,12 +23,13 @@ the owner lifecycle:
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 from xenon.api import server as server_mod
 from xenon.api.order_owner import OrderOwner
 from xenon.clients.ib_client import READINESS_READY, pool_client_id
-from xenon.execution import ib_order_manage
+from xenon.execution import ib_order_manage, ib_place_order
 
 def orders_id() -> int:
     return pool_client_id("orders")
@@ -158,6 +161,35 @@ def _answer(client, op: str, args: list[str]) -> dict:
     return data
 
 
+def _answer_place(client, params: dict) -> dict:
+    """Place core double: same send semantics as ``place_order_on_client``.
+
+    A canned ``status: error`` without ``outcome`` / ``permId`` is a pre-send
+    error (the real core returns it before ``placeOrder``); anything else is
+    sent first. An explicit ``outcome: rejected`` carries
+    ``amend_outcome: rejected`` exactly like the real core.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        result = loop.run_until_complete(
+            server_mod._run_ib_script_with_recovery("xenon-ib-place-order", ["--json", json.dumps(params)], timeout=30)
+        )
+    finally:
+        loop.close()
+    if not result.ok:
+        if not getattr(result, "spawned", True):
+            raise _Unsent(result.error or "refused before send")
+        client.place_order(None, None)
+        raise RuntimeError(result.error or "place died after send")
+    data = dict(result.data or {})
+    if data.get("status") == "error" and not data.get("outcome") and not data.get("permId"):
+        return data
+    client.place_order(None, None)
+    if data.get("outcome") == "rejected":
+        data.setdefault("amend_outcome", "rejected")
+    return data
+
+
 def install_runner_cores(monkeypatch, pool: FakePool | None = None) -> tuple[OrderOwner, FakePool]:
     """Owner over a fake pool + cores answered by the patched runner."""
 
@@ -167,15 +199,19 @@ def install_runner_cores(monkeypatch, pool: FakePool | None = None) -> tuple[Ord
     def modify(client, order_id, perm_id, new_price, **kw):
         return _answer(client, "modify", _legacy_args("modify", order_id, perm_id, {"new_price": new_price, **kw}))
 
-    install_cores(monkeypatch, cancel=cancel, modify=modify)
+    install_cores(monkeypatch, cancel=cancel, modify=modify, place=_answer_place)
     return install_owner(monkeypatch, pool)
 
 
-def install_cores(monkeypatch, *, cancel=None, modify=None) -> None:
-    """Swap the cores the SERVER calls; the real module (and the CLI
-    adapters built on it) stays untouched."""
+def install_cores(monkeypatch, *, cancel=None, modify=None, place=None) -> None:
+    """Swap the cores the SERVER calls; the real modules stay untouched."""
     proxy = SimpleNamespace(
         cancel_order_on_client=cancel or ib_order_manage.cancel_order_on_client,
         modify_order_on_client=modify or ib_order_manage.modify_order_on_client,
     )
     monkeypatch.setattr(server_mod, "ib_order_manage", proxy)
+    monkeypatch.setattr(
+        server_mod,
+        "ib_place_order",
+        SimpleNamespace(place_order_on_client=place or ib_place_order.place_order_on_client),
+    )

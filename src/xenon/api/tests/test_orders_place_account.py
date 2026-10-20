@@ -1,11 +1,12 @@
-"""/orders/place forwards the reserved scope account to xenon-ib-place-order.
+"""/orders/place forwards the reserved scope account to the place core.
 
 The reservation row is stamped with the app.state scope account; the IB order
 must go to that same account, never to an account named by the request body
 and never to IB's default. Account failures surface a top-level reason_code.
-A CLI "error" for an order that is live at IB must never mark it REJECTED.
+The row stores the order owner's clientId (base+4).
 
-No DB, no IB: orders_store, preflight and the subprocess runner are stubbed.
+No DB, no IB: orders_store, preflight and the place core (answered through
+the patched runner, scripts/tests/order_owner_fakes.py) are stubbed.
 """
 
 from __future__ import annotations
@@ -17,7 +18,10 @@ import pytest
 from xenon.api import server as server_mod
 from xenon.api.subprocess import ScriptResult
 from xenon.execution import gate4, orders_store
+from xenon.clients.ib_client import pool_client_id
 from xenon.execution.preflight import Verdict
+
+OWNER_ID = pool_client_id("orders")
 
 pytestmark = pytest.mark.asyncio
 
@@ -83,6 +87,11 @@ def harness(monkeypatch):
         monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", _runner)
 
     calls["set_result"] = set_result
+    # PR-10: the place core runs on the order owner; its fake answers through
+    # the runner above (scripts/tests/order_owner_fakes.py).
+    from scripts.tests.order_owner_fakes import install_runner_cores
+
+    install_runner_cores(monkeypatch)
     return calls
 
 
@@ -133,53 +142,6 @@ async def test_place_ib_435_maps_to_account_unresolved(harness):
 # ---------------------------------------------------------------------------
 
 
-async def test_place_error_payload_with_live_perm_id_is_not_rejected(harness):
-    # Older / defensive CLI payload: "error" while IB holds the order live.
-    harness["set_result"](
-        {
-            "status": "error",
-            "code": 399,
-            "message": "IB error 399: Order Message: Warning: your order will not be placed until ...",
-            "orderId": 7,
-            "permId": 123456,
-            "initialStatus": "PreSubmitted",
-        }
-    )
-
-    resp = await server_mod._orders_place_from_body(dict(_COMBO))
-
-    assert harness["terminal"] == []
-    assert harness["submitted"] == [
-        {"submission_id": "sub-1", "ib_order_id": "7", "perm_id": "123456", "placing_client_id": 26}
-    ]
-    assert resp["status"] == "ok"
-    assert resp["permId"] == 123456
-    assert any(e[1] == "IB_NOTICE" for e in harness["events"])
-
-
-async def test_place_error_payload_with_perm_id_but_cancelled_is_rejected(harness):
-    harness["set_result"](
-        {
-            "status": "error",
-            "code": 201,
-            "message": "IB error 201: Order rejected",
-            "orderId": 7,
-            "permId": 123456,
-            "initialStatus": "Cancelled",
-        }
-    )
-
-    resp = await server_mod._orders_place_from_body(dict(_COMBO))
-
-    assert resp.status_code == 502
-    body = json.loads(resp.body)
-    assert body["reason_code"] == "IB_REJECT"
-    assert body["detail"] == "IB error 201: Order rejected"
-    assert harness["terminal"][0]["state"] == "REJECTED"
-    assert harness["terminal"][0]["reason_code"] == "IB_REJECT"
-    assert harness["submitted"] == []
-
-
 async def test_place_validation_error_without_perm_id_is_rejected(harness):
     # ib_async's ValidationError label is not broker acceptance (321 / 434).
     harness["set_result"](
@@ -198,25 +160,6 @@ async def test_place_validation_error_without_perm_id_is_rejected(harness):
     assert resp.status_code == 502
     assert harness["terminal"][0]["state"] == "REJECTED"
     assert harness["submitted"] == []
-
-
-async def test_place_error_payload_filled_with_perm_id_is_accepted(harness):
-    harness["set_result"](
-        {
-            "status": "error",
-            "code": 399,
-            "message": "IB error 399: Warning",
-            "orderId": 7,
-            "permId": 9,
-            "initialStatus": "Filled",
-        }
-    )
-
-    resp = await server_mod._orders_place_from_body(dict(_COMBO))
-
-    assert harness["terminal"] == []
-    assert harness["submitted"][0]["perm_id"] == "9"
-    assert resp["status"] == "ok"
 
 
 async def test_place_110_returns_top_level_limit_off_tick(harness):
@@ -255,7 +198,7 @@ async def test_place_empty_cli_output_marks_unknown_not_pending(harness, data):
             "submission_id": "sub-1",
             "ib_order_id": None,
             "perm_id": None,
-            "placing_client_id": None,
+            "placing_client_id": OWNER_ID,
             "reason_code": "PLACE_OUTCOME_UNKNOWN",
         }
     ]
@@ -263,12 +206,15 @@ async def test_place_empty_cli_output_marks_unknown_not_pending(harness, data):
     assert harness["submitted"] == []
 
 
-async def test_place_stores_the_cli_placing_client_id(harness):
+async def test_place_stores_the_owner_client_id(harness):
+    """PR-10 A3: the owner (base+4) placed it — never the core's or the
+    legacy 26 fallback."""
     harness["set_result"]({"status": "ok", "orderId": 7, "permId": 8, "clientId": 20})
 
-    await server_mod._orders_place_from_body(dict(_COMBO))
+    resp = await server_mod._orders_place_from_body(dict(_COMBO))
 
-    assert harness["submitted"][0]["placing_client_id"] == 20
+    assert harness["submitted"][0]["placing_client_id"] == OWNER_ID
+    assert resp["clientId"] == OWNER_ID
 
 
 async def test_place_ok_with_notices_records_ib_notice_event(harness):
@@ -304,7 +250,7 @@ async def test_place_unconfirmed_399_without_perm_id_goes_working(harness):
     assert resp["status"] == "ok"
     assert harness["terminal"] == []
     assert harness["submitted"] == [
-        {"submission_id": "sub-1", "ib_order_id": "7", "perm_id": "", "placing_client_id": 20}
+        {"submission_id": "sub-1", "ib_order_id": "7", "perm_id": "", "placing_client_id": OWNER_ID}
     ]
 
 
@@ -349,34 +295,3 @@ async def test_place_outcome_accepted_or_unconfirmed_goes_working(harness, outco
     assert harness["terminal"] == []
     assert harness["submitted"][0]["ib_order_id"] == "7"
 
-
-async def test_place_legacy_hard_error_with_perm_id_and_live_status_is_unknown(harness):
-    # No ``outcome``: never REJECT (permId > 0, non-terminal) and never
-    # accept (hard-error code present) → UNKNOWN.
-    harness["set_result"](
-        {
-            "status": "error",
-            "code": 201,
-            "message": "IB error 201: Order rejected",
-            "orderId": 7,
-            "permId": 123456,
-            "initialStatus": "PreSubmitted",
-            "clientId": 20,
-        }
-    )
-
-    resp = await server_mod._orders_place_from_body(dict(_COMBO))
-
-    assert resp.status_code == 502
-    assert json.loads(resp.body)["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
-    # Ids stamped in the same conditional PENDING → UNKNOWN write.
-    assert harness["unknown"] == [
-        {
-            "submission_id": "sub-1",
-            "ib_order_id": "7",
-            "perm_id": "123456",
-            "placing_client_id": 20,
-            "reason_code": "PLACE_OUTCOME_UNKNOWN",
-        }
-    ]
-    assert harness["submitted"] == []

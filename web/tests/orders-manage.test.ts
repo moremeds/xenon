@@ -189,7 +189,7 @@ describe("IB clientId collision prevention", () => {
 });
 
 // =============================================================================
-// Cross-client modify fix -- reconnect as original clientId (Error 103 fix)
+// Cross-client modify -- owner refuses foreign orders (Error 103 fix, PR-10)
 // =============================================================================
 
 describe("Cross-client modify fix (Error 103)", () => {
@@ -203,22 +203,12 @@ describe("Cross-client modify fix (Error 103)", () => {
     scriptContent = await readFile(filePath, "utf8");
   });
 
-  it("modify_order accepts host and port parameters", () => {
-    // The function signature must include host and port so it can reconnect
-    const sigMatch = scriptContent.match(/def modify_order\(([^)]+)\)/);
-    expect(sigMatch).toBeTruthy();
-    const params = sigMatch![1];
-    expect(params.includes("host")).toBeTruthy();
-    expect(params.includes("port")).toBeTruthy();
-  });
-
-  it("modify_order reconnects as original clientId", () => {
-    // Must read trade.order.clientId and reconnect if different
-    expect(
-      scriptContent.includes("trade.order.clientId") ||
-        scriptContent.includes("original_client_id"),
-    ).toBeTruthy();
-    expect(scriptContent.includes("client.disconnect()")).toBeTruthy();
+  it("modify core refuses an order of another clientId instead of reconnecting", () => {
+    // PR-10: the order owner (pool base+4) never reconnects as the original
+    // clientId; a foreign order is refused (ORDER_NOT_OWNED).
+    expect(scriptContent).toMatch(/def modify_order_on_client\(/);
+    expect(scriptContent).toContain("_refuse_foreign_owner(client, trade.order.clientId)");
+    expect(scriptContent).not.toContain("client.disconnect()");
   });
 
   it("modify_order detects IB error events", () => {

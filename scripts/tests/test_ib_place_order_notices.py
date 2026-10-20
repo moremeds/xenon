@@ -26,6 +26,8 @@ later 399 → ValidationError — are ib_async's own. No network.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from ib_async import IB, Execution, Trade
 from ib_async import OrderStatus as IBOrderStatus
@@ -46,7 +48,6 @@ class _WrapperClient:
     """
 
     steps: list[tuple] = []
-    connected = False
 
     last: "_WrapperClient | None" = None
 
@@ -55,9 +56,6 @@ class _WrapperClient:
         self._ib = IB()
         self._ib.wrapper.clientId = _CLIENT_ID
         self.trade: Trade | None = None
-
-    def connect(self, **_kwargs):
-        self.__class__.connected = True
 
     def qualify_all(self, *contracts):
         for idx, contract in enumerate(contracts, start=1):
@@ -104,11 +102,11 @@ class _WrapperClient:
 
 
 @pytest.fixture
-def cli(monkeypatch):
+def cli():
+    """``place_order(params)`` = the place core on a fresh connected stand-in."""
     _WrapperClient.steps = []
-    _WrapperClient.connected = False
-    monkeypatch.setattr(ib_place_order, "IBClient", _WrapperClient)
-    return ib_place_order
+    _WrapperClient.last = None
+    return SimpleNamespace(place_order=lambda params: ib_place_order.place_order_on_client(_WrapperClient(), params))
 
 
 _COMBO = {
@@ -317,12 +315,12 @@ def test_code_435_still_maps_to_account_unresolved(cli):
 
 
 @pytest.mark.parametrize("quantity", [0, -1, 1.5, "1.5"])
-def test_invalid_quantity_is_refused_before_connecting(cli, quantity):
+def test_invalid_quantity_is_refused_before_place(cli, quantity):
     result = cli.place_order({**_COMBO, "quantity": quantity})
 
     assert result["status"] == "error"
     assert result["reason_code"] == "INVALID_ORDER_BODY"
-    assert _WrapperClient.connected is False
+    assert _WrapperClient.last.trade is None
 
 
 # --- round 4: decide from the ordered Trade.log, never the final status ------
@@ -344,6 +342,8 @@ def test_presubmitted_then_201_then_399_is_rejected(cli):
     assert result["status"] == "error"
     assert result["code"] == 201
     assert result["message"] == "IB error 201: Order rejected - reason: margin"
+    # PR-10 T4: an explicit IB rejection stays terminal on the order owner.
+    assert result["amend_outcome"] == "rejected"
 
 
 @pytest.mark.parametrize("perm_id", [0, 55])

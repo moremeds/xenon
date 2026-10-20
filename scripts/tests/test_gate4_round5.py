@@ -5,10 +5,7 @@ match (5), fill lag (6), unstamped UUID rows (7)."""
 
 from __future__ import annotations
 
-import contextlib
-import io
 import json
-import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -215,6 +212,7 @@ def test_pre_send_refusal_sends_nothing_and_releases_token(refuse, client, broke
     engine.dispose()
     assert client.post("/orders/place", json=_sell_call_body("r6-refuse-1")).status_code == 200
     broker_calls.clear()
+    server_mod.order_owner._pool.client.sent.clear()  # the place itself
     reason = refuse(monkeypatch)
 
     resp = _modify_qty(client, 2, 1)
@@ -248,17 +246,9 @@ def test_open_amend_never_expires_before_send_by_plus_grace():
     assert _mirror("990303", 1, observed_at=deadline + timedelta(seconds=1))["expired"] is True
 
 
-def test_route_passes_send_by_to_cli():
-    args = ["modify", "--order-id", "1", "--send-by", (_now() + timedelta(seconds=5)).isoformat()]
-    assert server_mod._send_window_closed(args) is False
-    args[-1] = (_now() - timedelta(seconds=1)).isoformat()
-    assert server_mod._send_window_closed(args) is True
-    assert server_mod._send_window_closed(["modify", "--order-id", "1"]) is False
-
-
-def _fence_cli_run(send_by, *, connect_delay=0.0):
-    """Run the REAL modify_order against a fake IB whose order is owned by
-    clientId 26 (forces the reconnect path). Returns (reply, place calls)."""
+def _fence_core_run(send_by):
+    """Run the REAL modify core on a connected client that owns the order.
+    Returns (reply, place calls)."""
 
     class _Event:
         def __iadd__(self, handler):
@@ -268,7 +258,7 @@ def _fence_cli_run(send_by, *, connect_delay=0.0):
             return self
 
     t = MagicMock()
-    t.order.orderId, t.order.permId, t.order.clientId = 4242, 777001, 26
+    t.order.orderId, t.order.permId, t.order.clientId = 4242, 777001, 0
     t.order.orderType, t.order.lmtPrice, t.order.totalQuantity = "LMT", 2.0, 1
     t.orderStatus.status = "Submitted"
     t.contract.secType = "OPT"
@@ -276,32 +266,15 @@ def _fence_cli_run(send_by, *, connect_delay=0.0):
     c.ib.client.clientId = 0
     c.ib.errorEvent = _Event()
     c.get_open_orders.return_value = [t]
-    c.connect.side_effect = lambda **kw: time.sleep(connect_delay)
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf), pytest.raises(SystemExit):
-        ib_order_manage.modify_order(c, 4242, 777001, None, "127.0.0.1", 4002, new_quantity=2, send_by=send_by)
-    return json.loads(buf.getvalue()), c.place_order.call_count
+    reply = ib_order_manage.modify_order_on_client(c, 4242, 777001, None, new_quantity=2, send_by=send_by)
+    return reply, c.place_order.call_count
 
 
-def test_cli_past_send_by_never_calls_place_order():
-    reply, placed = _fence_cli_run(_now() - timedelta(seconds=1))
+def test_core_past_send_by_never_calls_place_order():
+    reply, placed = _fence_core_run(_now() - timedelta(seconds=1))
     assert placed == 0
     assert reply["classification"] == "send_window_closed"
     assert reply["amend_outcome"] == "not_sent"
-
-
-def test_cli_send_by_rechecked_after_reconnect():
-    """send_by was in the future at start; the owner reconnect ate it."""
-    reply, placed = _fence_cli_run(_now() + timedelta(seconds=0.2), connect_delay=0.3)
-    assert placed == 0
-    assert reply["classification"] == "send_window_closed"
-
-
-def test_cli_rejects_naive_send_by():
-    import argparse
-
-    with pytest.raises(argparse.ArgumentTypeError):
-        ib_order_manage._parse_send_by("2026-10-17T10:00:00")
 
 
 # ---------------------------------------------------------------------------

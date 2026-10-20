@@ -50,6 +50,9 @@ def no_spawn_no_connect(monkeypatch):
 
 def _placed(client, attempt="own-1"):
     _place_bag(client, attempt, shares=250)  # placed by the orders connection (OWNER_ID)
+    orders_client = server_mod.order_owner._pool.client  # forget the place itself
+    orders_client.sent.clear()
+    orders_client.ready_checks = 0
 
 
 def _set_placing_client(cid):
@@ -107,7 +110,7 @@ def test_owner_id_takes_the_owner_path_without_spawn_or_connect(
     assert resp.status_code == 200, resp.text
     assert len(broker_calls) == 1  # the faked core, on the orders worker
     assert [s[0] for s in _order_owner.client.sent] == ["cancel" if op == "cancel" else "place"]
-    assert _order_owner.client.ready_checks == 1  # fresh round trip right before the send
+    assert _order_owner.client.ready_checks == 1  # one fresh round trip before the core
 
 
 def _trade(order_id, perm_id, client_id):
@@ -281,3 +284,142 @@ def test_replace_cancel_sent_without_ack_marks_unknown_and_places_nothing(client
     orders_client.cancel_order.assert_called_once()
     assert broker.places == 0
     assert _attempt_row("rep-noack")["state"] == "UNKNOWN"
+
+
+# -- T4: placement on the owner (A3) -----------------------------------------
+
+
+def _real_place_core(monkeypatch, steps):
+    """The REAL place core on the owner, over a fake connected client backed
+    by a real ib_async wrapper (scripts/tests/test_ib_place_order_notices.py).
+    ``steps`` replay during the ack wait. The stand-in reports clientId 26."""
+    from scripts.tests.test_ib_place_order_notices import _WrapperClient
+    from xenon.execution import ib_place_order
+
+    class _OrdersWrapperClient(_WrapperClient):
+        readiness = broker_readiness = "ready"
+        readiness_generation = 0
+
+        def confirm_broker_ready(self, timeout=5.0):
+            return "ready"
+
+    _WrapperClient.steps = list(steps)
+    orders_client = _OrdersWrapperClient()
+    monkeypatch.setattr(server_mod, "ib_place_order", ib_place_order)
+    server_mod.order_owner._pool.client = orders_client
+    return orders_client
+
+
+def _bag(client, attempt):
+    from scripts.tests.test_gate4_route import _guaranteed_bag_body, _seed_snapshot, _stock
+
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_stock("SPY", 100)])
+    engine.dispose()
+    return client.post("/orders/place", json=_guaranteed_bag_body(attempt))
+
+
+def _attempt(attempt):
+    return next(r._mapping for r in _submission_rows() if r.client_attempt_id == attempt)
+
+
+def test_place_runs_on_the_owner_and_stores_the_owner_id(client, fresh_quote, no_spawn_no_connect, monkeypatch):
+    orders_client = _real_place_core(monkeypatch, [("status", "Submitted", 555001)])
+    resp = _bag(client, "t4-ok")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["clientId"] == OWNER_ID
+    row = _attempt("t4-ok")
+    assert (row["state"], row["perm_id"], row["placing_client_id"]) == ("WORKING", "555001", OWNER_ID)
+    assert orders_client.trade.order.orderRef == f"xo:{row['submission_id']}"
+
+
+def test_real_place_core_rejection_stays_terminal(client, fresh_quote, no_spawn_no_connect, monkeypatch):
+    """Astra round 2: the core's explicit outcome=rejected (after the send
+    mark) is a proven broker rejection — REJECTED, never UNKNOWN."""
+    _real_place_core(monkeypatch, [("error", 7, 201, "Order rejected - reason: margin")])
+    resp = _bag(client, "t4-rej")
+    assert (resp.status_code, resp.json()["reason_code"]) == (502, "IB_REJECT"), resp.text
+    row = _attempt("t4-rej")
+    assert (row["state"], row["reason_code"]) == ("REJECTED", "IB_REJECT")
+
+
+def test_place_sent_without_ack_is_unknown(client, fresh_quote, no_spawn_no_connect, monkeypatch):
+    """Sent, then the socket dies in the ack wait: the core says uncertain,
+    the owner keeps it unconfirmed → PLACE_OUTCOME_UNKNOWN, row UNKNOWN."""
+    orders_client = _real_place_core(monkeypatch, [])
+
+    def _dies(_seconds):
+        raise ConnectionError("socket closed mid-ack")
+
+    orders_client.sleep = _dies
+    resp = _bag(client, "t4-noack")
+    assert (resp.status_code, resp.json()["reason_code"]) == (502, "PLACE_OUTCOME_UNKNOWN"), resp.text
+    assert resp.json()["submission_id"] == _attempt("t4-noack")["submission_id"]
+    row = _attempt("t4-noack")
+    assert (row["state"], row["placing_client_id"]) == ("UNKNOWN", OWNER_ID)
+
+
+def test_place_deadline_after_start_is_unknown_and_worker_finishes(
+    client, fresh_quote, no_spawn_no_connect, monkeypatch
+):
+    """A3: the request answers PLACE_OUTCOME_UNKNOWN at its deadline; the
+    worker still owns the final write (UNKNOWN → WORKING with the owner id)."""
+    import time
+
+    from scripts.tests.order_owner_fakes import install_cores
+
+    started, release = threading.Event(), threading.Event()
+
+    def slow_core(orders_client, params):
+        started.set()
+        orders_client.place_order(None, None)
+        release.wait(5)
+        return {"status": "ok", "outcome": "accepted", "orderId": 61, "permId": 610001, "clientId": 26}
+
+    install_cores(monkeypatch, place=slow_core)
+    monkeypatch.setattr(server_mod, "_PLACE_TIMEOUT_S", 0.3)
+    resp = _bag(client, "t4-late")
+    assert (resp.status_code, resp.json()["reason_code"]) == (502, "PLACE_OUTCOME_UNKNOWN"), resp.text
+    assert _attempt("t4-late")["state"] == "UNKNOWN"
+    release.set()
+    for _ in range(50):
+        if _attempt("t4-late")["state"] != "UNKNOWN":
+            break
+        time.sleep(0.05)
+    row = _attempt("t4-late")
+    assert (row["state"], row["perm_id"], row["placing_client_id"]) == ("WORKING", "610001", OWNER_ID)
+
+
+def test_place_abandoned_while_queued_is_failed_with_zero_sends(
+    client, fresh_quote, no_spawn_no_connect, _order_owner, monkeypatch
+):
+    release = threading.Event()
+    _order_owner._executor.submit(release.wait, 5)  # another order action holds the worker
+    monkeypatch.setattr(server_mod, "_PLACE_TIMEOUT_S", 0.2)
+    try:
+        resp = _bag(client, "t4-queued")
+    finally:
+        release.set()
+    assert (resp.status_code, resp.json()["reason_code"]) == (503, "IB_CONNECTION"), resp.text
+    row = _attempt("t4-queued")
+    assert (row["state"], row["reason_code"]) == ("FAILED", "IB_CONNECTION")
+    assert _order_owner.client.sent == []
+
+
+@pytest.mark.parametrize(
+    ("refuse", "reason"),
+    [("halted", "ORDERS_HALTED"), ("lost", "IB_BROKER_DISCONNECTED"), ("no-owner", "IB_BROKER_DISCONNECTED")],
+)
+def test_place_refused_by_the_owner_is_failed_with_zero_sends(
+    refuse, reason, client, fresh_quote, no_spawn_no_connect, _order_owner, monkeypatch
+):
+    if refuse == "halted":
+        server_mod.order_owner._latch_halt("test")
+    elif refuse == "lost":
+        _order_owner.client.readiness = "lost"
+    else:
+        monkeypatch.setattr(server_mod, "order_owner", None)
+    resp = _bag(client, "t4-refused")
+    assert (resp.status_code, resp.json()["reason_code"]) == (503, reason), resp.text
+    assert _attempt("t4-refused")["state"] == "FAILED"
+    assert _order_owner.client.sent == []

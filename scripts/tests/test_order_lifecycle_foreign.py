@@ -13,7 +13,6 @@ rebuilt SMART/USD one. (Live cancel is exercised in gated Task 5.3.)
 
 from types import SimpleNamespace
 
-import pytest
 from ib_async import Stock
 
 from xenon.execution import ib_order_manage
@@ -73,16 +72,7 @@ def test_modify_reuses_foreign_ib_contract_not_smart_usd():
     trade = _jpy_trade()
     client = _FakeClient(trade)
 
-    # output() prints JSON + sys.exit on the success path.
-    with pytest.raises(SystemExit):
-        ib_order_manage.modify_order(
-            client,
-            order_id=55,
-            perm_id=1001,
-            new_price=1.0,  # absurdly low, would never fill
-            host="127.0.0.1",
-            port=4002,
-        )
+    ib_order_manage.modify_order_on_client(client, 55, 1001, 1.0)  # absurdly low, would never fill
 
     assert client.placed, "modify must re-submit the order"
     submitted = client.placed[0]

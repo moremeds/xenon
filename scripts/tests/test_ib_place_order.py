@@ -21,9 +21,6 @@ class _FakeClient:
     def __init__(self):
         self._ib = _FakeIB()
 
-    def connect(self, **_kwargs):
-        return None
-
     def qualify_all(self, *contracts):
         for idx, contract in enumerate(contracts, start=1):
             contract.conId = idx
@@ -46,10 +43,16 @@ class _FakeClient:
         return None
 
 
-def test_place_order_returns_accepted_tif(monkeypatch):
-    monkeypatch.setattr(ib_place_order, "IBClient", _FakeClient)
+def _place(client_cls, params):
+    """The place core on a fresh connected stand-in (no CLI since PR-10)."""
+    return ib_place_order.place_order_on_client(client_cls(), params)
 
-    result = ib_place_order.place_order(
+
+def test_place_order_returns_accepted_tif():
+    _client_cls = _FakeClient
+
+    result = _place(
+        _client_cls,
         {
             "type": "stock",
             "symbol": "QQQ",
@@ -57,7 +60,7 @@ def test_place_order_returns_accepted_tif(monkeypatch):
             "quantity": 1,
             "limitPrice": 1.0,
             "tif": "GTC",
-        }
+        },
     )
 
     assert _FakeClient.placed_order.tif == "GTC"
@@ -75,16 +78,16 @@ _COMBO = {
 }
 
 
-def test_order_ref_is_xo_submission_id_single_and_bag(monkeypatch):
+def test_order_ref_is_xo_submission_id_single_and_bag():
     """PR-07: every Xenon order carries orderRef "xo:<submission_id>"; a
     body-supplied orderRef (e.g. a spoofed "leg_wizard:" ref) is ignored."""
-    monkeypatch.setattr(ib_place_order, "IBClient", _FakeClient)
+    _client_cls = _FakeClient
     for body in (_STOCK, _COMBO):
-        ib_place_order.place_order({**body, "submission_id": "sub-1", "orderRef": "leg_wizard:spoof"})
+        _place(_client_cls, {**body, "submission_id": "sub-1", "orderRef": "leg_wizard:spoof"})
         assert _FakeClient.placed_order.orderRef == "xo:sub-1"
 
 
-def test_crash_after_place_is_uncertain_not_error(monkeypatch):
+def test_crash_after_place_is_uncertain_not_error():
     """A crash after placeOrder (IB may hold the order) must never read as a
     rejection: the route would release the reservation and invite a resend."""
 
@@ -92,13 +95,13 @@ def test_crash_after_place_is_uncertain_not_error(monkeypatch):
         def sleep(self, _seconds):
             raise ConnectionError("socket closed mid-ack")
 
-    monkeypatch.setattr(ib_place_order, "IBClient", _CrashAfterPlace)
-    result = ib_place_order.place_order({**_STOCK, "submission_id": "sub-2"})
+    _client_cls = _CrashAfterPlace
+    result = _place(_client_cls, {**_STOCK, "submission_id": "sub-2"})
     assert result["status"] == "uncertain"
     assert result["orderId"] == 12345
 
 
-def test_exception_from_place_order_is_uncertain(monkeypatch):
+def test_exception_from_place_order_is_uncertain():
     """The send boundary is BEFORE place_order: an exception it raises may
     come after the socket write, so it is uncertain, never error."""
 
@@ -106,11 +109,10 @@ def test_exception_from_place_order_is_uncertain(monkeypatch):
         def place_order(self, _contract, _order):
             raise ConnectionError("socket reset")
 
-    monkeypatch.setattr(ib_place_order, "IBClient", _RaisesInPlace)
-    assert ib_place_order.place_order(dict(_STOCK))["status"] == "uncertain"
+    assert _place(_RaisesInPlace, dict(_STOCK))["status"] == "uncertain"
 
 
-def test_real_sdk_exception_after_send_is_uncertain(monkeypatch):
+def test_real_sdk_exception_after_send_is_uncertain():
     """Real ib_async ``IB.placeOrder``: it sends (client.placeOrder) and only
     then does bookkeeping. An exception after the send must be uncertain."""
     from ib_async import IB
@@ -136,24 +138,25 @@ def test_real_sdk_exception_after_send_is_uncertain(monkeypatch):
             self._require_managed_account = lambda account: account
             return IBClient.place_order(self, contract, order)
 
-    monkeypatch.setattr(ib_place_order, "IBClient", _RealSdkClient)
-    result = ib_place_order.place_order({**_STOCK, "submission_id": "sub-3"})
+    _client_cls = _RealSdkClient
+    result = _place(_client_cls, {**_STOCK, "submission_id": "sub-3"})
     assert sent == [99]
     assert result["status"] == "uncertain"
 
 
-def test_account_error_before_send_stays_error(monkeypatch):
+def test_account_error_before_send_stays_error():
     from xenon.clients.ib_client import IBOrderAccountError
 
     class _NoAccount(_FakeClient):
         def place_order(self, _contract, _order):
             raise IBOrderAccountError("ACCOUNT_UNRESOLVED", "no managed account")
 
-    monkeypatch.setattr(ib_place_order, "IBClient", _NoAccount)
-    assert ib_place_order.place_order(dict(_STOCK))["status"] == "error"
+    result = _place(_NoAccount, dict(_STOCK))
+    # Raised before ib.placeOrder: terminal for the order owner, never unconfirmed.
+    assert (result["status"], result["amend_outcome"]) == ("error", "rejected")
 
 
-def test_unqualified_contract_is_error_before_place(monkeypatch):
+def test_unqualified_contract_is_error_before_place():
     """ib_async 2.x returns [None] for an unknown contract; qualify_one raises
     IBContractError, so nothing is placed."""
     from xenon.clients.ib_client import IBClient
@@ -167,9 +170,38 @@ def test_unqualified_contract_is_error_before_place(monkeypatch):
             return IBClient.qualify_all(probe, *contracts)
 
     _NoneQualify.placed_order = None
-    monkeypatch.setattr(ib_place_order, "IBClient", _NoneQualify)
+    _client_cls = _NoneQualify
     for body in (_STOCK, _COMBO):
-        result = ib_place_order.place_order(dict(body))
+        result = _place(_client_cls, dict(body))
         assert result["status"] == "error"
         assert "Could not qualify" in result["message"]
     assert _NoneQualify.placed_order is None
+
+
+def test_owner_send_refusal_propagates_never_uncertain():
+    """PR-10 T4: the owner's pre-send guard raises inside client.place_order
+    (after the core's ``placed`` mark). It proves nothing was sent, so the
+    core must re-raise it — never report ``uncertain``."""
+    import pytest
+
+    from xenon.clients.ib_client import SendRefused
+
+    class _Refused(_FakeClient):
+        def place_order(self, _contract, _order):
+            raise SendRefused("broker readiness changed")
+
+    with pytest.raises(SendRefused):
+        _place(_Refused, dict(_STOCK))
+
+
+def test_missing_fields_are_refused_before_place():
+    _FakeClient.placed_order = None
+    combo = {**_COMBO, "legs": [_COMBO["legs"][0]]}
+    for body, missing in (
+        ({k: v for k, v in _STOCK.items() if k != "limitPrice"}, "limitPrice"),
+        ({**_STOCK, "type": "option"}, "expiry"),
+        (combo, "legs (2+ entries)"),
+    ):
+        result = _place(_FakeClient, body)
+        assert result["reason_code"] == "INVALID_ORDER_BODY" and missing in result["message"]
+    assert _FakeClient.placed_order is None

@@ -77,6 +77,12 @@ class IBOrderError(IBError):
     """Raised when an order operation fails."""
 
 
+class SendRefused(Exception):
+    """A send guard refused right before ``placeOrder`` / ``cancelOrder``:
+    nothing was transmitted. Order cores must let it propagate (never read
+    it as a failure after the send)."""
+
+
 class IBOrderAccountError(IBOrderError):
     """A new order has no usable account; it was NOT sent to IB.
 
@@ -148,7 +154,6 @@ POOL_ROLES: dict = {
 # Registry of named non-pool callers (offsets from the base). Names that map
 # into the pool or relay zone are refused by the allocation check.
 CLIENT_IDS: dict = {
-    "ib_order_manage": 20,  # subprocess range (auto-allocate preferred)
     "ib_sync": 3,  # pool role
     "ib_orders": 4,  # pool role
     "ib_reconcile": 21,  # subprocess range
@@ -156,7 +161,6 @@ CLIENT_IDS: dict = {
     "ib_fill_monitor": 70,  # daemon range
     "exit_order_service": 71,  # daemon range
     "fetch_analyst_ratings": 90,  # standalone CLI range
-    "ib_place_order": 24,  # subprocess range
     "ib_option_chain": 27,  # subprocess range (/options/chain, /options/expirations)
     "vcg_scanner": 50,  # scanner range
     "cri_scanner": 5,  # pool data role
@@ -478,7 +482,7 @@ class IBClient:
             except Exception as exc:
                 if CLIENT_ID_IN_USE_CODE in codes:
                     # Retrying the same id cannot succeed while the incumbent
-                    # holds it; callers (ib_order_manage) own their retry loop.
+                    # holds it; the caller decides (the order owner halts).
                     raise ClientIdInUse(client_id, str(exc)) from exc
                 last_exc = exc
                 self.logger.warning(
