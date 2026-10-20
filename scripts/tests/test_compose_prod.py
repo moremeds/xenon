@@ -403,7 +403,7 @@ def test_refresh_exit_trap_keeps_a_lock_it_does_not_own(tmp_path: Path) -> None:
 
 def test_api_stop_budget_covers_the_graceful_ib_disconnect() -> None:
     """PR-10: compose stop and Watchtower redeploy both wait 60s for the api
-    (uvicorn 10s drain + 35s IB disconnect); a 10s default SIGKILLs it with
+    (uvicorn 10s drain + 35s IB disconnect wait + 10s other cleanup); a 10s default SIGKILLs it with
     its gateway sockets open."""
     import re
 
@@ -416,4 +416,4 @@ def test_api_stop_budget_covers_the_graceful_ib_disconnect() -> None:
     drain = int(re.search(r'"--timeout-graceful-shutdown", "(\d+)"', dockerfile).group(1))
     from xenon.api import server
 
-    assert drain + server._SHUTDOWN_IB_DISCONNECT_S < 60
+    assert drain + server._SHUTDOWN_IB_DISCONNECT_S + sum(server._SHUTDOWN_STEP_S.values()) < 60

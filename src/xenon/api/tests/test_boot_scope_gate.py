@@ -237,5 +237,23 @@ async def test_lifespan_shutdown_stops_owner_and_disconnects_every_role_bounded(
 
     assert stopped == [True]
     assert pool.disconnect_calls == [{"timeout": server_mod._SHUTDOWN_IB_DISCONNECT_S}]
-    # The budget covers a started place job on the orders worker.
-    assert server_mod._SHUTDOWN_IB_DISCONNECT_S > server_mod._PLACE_TIMEOUT_S
+
+
+async def test_hanging_listener_never_blocks_the_ib_disconnect(boot, monkeypatch):
+    """Astra T5 F3: a stalled Postgres LISTEN close runs after the IB section
+    and is bounded; the pool still gets its disconnect and shutdown ends."""
+    import asyncio
+    import time
+
+    async def _hang(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(_FakeJournal, "stop", _hang)
+    monkeypatch.setitem(server_mod._SHUTDOWN_STEP_S, "listener", 0.1)
+    account = "DU0000000" if trading_mode.MODE == "paper" else "U0000000"
+
+    t0 = time.monotonic()
+    pool = next(c for c in await boot(account) if isinstance(c, _FakePool))
+
+    assert pool.disconnect_calls == [{"timeout": server_mod._SHUTDOWN_IB_DISCONNECT_S}]
+    assert time.monotonic() - t0 < 5

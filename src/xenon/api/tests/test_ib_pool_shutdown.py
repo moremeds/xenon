@@ -51,24 +51,71 @@ async def test_every_role_disconnects_on_its_own_worker():
     assert all(ex._shutdown for ex in pool._role_executors.values())
 
 
-async def test_busy_role_is_bounded_and_others_still_disconnect(caplog):
+@pytest.mark.parametrize("release_after_wait", [False, True], ids=["released-before-deadline", "released-after-deadline"])
+async def test_busy_role_disconnect_is_never_dropped(release_after_wait, caplog):
+    """Astra T5 F1: a disconnect queued behind a started order job is never
+    cancelled or forgotten — it runs once when the job ends, whether that is
+    before or after disconnect_all stops waiting."""
     pool, clients, _ = _pool_with_clients()
     release = threading.Event()
-    # A started order job still holds the orders worker.
-    pool._role_executors["orders"].submit(release.wait, 5)
+    busy = pool._role_executors["orders"].submit(release.wait, 5)  # a started order job
+    if not release_after_wait:
+        threading.Timer(0.1, release.set).start()
 
     t0 = time.monotonic()
-    with caplog.at_level(logging.CRITICAL, logger="xenon.api.ib_pool"):
-        await pool.disconnect_all(timeout=0.3)
+    with caplog.at_level(logging.CRITICAL, logger="xenon.ib_pool"):
+        await pool.disconnect_all(timeout=0.5 if not release_after_wait else 0.2)
     elapsed = time.monotonic() - t0
-    release.set()
-
-    assert elapsed < 2, elapsed  # parallel and bounded, not 0.3 * roles or 5 s
+    assert elapsed < 2, elapsed  # parallel and bounded, not per role
     for role, client in clients.items():
         if role != "orders":
             client.disconnect.assert_called_once_with()
-    assert pool._connected["orders"] is False
-    assert any("orders" in r.getMessage() and "stale sockets" in r.getMessage() for r in caplog.records)
+
+    if release_after_wait:
+        clients["orders"].disconnect.assert_not_called()
+        assert pool._clients["orders"] is clients["orders"]  # still reachable
+        assert any("still queued" in r.getMessage() for r in caplog.records)
+        release.set()
+    busy.result(timeout=5)
+    for _ in range(100):
+        if clients["orders"].disconnect.call_count:
+            break
+        time.sleep(0.01)
+    assert clients["orders"].disconnect.call_count == 1
+
+
+async def test_shutdown_during_reconnect_closes_the_late_connection(monkeypatch):
+    """Astra T5 F2: SIGTERM while the owner supervisor awaits reconnect_role.
+    The supervisor is cancelled, the connect finishes after disconnect_all
+    began: the worker disconnects the new client and never registers it."""
+    import asyncio
+
+    from xenon.api import ib_pool as ib_pool_mod
+
+    pool = IBPool()
+    connecting, release = threading.Event(), threading.Event()
+    late = MagicMock()
+
+    def held_connect(host, port, client_id, timeout):
+        connecting.set()
+        release.wait(5)
+        return late
+
+    monkeypatch.setattr(ib_pool_mod, "_connect_in_thread", held_connect)
+    supervisor = asyncio.create_task(pool.reconnect_role("orders"))
+    while not connecting.is_set():
+        await asyncio.sleep(0.01)
+    supervisor.cancel()  # OrderOwner.stop() cancels the supervisor mid-await
+    await pool.disconnect_all(timeout=0.2)  # nothing registered to disconnect yet
+    release.set()
+    for _ in range(200):
+        if late.disconnect.call_count:
+            break
+        await asyncio.sleep(0.01)
+    assert late.disconnect.call_count == 1
+    assert "orders" not in pool._clients
+    with pytest.raises(asyncio.CancelledError):
+        await supervisor
 
 
 async def test_disconnect_error_never_escapes():

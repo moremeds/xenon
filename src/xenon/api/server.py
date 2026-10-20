@@ -434,6 +434,26 @@ async def _stop_wizard_risk_alert() -> None:
         pass
 
 
+async def _cancel_task(task) -> None:
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+
+
+async def _bounded_cleanup(name: str, aw, seconds: float) -> None:
+    """One shutdown step: bounded, logged, never raises."""
+    try:
+        await asyncio.wait_for(aw, seconds)
+    except asyncio.TimeoutError:
+        logger.error("shutdown: %s did not finish within %ss; continuing", name, seconds)
+    except Exception:  # noqa: BLE001
+        logger.exception("shutdown: %s failed", name)
+
+
 def _maybe_start_futu_history_loop() -> None:
     """Start the nightly Futu trades + cashflows + NAV walk loop.
 
@@ -737,49 +757,40 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        # Shutdown — always runs, even if the app raised.
-        listener = getattr(app.state, "journal_auto_import", None)
-        if listener is not None:
-            try:
-                await listener.stop()
-            except Exception:  # noqa: BLE001
-                logger.exception("journal auto-import listener failed to stop")
-        ib_activity_task = getattr(app.state, "ib_activity_poller_task", None)
-        if ib_activity_task is not None:
-            ib_activity_task.cancel()
-            try:
-                await ib_activity_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
-        await _stop_wizard_risk_alert()
-        futu_loop_task = getattr(app.state, "futu_history_loop_task", None)
-        if futu_loop_task is not None:
-            futu_loop_task.cancel()
-            try:
-                await futu_loop_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
-        if order_owner is not None:
-            # Intentional disconnect: the supervisor stops first and queued
-            # order jobs are abandoned (zero sends) before the pool closes.
-            try:
-                await order_owner.stop()
-            except Exception:  # noqa: BLE001
-                logger.exception("order owner failed to stop")
-        if ib_pool:
-            # Graceful IB disconnect for every role (bounded): a socket left
-            # open past the container stop keeps its clientId in use on the
-            # gateway, and the next api start then halts orders on 326.
-            try:
-                await ib_pool.disconnect_all(timeout=_SHUTDOWN_IB_DISCONNECT_S)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("ib_pool.disconnect_all failed: %s", exc)
-        if _futu_client is not None:
-            try:
-                _futu_client.disconnect()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("FutuClient disconnect on shutdown failed: %s", exc)
-        await dispose_engine()
+        # Shutdown — always runs, even if the app raised. The IB section goes
+        # FIRST and in its own try/finally, so no other cleanup (a stalled
+        # Postgres LISTEN close, Futu, ...) can delay or skip it. Every await
+        # here is bounded; see _SHUTDOWN_* for the budget.
+        try:
+            if order_owner is not None:
+                # stop() refuses admission at once, abandons queued order jobs
+                # (zero sends) and cancels the supervisor.
+                await _bounded_cleanup("order owner stop", order_owner.stop(), _SHUTDOWN_STEP_S["owner"])
+            if ib_pool:
+                try:
+                    await ib_pool.disconnect_all(timeout=_SHUTDOWN_IB_DISCONNECT_S)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("ib_pool.disconnect_all failed: %s", exc)
+        finally:
+            listener = getattr(app.state, "journal_auto_import", None)
+            if listener is not None:
+                await _bounded_cleanup("journal auto-import listener", listener.stop(), _SHUTDOWN_STEP_S["listener"])
+            await _bounded_cleanup(
+                "ib activity poller",
+                _cancel_task(getattr(app.state, "ib_activity_poller_task", None)),
+                _SHUTDOWN_STEP_S["poller"],
+            )
+            await _bounded_cleanup("wizard risk alert", _stop_wizard_risk_alert(), _SHUTDOWN_STEP_S["wizard"])
+            await _bounded_cleanup(
+                "futu history loop",
+                _cancel_task(getattr(app.state, "futu_history_loop_task", None)),
+                _SHUTDOWN_STEP_S["futu_loop"],
+            )
+            if _futu_client is not None:
+                await _bounded_cleanup(
+                    "FutuClient disconnect", asyncio.to_thread(_futu_client.disconnect), _SHUTDOWN_STEP_S["futu"]
+                )
+            await _bounded_cleanup("engine dispose", dispose_engine(), _SHUTDOWN_STEP_S["engine"])
         logger.info("Xenon API shut down")
 
 
@@ -4155,11 +4166,25 @@ _ib_last_failure: dict[str, float] = {"data": 0.0}
 # The order owner's wait for one place: readiness round trip + qualify + ack
 # wait (5 s combo) + queueing behind another order action.
 _PLACE_TIMEOUT_S = 30
-# Lifespan shutdown budget for the IB disconnect (all roles in parallel). It
-# covers a started place job (_PLACE_TIMEOUT_S) on the orders worker. The api
-# container's stop_grace_period must exceed uvicorn's request drain
-# (--timeout-graceful-shutdown in docker/api.Dockerfile) plus this budget.
+# Lifespan shutdown budget. uvicorn drains requests for 10 s
+# (--timeout-graceful-shutdown, docker/api.Dockerfile), then the lifespan
+# runs: IB disconnect wait 35 s + the other steps (sum 10 s) = 55 s, under
+# the 60 s compose stop_grace_period / WATCHTOWER_TIMEOUT. The IB wait
+# bounds only the wait: a disconnect queued behind a started order core is
+# never dropped and runs when the core ends. A core blocked on a broker call
+# with no timeout of its own (_PLACE_TIMEOUT_S bounds the HTTP caller, not
+# the core) can outlive the whole budget; SIGKILL is then the backstop and
+# the socket may stay open on the gateway (runbook: stale-socket check).
 _SHUTDOWN_IB_DISCONNECT_S = 35
+_SHUTDOWN_STEP_S = {
+    "owner": 2,
+    "listener": 2,
+    "poller": 1,
+    "wizard": 1,
+    "futu_loop": 1,
+    "futu": 1,
+    "engine": 2,
+}
 
 
 def _is_ib_connection_error(error_msg: str) -> bool:
