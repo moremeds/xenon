@@ -8,8 +8,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 ## [0.10.0] — 2026-10-20
 
 - **Large dead-code removal (pure-portfolio cleanup).** Unused API routes, execution paths, data-layer queries, utilities, the dormant launchd deploy and spent scripts are gone. A new CI job (`ruff --select F`) keeps unused imports and undefined names out.
-- **The monitor daemon now runs inside FastAPI.** The Wizard Risk Alert is a lifespan task; the banner and the IB Flex token expiry show in the UI and on `/health`.
-- **Every CLI answers `--help` without opening a socket.** Write CLIs refuse to write under `XENON_READ_ONLY=1`.
+- **The monitor daemon is removed.** The Wizard Risk Alert now runs as a FastAPI lifespan task and feeds the workspace banner. The IB Flex token expiry appears in the Operator console and on `/health`.
+- **Every registered CLI answers `--help` without opening a socket.** `xenon-nav-flex-refresh`, `xenon-futu-statement-sync` and `flex_divergence_check --apply` refuse to write under `XENON_READ_ONLY=1`.
 - **IB 326 (clientId in use) is detected.** Auto clientId allocation moves to the next free id instead of failing, and an owner conflict on cancel/modify returns 409.
 - **Prod compose fixes.** The relay binds `0.0.0.0` and validates WebSocket tickets against `http://api:8321`.
 - **Database: a DESTRUCTIVE migration drops twelve dead signal-layer tables.** Nothing is dropped until the operator runs the migrator; dump the tables first (see Database below).
