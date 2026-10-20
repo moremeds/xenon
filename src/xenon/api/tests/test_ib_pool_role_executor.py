@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from xenon.api.ib_pool import IBPool
+from xenon.api.ib_pool import POOL_ROLES, IBPool
 
 
 def _make_fake_client(connected: bool = True) -> MagicMock:
@@ -168,42 +168,28 @@ async def test_run_sync_after_connect_runs_on_same_thread(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_disconnect_all_then_connect_all_succeeds(monkeypatch):
-    """The auto-restart wrapper calls
-    disconnect_all() then connect_all() on the SAME pool instance. If
-    disconnect_all leaves executors in a shut-down state, the next
-    connect_all hits ``RuntimeError: cannot schedule new futures after
-    shutdown`` for every role — silently reporting the pool dead.
-    """
+async def test_full_close_is_terminal(monkeypatch):
+    """A full disconnect_all closes the pool for good (PR-10 T5, Astra
+    R2-1/R3-1/R4-1): a later connect_all on the same instance connects
+    nothing and reports every role False. The gateway-restart path uses role
+    subsets and never closes the pool."""
     pool = IBPool()
+    calls: list[int] = []
 
     def fake_connect(host, port, client_id, timeout):
+        calls.append(client_id)
         return _make_fake_client(connected=True)
 
     monkeypatch.setattr("xenon.api.ib_pool._connect_in_thread", fake_connect)
 
-    # First connect — populates clients, executors are fresh.
-    status1 = await pool.connect_all()
-    assert all(status1.values()), f"first connect_all failed: {status1}"
-
-    # Disconnect — must NOT permanently kill the executors.
+    assert all((await pool.connect_all()).values())
     await pool.disconnect_all()
+    calls.clear()
 
-    # Re-connect on the same pool instance — must succeed.
-    status2 = await pool.connect_all()
-    assert all(status2.values()), (
-        f"second connect_all failed: {status2} — "
-        f"disconnect_all left executors unusable"
-    )
-
-    # And run_sync on a re-created executor must work.
-    captured: dict = {}
-
-    def sync_fn():
-        captured["thread_name"] = threading.current_thread().name
-
-    await pool.run_sync("sync", sync_fn)
-    assert "ib_pool_sync" in captured["thread_name"]
+    assert await pool.connect_all() == {role: False for role in POOL_ROLES}
+    assert await pool.connect_all(roles=("sync", "data")) == {"sync": False, "data": False}
+    assert calls == []
+    assert pool._clients == {}
 
 
 def test_server_factories_pass_role_runner_to_pool(monkeypatch):
