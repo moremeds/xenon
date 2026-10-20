@@ -148,6 +148,10 @@ services:
       WATCHTOWER_LABEL_ENABLE: "true"
       WATCHTOWER_CLEANUP: "true"
       WATCHTOWER_INCLUDE_RESTARTING: "true"
+      # Watchtower stops a container with its OWN timeout (default 10s), not
+      # the service's stop_grace_period. 60s lets the api finish its graceful
+      # IB disconnect on a redeploy (PR-10; stale gateway clientIds otherwise).
+      WATCHTOWER_TIMEOUT: 60s
       WATCHTOWER_NOTIFICATIONS_LEVEL: info
       # Push a ntfy.sh alert ONLY when a container is actually updated/failed.
       # REPORT=true + a template guarded by (or .Updated .Failed) → renders empty
