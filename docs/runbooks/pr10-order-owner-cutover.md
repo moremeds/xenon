@@ -32,6 +32,8 @@ Zones inside a block (absolute id = base + offset):
    - the diff against the live file shows only those changes plus `WATCHTOWER_NOTIFICATION_URL` becoming `${WATCHTOWER_NOTIFICATION_URL}` interpolation and comment lines. Explain any other difference before you apply; if you cannot, stop.
 2. **List the open orders that the new build will refuse, and save the list.** On the mini, read-only against `core_dev` (the read-only session setting refuses any write):
 
+   Connection: the commands below use `/opt/xenon/.pgpass-refresh`, which exists only after the refresh-core-test job is installed (`deploy/README.md`). Check first with `test -f /opt/xenon/.pgpass-refresh && echo present`. If it is missing, run the same SQL from an operator machine with the `core_dev` URL instead (strip any `+psycopg` / `+asyncpg` driver suffix): `PGOPTIONS='-c default_transaction_read_only=on' psql "<core_dev URL>" --csv -c "<same SQL>"`. Never print the URL.
+
    ```bash
    cd /opt/xenon
    PGOPTIONS='-c default_transaction_read_only=on' PGHOST=localhost PGUSER=xenon_migrator \
