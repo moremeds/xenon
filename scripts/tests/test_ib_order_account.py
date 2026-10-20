@@ -117,6 +117,10 @@ class _ErrorEvent:
         self.handlers.append(handler)
         return self
 
+    def __isub__(self, handler):  # PR-10 T2: the core removes its listener
+        self.handlers.remove(handler)
+        return self
+
 
 class _FakeCliClient:
     """Fake IBClient for ib_place_order: records the order, can emit IB errors."""

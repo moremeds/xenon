@@ -13,6 +13,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ### Changed
 
+- PR-10 (single order owner), part 2 — connected-client cores, no behaviour change. `ib_order_manage.cancel_order_on_client` / `modify_order_on_client` and `ib_place_order.place_order_on_client` act on an already-connected client and return the structured reply. They never print, exit, arm the watchdog, connect or disconnect; their errorEvent listener is removed in `finally`; the amend stage (`amend_outcome`) is per invocation, not module state. By default a core refuses an order owned by another clientId (`ownership`). The CLIs are thin adapters over the cores with the same JSON / exit-code contract (the cancel/modify CLI still reconnects as the owner). The place CLI's combo summary line and the 110 tick-rejection record now go to the `xenon.ib_place_order` logger instead of stdout/stderr prints.
 - CI runs `ruff check --select F src scripts` (new `ruff-pyflakes` job, ruff from the locked `dev` extra). Unused imports, unused locals and placeholder-less f-strings are removed across `src/` and `scripts/` (PR-16, no behaviour change).
 
 ### Removed

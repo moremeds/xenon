@@ -7,6 +7,9 @@ class _ErrorEvent:
     def __iadd__(self, _handler):
         return self
 
+    def __isub__(self, _handler):  # PR-10 T2: the core removes its listener
+        return self
+
 
 class _FakeIB:
     errorEvent = _ErrorEvent()

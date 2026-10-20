@@ -11,6 +11,7 @@ Usage:
 """
 
 import json
+import logging
 import os
 import re
 import sys
@@ -33,6 +34,8 @@ from xenon.execution.orders_store import order_ref_for
 
 CLIENT_ID = CLIENT_IDS.get("ib_place_order", 26)
 PORT = DEFAULT_GATEWAY_PORT
+
+logger = logging.getLogger("xenon.ib_place_order")
 
 # IB error 435 "You must specify an account": the gateway login manages more
 # than one account and the order named none.
@@ -158,8 +161,42 @@ def _build_stock_contract(params: dict) -> "Stock":
     return Stock(symbol, exchange, currency)
 
 
+def _invalid_quantity(params: dict) -> dict | None:
+    """``INVALID_ORDER_BODY`` error when quantity is not a positive whole number."""
+    if _parse_quantity(params.get("quantity")) is None:
+        return {
+            "status": "error",
+            "reason_code": "INVALID_ORDER_BODY",
+            "message": f"quantity must be a positive whole number, got {params.get('quantity')!r}",
+        }
+    return None
+
+
 def place_order(params: dict) -> dict:
-    """Place a limit order and return result as dict.
+    """CLI adapter: connect (``auto``), run :func:`place_order_on_client`, disconnect.
+
+    An invalid quantity is refused before connecting. A failed connect is
+    ``status: error`` ("Connection failed: ...") — nothing was sent.
+    """
+    invalid = _invalid_quantity(params)
+    if invalid is not None:
+        return invalid
+    client = IBClient()
+    try:
+        client.connect(host=DEFAULT_HOST, port=PORT, client_id="auto", timeout=10)
+    except Exception as e:
+        return {"status": "error", "message": f"Connection failed: {e}"}
+    try:
+        return place_order_on_client(client, params)
+    finally:
+        client.disconnect()
+
+
+def place_order_on_client(client: IBClient, params: dict) -> dict:
+    """Place a limit order on an already-connected client; return the result.
+
+    No print, exit or disconnect; the errorEvent listener is removed in
+    ``finally`` so a long-lived client does not accumulate listeners.
 
     After the ack wait the result carries an explicit ``outcome`` from
     ``decide_outcome`` (the ordered ``Trade.log`` timeline, never the final
@@ -177,13 +214,10 @@ def place_order(params: dict) -> dict:
     order_type = params.get("type", "stock")
     symbol = params["symbol"].upper()
     action = params["action"].upper()
+    invalid = _invalid_quantity(params)
+    if invalid is not None:
+        return invalid
     quantity = _parse_quantity(params.get("quantity"))
-    if quantity is None:
-        return {
-            "status": "error",
-            "reason_code": "INVALID_ORDER_BODY",
-            "message": f"quantity must be a positive whole number, got {params.get('quantity')!r}",
-        }
     limit_price = float(params["limitPrice"])
     tif = params.get("tif", "DAY").upper()
     # FastAPI forwards the scope account it stamped on the reservation row.
@@ -191,14 +225,17 @@ def place_order(params: dict) -> dict:
     # value is rejected by IBClient.place_order (fail closed).
     account = str(params.get("account") or os.environ.get("XENON_BROKER_ACCOUNT", "")).strip()
 
-    client = IBClient()
     placed = False
     trade = None
+    # Invocation-local: IB error events seen during the ack wait. Only events
+    # whose reqId is THIS order's orderId can reject it; reqId -1 is a
+    # connection-wide message and other reqIds belong to other requests.
+    ib_events: list[tuple[int, int, str]] = []
+    listening = False
 
-    try:
-        client.connect(host=DEFAULT_HOST, port=PORT, client_id="auto", timeout=10)
-    except Exception as e:
-        return {"status": "error", "message": f"Connection failed: {e}"}
+    def _on_error(reqId, errorCode, errorString, contract=None):
+        if errorCode not in _IB_FARM_STATUS_CODES:
+            ib_events.append((reqId, errorCode, errorString))
 
     try:
         # Build contract
@@ -254,16 +291,9 @@ def place_order(params: dict) -> dict:
             contract = _build_stock_contract(params)
             contract = client.qualify_one(contract)
 
-        # Capture IB error events during the ack wait. Only events whose
-        # reqId is THIS order's orderId can reject it; reqId -1 is a
-        # connection-wide message and other reqIds belong to other requests.
-        ib_events: list[tuple[int, int, str]] = []
-
-        def _on_error(reqId, errorCode, errorString, contract=None):
-            if errorCode not in _IB_FARM_STATUS_CODES:
-                ib_events.append((reqId, errorCode, errorString))
-
+        # Capture IB error events during the ack wait (listener above).
         client._ib.errorEvent += _on_error
+        listening = True
 
         # Build order
         order = LimitOrder(
@@ -291,8 +321,11 @@ def place_order(params: dict) -> dict:
             if non_guaranteed not in (0, 1):
                 non_guaranteed = 1
             order.smartComboRoutingParams = [TagValue("NonGuaranteed", str(non_guaranteed))]
-            print(
-                f"  Combo order: {len(legs_data)} legs, NonGuaranteed={non_guaranteed}, ratios={[int(l.get('ratio', 1)) for l in legs_data]}"
+            logger.info(
+                "Combo order: %d legs, NonGuaranteed=%s, ratios=%s",
+                len(legs_data),
+                non_guaranteed,
+                [int(leg.get("ratio", 1)) for leg in legs_data],
             )
 
         # Send boundary. ib_async ``IB.placeOrder`` writes the order to the
@@ -331,7 +364,7 @@ def place_order(params: dict) -> dict:
             # under-approximated the real tick rule for this instrument.
             # Log structured so we can grep and measure how often it bites.
             if code == 110:
-                print(
+                logger.warning(
                     json.dumps(
                         {
                             "level": "warning",
@@ -344,7 +377,6 @@ def place_order(params: dict) -> dict:
                             "note": "tick-rule stub returned 0.01; IB enforced true rule",
                         }
                     ),
-                    file=sys.stderr,
                 )
             reason = {"reason_code": "ACCOUNT_UNRESOLVED"} if code == _IB_ACCOUNT_REQUIRED else {}
             return {
@@ -401,7 +433,8 @@ def place_order(params: dict) -> dict:
         return {"status": "error", "message": str(e)}
 
     finally:
-        client.disconnect()
+        if listening:
+            client._ib.errorEvent -= _on_error
 
 
 def main():
