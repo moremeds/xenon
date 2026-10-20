@@ -5,6 +5,15 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-10-20
+
+- **Large dead-code removal (pure-portfolio cleanup).** Unused API routes, execution paths, data-layer queries, utilities, the dormant launchd deploy and spent scripts are gone. A new CI job (`ruff --select F`) keeps unused imports and undefined names out.
+- **The monitor daemon is removed.** The Wizard Risk Alert now runs as a FastAPI lifespan task and feeds the workspace banner. The IB Flex token expiry appears in the Operator console and on `/health`.
+- **Every registered CLI answers `--help` without opening a socket.** `xenon-nav-flex-refresh`, `xenon-futu-statement-sync` and `flex_divergence_check --apply` refuse to write under `XENON_READ_ONLY=1`.
+- **IB 326 (clientId in use) is detected.** Auto clientId allocation moves to the next free id instead of failing, and an owner conflict on cancel/modify returns 409.
+- **Prod compose fixes.** The relay binds `0.0.0.0` and validates WebSocket tickets against `http://api:8321`.
+- **Database: a DESTRUCTIVE migration drops twelve dead signal-layer tables.** Nothing is dropped until the operator runs the migrator; dump the tables first (see Database below).
+
 ### Added
 
 - Wizard Risk Alert runs inside FastAPI as a lifespan task (`api/services/wizard_risk_alert.py`). Every 30 s it checks PROTECTED wizard sessions with an enabled alert against the signed combo net mid (ib_pool `data` role, snapshot quotes). It uses the old daemon rule (`net mid <= threshold`). A quote older than 2 min is a "no quote" state and never a trigger. The first crossing records `RISK_ALERT_CROSSED` in `xenon.wizard_events` (no write under `XENON_READ_ONLY=1`). The task never places, cancels or modifies an order. `GET /wizard/alerts` → `/api/wizard/alerts` feeds a new risk-alert banner in the workspace. Set `XENON_WIZARD_RISK_ALERT=0` to disable it.
