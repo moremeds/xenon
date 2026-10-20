@@ -5,20 +5,15 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.10.0] — 2026-10-20
+## [0.11.0] — 2026-10-20
 
-- **Large dead-code removal (pure-portfolio cleanup).** Unused API routes, execution paths, data-layer queries, utilities, the dormant launchd deploy and spent scripts are gone. A new CI job (`ruff --select F`) keeps unused imports and undefined names out.
-- **The monitor daemon is removed.** The Wizard Risk Alert now runs as a FastAPI lifespan task and feeds the workspace banner. The IB Flex token expiry appears in the Operator console and on `/health`.
-- **Every registered CLI answers `--help` without opening a socket.** `xenon-nav-flex-refresh`, `xenon-futu-statement-sync` and `flex_divergence_check --apply` refuse to write under `XENON_READ_ONLY=1`.
-- **IB 326 (clientId in use) is detected.** Auto clientId allocation moves to the next free id instead of failing, and an owner conflict on cancel/modify returns 409.
-- **Prod compose fixes.** The relay binds `0.0.0.0` and validates WebSocket tickets against `http://api:8321`.
-- **Database: a DESTRUCTIVE migration drops twelve dead signal-layer tables.** Nothing is dropped until the operator runs the migrator; dump the tables first (see Database below).
+- **Single order owner (PR-10).** Every Xenon order is placed, cancelled and modified by one connection: the API pool `orders` role (clientId base+4) on its own worker. An order this environment's owner did not place answers 409 `ORDER_NOT_OWNED` (manage it in TWS / IBKR Mobile). The order-write CLIs are removed.
+- **Fail closed on the broker.** A send needs a fresh broker round trip first; a send that provably never happened answers 503 (`IB_CONNECTION` / `IB_BROKER_DISCONNECTED` / `ORDERS_HALTED`), an uncertain one 502 `PLACE_OUTCOME_UNKNOWN`. A clientId-in-use (326) or an unexplained loss of the `orders` connection halts order entry (`ORDERS_HALTED`) with zero reconnects.
+- **Graceful IB disconnect on shutdown.** The api closes its gateway connections on SIGTERM within a 60 s stop budget (compose `stop_grace_period`, `WATCHTOWER_TIMEOUT`), so a redeploy no longer leaves stale clientIds on the gateway. Deploy with `docs/runbooks/pr10-order-owner-cutover.md`: the prod compose gains `XENON_IB_CLIENT_ID_BASE`, `IB_REALTIME_STATUS_URL`, `stop_grace_period` and `WATCHTOWER_TIMEOUT`, and `.env` needs `WATCHTOWER_NOTIFICATION_URL`.
 
 ### Added
 
 - PR-10 (single order owner), part 1 — IB clientId blocks and broker readiness. `XENON_IB_CLIENT_ID_BASE` (0-800, step 100) gives each environment its own block: prod 0 (pool 3/4/5, relay 10-12, `auto` 20-49), `dev.sh` 100 (pool 103/104/105, relay 110-112, `auto` 120-149). `IBClient.connect` (and every reconnect) refuses an id outside the caller's zone before any socket opens: only the API pool opens pool ids, `auto` stays in base+20..49, Python never opens relay ids, and no caller opens another block. The relay derives its default id from the base and refuses ids outside base+10..19. FastAPI refuses to start when the base does not match the database (base 0 only with `core_dev`). `/health` reports `ib_pool.<role>.broker_readiness` (`unknown` / `ready` / `lost`) next to `connected`: unknown after every (re)connect until an open-orders round trip completes, lost on IB 1100/2110, ready on 1102. This is an operational contract, not fencing.
-- Wizard Risk Alert runs inside FastAPI as a lifespan task (`api/services/wizard_risk_alert.py`). Every 30 s it checks PROTECTED wizard sessions with an enabled alert against the signed combo net mid (ib_pool `data` role, snapshot quotes). It uses the old daemon rule (`net mid <= threshold`). A quote older than 2 min is a "no quote" state and never a trigger. The first crossing records `RISK_ALERT_CROSSED` in `xenon.wizard_events` (no write under `XENON_READ_ONLY=1`). The task never places, cancels or modifies an order. `GET /wizard/alerts` → `/api/wizard/alerts` feeds a new risk-alert banner in the workspace. Set `XENON_WIZARD_RISK_ALERT=0` to disable it.
-- `flex_token` field on `GET /health` and `/admin/operator` (IB Flex token expiry, same `data/flex_token_config.json` source and 30/14/7/1-day thresholds as the old daemon handler) and a Flex Token tile in the Operator console.
 
 ### Changed
 
@@ -27,7 +22,6 @@ All notable changes to Xenon are documented here. Format loosely based on
 - PR-10 (single order owner), part 4 — placement runs on the order owner too (`place_order_on_client` on the pool `orders` connection, base+4), so every Xenon order is placed, cancelled and modified by one clientId and the stored `placing_client_id` is always that id. The place job has the same lifecycle as cancel / modify: a refusal before any send (owner missing, broker not ready, orders halted, or an error before the send mark) marks the row FAILED and answers 503 `IB_BROKER_DISCONNECTED` / `ORDERS_HALTED` / `IB_CONNECTION` (nothing sent, the toast is terminal); a request deadline after the job started, or a send without an IB acknowledgement, answers 502 `PLACE_OUTCOME_UNKNOWN` (row UNKNOWN) and the worker still writes the final state when the core returns. An explicit IB rejection from the place core (`amend_outcome: rejected`) stays a terminal REJECTED; it is never read as unconfirmed. The place core validates its own fields (`INVALID_ORDER_BODY`) and never falls back to `XENON_BROKER_ACCOUNT`. The order-path caller guard now scans `src`, `scripts`, `web`, `deploy`, `docker`, `.github` and `pyproject.toml` and fails on any import of the order cores outside `server.py` or any reference to the removed CLIs.
 - PR-10 (single order owner), part 5 — shutdown and deployment. The api disconnects every IB pool role on SIGTERM (parallel, 35 s budget, never raises) after stopping the order owner; uvicorn's request drain is bounded to 10 s; `api` gets `stop_grace_period: 60s` in both compose files and Watchtower `WATCHTOWER_TIMEOUT: 60s` (Watchtower stops containers with its own 10 s default, not the grace period). This prevents the stale gateway clientIds seen after the 2026-10-20 redeploy, which now halt orders at startup (`ORDERS_HALTED`, fail closed). **Operator:** apply the new `deploy/compose.prod.yml` before the PR-10 image lands and follow `docs/runbooks/pr10-order-owner-cutover.md` (open orders placed by the removed CLIs, clientIds 20-49 / 26, now answer 409 `ORDER_NOT_OWNED` and must be managed in TWS / IBKR Mobile). No database migration in PR-10.
 - Place responses for a send that provably never happened: 503 `IB_CONNECTION` / `IB_BROKER_DISCONNECTED` / `ORDERS_HALTED` (row FAILED) replace the old 502 `SUBPROCESS_ERROR`. The web shows them as terminal; `PLACE_OUTCOME_UNKNOWN` (502) is unchanged.
-- CI runs `ruff check --select F src scripts` (new `ruff-pyflakes` job, ruff from the locked `dev` extra). Unused imports, unused locals and placeholder-less f-strings are removed across `src/` and `scripts/` (PR-16, no behaviour change).
 
 ### Fixed
 
@@ -39,6 +33,27 @@ All notable changes to Xenon are documented here. Format loosely based on
 - `api/pool_order_manage.py` (dormant pool cancel/modify, never called) and `ib_pool.acquire_owner` / `ClientIdBusy` (no caller since the naked-short audit stopped cancelling) with their tests — replaced by the order owner.
 - The order-write CLIs `xenon-ib-place-order` and `xenon-ib-order-manage` (pyproject scripts, `main` / argparse / JSON-exit adapters, the sender watchdog and the reconnect-as-original-clientId path) and their `CLIENT_IDS` entries 20 / 24. FastAPI no longer spawns any order-write subprocess; `_run_ib_script_with_recovery` serves data scripts only, so the order cooldown lane and `_send_window_closed` are gone. The place verdict's legacy fallback (accepting a payload with a permId but an error status) is removed with the CLI it served.
 - `utils/ib_connection.connect_ib` and its legacy `CLIENT_IDS` (raw `ib_async` connect with clientId 0 that bypassed `IBClient`; no caller outside tests).
+
+## [0.10.0] — 2026-10-20
+
+- **Large dead-code removal (pure-portfolio cleanup).** Unused API routes, execution paths, data-layer queries, utilities, the dormant launchd deploy and spent scripts are gone. A new CI job (`ruff --select F`) keeps unused imports and undefined names out.
+- **The monitor daemon is removed.** The Wizard Risk Alert now runs as a FastAPI lifespan task and feeds the workspace banner. The IB Flex token expiry appears in the Operator console and on `/health`.
+- **Every registered CLI answers `--help` without opening a socket.** `xenon-nav-flex-refresh`, `xenon-futu-statement-sync` and `flex_divergence_check --apply` refuse to write under `XENON_READ_ONLY=1`.
+- **IB 326 (clientId in use) is detected.** Auto clientId allocation moves to the next free id instead of failing, and an owner conflict on cancel/modify returns 409.
+- **Prod compose fixes.** The relay binds `0.0.0.0` and validates WebSocket tickets against `http://api:8321`.
+- **Database: a DESTRUCTIVE migration drops twelve dead signal-layer tables.** Nothing is dropped until the operator runs the migrator; dump the tables first (see Database below).
+
+### Added
+
+- Wizard Risk Alert runs inside FastAPI as a lifespan task (`api/services/wizard_risk_alert.py`). Every 30 s it checks PROTECTED wizard sessions with an enabled alert against the signed combo net mid (ib_pool `data` role, snapshot quotes). It uses the old daemon rule (`net mid <= threshold`). A quote older than 2 min is a "no quote" state and never a trigger. The first crossing records `RISK_ALERT_CROSSED` in `xenon.wizard_events` (no write under `XENON_READ_ONLY=1`). The task never places, cancels or modifies an order. `GET /wizard/alerts` → `/api/wizard/alerts` feeds a new risk-alert banner in the workspace. Set `XENON_WIZARD_RISK_ALERT=0` to disable it.
+- `flex_token` field on `GET /health` and `/admin/operator` (IB Flex token expiry, same `data/flex_token_config.json` source and 30/14/7/1-day thresholds as the old daemon handler) and a Flex Token tile in the Operator console.
+
+### Changed
+
+- CI runs `ruff check --select F src scripts` (new `ruff-pyflakes` job, ruff from the locked `dev` extra). Unused imports, unused locals and placeholder-less f-strings are removed across `src/` and `scripts/` (PR-16, no behaviour change).
+
+### Removed
+
 - Dead data-layer code (PR-14a): `db/queries/{orders,trades,wizard,regime_overrides,scans,uw,cache}.py`, the unused `portfolio` and `events` query functions and their tests (the test-only `futu_history` readers stay). Tables stay; a separate migration drops the signal tables.
 - `reports/portfolio_performance.py`, `reports/performance_explainer_report.py`, the `reports/blotter.py` shim and `utils/price_cache.py`, with the `xenon-portfolio-perf`, `xenon-perf-explainer` and `xenon-presets` entry points. `fetch_ib_nav_series` and its Flex CSV/cash-flow helpers moved to `xenon.jobs.ib_nav_flex` (used by `xenon-nav-flex-refresh`). `xenon-portfolio-attrib` stays because `GET /attribution` has a web caller.
 - Dead utils: `env_loader`, `launchd_calendar`, `launchd_schedule`, `vectorized_greeks`, `presets`, and the write-only UW call-stats collector `uw_api_stats` (removed from `UWClient._get`). `utils/ib_connection.py` stays because `IBClient` imports `assert_broker_endpoint_allowed`.
