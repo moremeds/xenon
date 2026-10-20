@@ -117,20 +117,32 @@ A loss that is positively a gateway outage (1100/2110 before the loss, gateway p
 Restoring an image is not an ownership transfer. The previous build manages an order by reconnecting a subprocess as the order's recorded clientId; for an order placed by PR-10 that id is 4, which the previous build's own pool `orders` connection also uses. Do not count on the previous build to cancel or modify orders that PR-10 placed.
 
 1. **Pause Watchtower:** `docker stop xenon-watchtower-1`; `docker inspect -f '{{.State.Running}}' xenon-watchtower-1` prints `false`.
-2. **Inventory the orders PR-10 placed**, read-only, and save it (same connection settings as § 2 step 2):
+2. **Inventory the orders PR-10 placed or may have placed**, read-only, and save it (same connection settings as § 2 step 2; `<CUTOVER>` = when the PR-10 api first started, UTC):
 
-   ```sql
-   SELECT submission_id, ticker, action, quantity, state, ib_order_id, perm_id, submitted_at
-   FROM xenon.order_submissions
-   WHERE broker = 'IB' AND account_env = 'live'
-     AND state IN ('PENDING', 'WORKING', 'PARTIALLY_FILLED', 'UNKNOWN')
-     AND placing_client_id = 4
-   ORDER BY submitted_at;
+   ```bash
+   PGOPTIONS='-c default_transaction_read_only=on' PGHOST=localhost PGUSER=xenon_migrator \
+   PGPASSFILE=/opt/xenon/.pgpass-refresh psql core_dev --csv -c "
+     SELECT submission_id, ticker, action, quantity, state, placing_client_id,
+            ib_order_id, perm_id, submitted_at,
+            'xo:' || submission_id AS order_ref
+     FROM xenon.order_submissions
+     WHERE broker = 'IB' AND account_env = 'live'
+       AND state IN ('PENDING', 'WORKING', 'PARTIALLY_FILLED', 'UNKNOWN')
+       AND (placing_client_id = 4
+            OR (placing_client_id IS NULL AND submitted_at >= '<CUTOVER>'))
+     ORDER BY submission_id" > pr10-rollback-inventory.csv
    ```
+
+   - `placing_client_id = 4`: placed by the PR-10 owner.
+   - `placing_client_id IS NULL` after the cutover: **potentially** PR-10-owned, not proven. A place that hit its request deadline stays PENDING / UNKNOWN with no placer id until the worker or the poller writes it, but IB may already hold the order. Reconcile each such row by its `order_ref` (`xo:<submission_id>`) against TWS or a READY broker snapshot: an IB order with that orderRef is PR-10-owned; no order is not proof that nothing was sent.
 
    Give every row a disposition: cancel it now through the current (PR-10) api, only if you intend to, or manage it in TWS / IBKR Mobile after the rollback. Keep `UNKNOWN` rows and their reservations as they are; never edit or clear rows to make a downgrade easier.
 3. **Pin and verify the previous image** (`PREV` = previous release version without the `v`): `docker pull ghcr.io/moremeds/xenon-api:PREV`, then check its version / revision labels and digest as in `deploy/README.md` § D step 2. Point the local alias at it: `docker tag ghcr.io/moremeds/xenon-api:PREV ghcr.io/moremeds/xenon-api:latest` (same for `web` / `realtime` if they changed). Restore the previous compose file from its backup (`cp -p compose.yml.bak-<stamp> compose.yml`).
-4. **Stop, check, start:** `docker-compose stop -t 60 api`; run the stale-socket check (§ 4); `docker-compose up -d --pull never api`; then `/health` (`ib_pool.*.connected`). Reconcile the step-2 inventory as in § 5 step 2.
+4. **Stop, re-inventory, check, start:**
+   1. `docker-compose stop -t 60 api`. From here no PR-10 code can send.
+   2. Before the old image starts, run the step-2 query again into `pr10-rollback-inventory-final.csv` and compare: `diff pr10-rollback-inventory.csv pr10-rollback-inventory-final.csv`. A new row, or a row whose state or ids changed, is an order that was in flight during step 2: give it a disposition too (reconcile NULL-placer rows by orderRef as in step 2). Do not start the old image until every row in the final list has one.
+   3. Run the stale-socket check (§ 4).
+   4. `docker-compose up -d --pull never api`; then `/health` (`ib_pool.*.connected`). Reconcile the final inventory as in § 5 step 2.
 5. **Resume Watchtower** (`docker start xenon-watchtower-1`) only when the registry `:latest` is no longer a PR-10 image (a release that reverts PR-10 is published). Until then Watchtower would pull PR-10 again; keep it stopped.
 
 ## 8. Reason codes the user sees
