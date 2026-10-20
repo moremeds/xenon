@@ -178,6 +178,9 @@ class IBPool:
         # own new socket instead of registering it (nobody would disconnect it).
         self._closing = False
         self._close_lock = threading.Lock()
+        # Serializes a FULL open (connect_all()) with a FULL close
+        # (disconnect_all()); subset paths never take it.
+        self._lifecycle_lock = asyncio.Lock()
 
         for role in POOL_ROLES:
             self._locks[role] = asyncio.Lock()
@@ -211,22 +214,29 @@ class IBPool:
         Non-blocking: if IB Gateway is down, roles start disconnected.
         IB-dependent endpoints will return 503; UW-only endpoints still work.
         """
+        if roles is not None:
+            # Subset (gateway restart): never clears a shutdown's closing mark.
+            return await self._connect_roles(roles)
+        # A full connect (re)opens the pool, serialized with a full close: a
+        # close that started first has already finished its snapshot.
+        async with self._lifecycle_lock:
+            with self._close_lock:
+                self._closing = False
+            return await self._connect_roles(POOL_ROLES)
+
+    async def _connect_roles(self, roles: Iterable[str]) -> Dict[str, bool]:
         # Defensive: the auto-restart wrapper calls this on
         # the same pool instance after disconnect_all has shut executors down.
         self._ensure_role_executors()
-        if roles is None:
-            # A full connect (re)opens the pool. A subset connect (gateway
-            # restart) never clears a shutdown's closing mark.
-            with self._close_lock:
-                self._closing = False
-
         status = {}
         loop = asyncio.get_running_loop()
-        for i, role in enumerate(roles or POOL_ROLES):
+        for i, role in enumerate(roles):
             client_id = pool_client_id(role)
             # IB Gateway rate-limits rapid successive connections — stagger by 1s
             if i > 0:
                 await asyncio.sleep(1)
+            if self._closing:
+                break  # shutdown began: no further connects
 
             for attempt in range(3):
                 try:
@@ -248,7 +258,8 @@ class IBPool:
                         self._connected[role] = False
                         status[role] = False
                         self.connect_errors[role] = e
-                        logger.warning("IB pool: %s failed to connect after 3 attempts: %s", role, e)
+                        logger.warning("IB pool: %s failed to connect (attempt %d): %s", role, attempt + 1, e)
+                        break
 
         return status
 
@@ -289,12 +300,34 @@ class IBPool:
         path, which leaves ``orders`` to the order owner — the executors stay up.
         """
         only = set(roles) if roles is not None else None
-        if only is None:
+        if only is not None:
+            targets = [(r, c) for r, c in list(self._clients.items()) if r in only]
+            await self._disconnect_targets(targets, timeout)
+            return
+        # Full close. Mark closing at once (stops a running connect_all's
+        # retries; an in-flight worker connect closes itself in
+        # _connect_owned), then wait for that connect to leave the lifecycle
+        # lock — bounded by ``timeout``; past it, close anyway: the mark
+        # stays set, so a late connect still closes itself.
+        self._closing = True
+        locked = False
+        try:
+            await asyncio.wait_for(self._lifecycle_lock.acquire(), timeout)
+            locked = True
+        except asyncio.TimeoutError:
+            logger.warning("IB pool: a full connect still runs after %ss; closing anyway", timeout)
+        try:
             with self._close_lock:
                 self._closing = True
                 targets = list(self._clients.items())
-        else:
-            targets = [(r, c) for r, c in list(self._clients.items()) if r in only]
+            await self._disconnect_targets(targets, timeout)
+            for executor in self._role_executors.values():
+                executor.shutdown(wait=False)  # queued disconnects still run
+        finally:
+            if locked:
+                self._lifecycle_lock.release()
+
+    async def _disconnect_targets(self, targets: list, timeout: Optional[float]) -> None:
 
         async def _one(role: str, client: IBClient) -> None:
             queued = self._role_executors[role].submit(client.disconnect)
@@ -318,10 +351,6 @@ class IBPool:
                 self._clients.pop(role, None)
 
         await asyncio.gather(*(_one(role, client) for role, client in targets))
-        if only is not None:
-            return
-        for executor in self._role_executors.values():
-            executor.shutdown(wait=False)  # queued disconnects still run
 
     def get(self, role: str) -> Optional[IBClient]:
         """Get the client for a role (may be None if not connected)."""
@@ -363,6 +392,8 @@ class IBPool:
         if self.is_connected(role):
             return self._clients[role]
 
+        if self._closing:
+            raise ConnectionError(f"IB pool: {role} not reconnected, pool is closing")
         with self._sync_reconnect_locks[role]:
             if self.is_connected(role):
                 return self._clients[role]

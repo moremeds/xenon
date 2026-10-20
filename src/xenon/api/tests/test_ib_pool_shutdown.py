@@ -138,3 +138,71 @@ async def test_subset_keeps_executors_and_other_roles():
     assert "orders" in pool._clients
     assert not any(ex._shutdown for ex in pool._role_executors.values())
     await pool.disconnect_all(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["connect-first-worker-done-before-close-wait", "connect-first-worker-done-after-close-wait", "close-first"],
+)
+async def test_full_connect_overlapping_full_shutdown_never_orphans(scenario, monkeypatch):
+    """Astra T5 R2-1: a full connect overlapping a full shutdown. Every client
+    created is either registered in the live pool or disconnected."""
+    import asyncio
+
+    from xenon.api import ib_pool as ib_pool_mod
+
+    pool = IBPool()
+    created: list[MagicMock] = []
+    connecting, release = threading.Event(), threading.Event()
+
+    def held_connect(host, port, client_id, timeout):
+        connecting.set()
+        release.wait(5)
+        client = MagicMock()
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(ib_pool_mod, "_connect_in_thread", held_connect)
+
+    if scenario == "close-first":
+        release.set()
+        await pool.connect_all()  # pool open with every role
+        busy_release = threading.Event()
+        pool._role_executors["orders"].submit(busy_release.wait, 5)  # close keeps the lock
+        close = asyncio.create_task(pool.disconnect_all(timeout=None))
+        await asyncio.sleep(0.05)
+        reopen = asyncio.create_task(pool.connect_all())  # must wait for the close
+        await asyncio.sleep(0.05)
+        assert not reopen.done()
+        busy_release.set()
+        await close
+        await reopen
+    else:
+        connect = asyncio.create_task(pool.connect_all())
+        while not connecting.is_set():
+            await asyncio.sleep(0.01)
+        if scenario == "connect-first-worker-done-before-close-wait":
+            threading.Timer(0.1, release.set).start()
+            await pool.disconnect_all(timeout=2)
+        else:
+            await pool.disconnect_all(timeout=0.2)  # lock wait expires first
+            release.set()
+        status = await connect
+        assert not any(status.values())  # no connect survives the close
+        assert len(created) == 1  # the retry / next-role loops stopped
+
+    def _owned(client) -> bool:
+        # Registered in a LIVE pool (its role worker still runs) or disconnected.
+        roles = [r for r, c in pool._clients.items() if c is client]
+        live = bool(roles) and not pool._role_executors[roles[0]]._shutdown
+        return live or client.disconnect.call_count == 1
+
+    for _ in range(300):  # worker-side connects / disconnects may still be draining
+        if all(_owned(c) for c in created):
+            break
+        await asyncio.sleep(0.01)
+    assert created and all(_owned(c) for c in created), scenario
+    if scenario != "close-first":
+        assert pool._clients == {}
+    for executor in list(pool._role_executors.values()):
+        executor.shutdown(wait=True)
