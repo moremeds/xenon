@@ -762,10 +762,16 @@ async def lifespan(app: FastAPI):
         if order_owner is not None:
             # Intentional disconnect: the supervisor stops first and queued
             # order jobs are abandoned (zero sends) before the pool closes.
-            await order_owner.stop()
-        if ib_pool:
             try:
-                await ib_pool.disconnect_all()
+                await order_owner.stop()
+            except Exception:  # noqa: BLE001
+                logger.exception("order owner failed to stop")
+        if ib_pool:
+            # Graceful IB disconnect for every role (bounded): a socket left
+            # open past the container stop keeps its clientId in use on the
+            # gateway, and the next api start then halts orders on 326.
+            try:
+                await ib_pool.disconnect_all(timeout=_SHUTDOWN_IB_DISCONNECT_S)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("ib_pool.disconnect_all failed: %s", exc)
         if _futu_client is not None:
@@ -4126,6 +4132,11 @@ _ib_last_failure: dict[str, float] = {"data": 0.0}
 # The order owner's wait for one place: readiness round trip + qualify + ack
 # wait (5 s combo) + queueing behind another order action.
 _PLACE_TIMEOUT_S = 30
+# Lifespan shutdown budget for the IB disconnect (all roles in parallel). It
+# covers a started place job (_PLACE_TIMEOUT_S) on the orders worker. The api
+# container's stop_grace_period must exceed uvicorn's request drain
+# (--timeout-graceful-shutdown in docker/api.Dockerfile) plus this budget.
+_SHUTDOWN_IB_DISCONNECT_S = 35
 
 
 def _is_ib_connection_error(error_msg: str) -> bool:

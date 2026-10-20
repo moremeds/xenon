@@ -83,6 +83,9 @@ services:
     labels:
       com.centurylinklabs.watchtower.enable: "true"
     restart: unless-stopped
+    # PR-10: room for uvicorn's 10s drain + the 35s graceful IB disconnect;
+    # the default 10s SIGKILLs the api with its gateway sockets still open.
+    stop_grace_period: 60s
 
   web:
     image: ghcr.io/moremeds/xenon-web:latest

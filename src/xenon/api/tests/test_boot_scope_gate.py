@@ -20,12 +20,13 @@ pytestmark = pytest.mark.asyncio
 class _FakePool:
     def __init__(self):
         self.run_sync_calls = []
+        self.disconnect_calls = []
 
     async def connect_all(self):
         return {}
 
-    async def disconnect_all(self):
-        return None
+    async def disconnect_all(self, **kwargs):
+        self.disconnect_calls.append(kwargs)
 
     async def run_sync(self, role, fn, *args, **kwargs):
         self.run_sync_calls.append((role, getattr(fn, "__name__", fn), kwargs))
@@ -81,14 +82,14 @@ def boot(monkeypatch):
     async def _run(account: str):
         monkeypatch.setattr(server_mod, "_get_managed_account_for_health", lambda: account)
         async with server_mod.lifespan(server_mod.app):
-            pass
+            calls.append(server_mod.ib_pool)
         return calls
 
     return _run
 
 
 async def test_lifespan_skips_boot_writers_when_account_unresolved(boot, caplog):
-    calls = await boot("")
+    calls = [c for c in await boot("") if isinstance(c, str)]
 
     assert calls == []
     assert server_mod.app.state.mode_verified is False
@@ -98,7 +99,7 @@ async def test_lifespan_skips_boot_writers_when_account_unresolved(boot, caplog)
 async def test_lifespan_runs_boot_writers_with_verified_account(boot):
     account = "DU0000000" if trading_mode.MODE == "paper" else "U0000000"
 
-    calls = await boot(account)
+    calls = [c for c in await boot(account) if isinstance(c, str)]
 
     assert calls == ["rehydrate", "fills_replay", "poller"]
     assert server_mod.app.state.mode_verified is True
@@ -107,7 +108,7 @@ async def test_lifespan_runs_boot_writers_with_verified_account(boot):
 async def test_lifespan_skips_boot_writers_when_mode_unverified(boot):
     wrong = "U0000000" if trading_mode.MODE == "paper" else "DU0000000"
 
-    calls = await boot(wrong)
+    calls = [c for c in await boot(wrong) if isinstance(c, str)]
 
     assert calls == []
 
@@ -218,3 +219,23 @@ async def test_activity_poller_started_when_verified(poller_env, monkeypatch):
     assert task is not None
     await asyncio.wait_for(task, timeout=1)
     assert poller_env == ["DU0000000"]
+
+
+async def test_lifespan_shutdown_stops_owner_and_disconnects_every_role_bounded(boot, monkeypatch):
+    """PR-10 T5: shutdown stops the order owner, then disconnects the pool
+    with the bounded budget; a failing owner stop never skips the disconnect."""
+    stopped = []
+
+    async def _boom(self):
+        stopped.append(True)
+        raise RuntimeError("owner stop failed")
+
+    monkeypatch.setattr(server_mod.OrderOwner, "stop", _boom)
+    account = "DU0000000" if trading_mode.MODE == "paper" else "U0000000"
+
+    pool = next(c for c in await boot(account) if isinstance(c, _FakePool))
+
+    assert stopped == [True]
+    assert pool.disconnect_calls == [{"timeout": server_mod._SHUTDOWN_IB_DISCONNECT_S}]
+    # The budget covers a started place job on the orders worker.
+    assert server_mod._SHUTDOWN_IB_DISCONNECT_S > server_mod._PLACE_TIMEOUT_S

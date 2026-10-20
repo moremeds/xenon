@@ -63,7 +63,10 @@ EXPOSE 8321
 
 # tini is PID 1 so SIGTERM from `docker stop` cleanly shuts uvicorn down.
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["uvicorn", "xenon.api.server:app", "--host", "0.0.0.0", "--port", "8321"]
+# --timeout-graceful-shutdown bounds the request drain on SIGTERM so the
+# lifespan shutdown (graceful IB disconnect, PR-10) runs inside the compose
+# stop_grace_period (60s = 10s drain + 35s IB disconnect + margin).
+CMD ["uvicorn", "xenon.api.server:app", "--host", "0.0.0.0", "--port", "8321", "--timeout-graceful-shutdown", "10"]
 
 LABEL org.opencontainers.image.source="https://github.com/moremeds/xenon" \
       org.opencontainers.image.title="xenon-api" \

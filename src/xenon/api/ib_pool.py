@@ -249,8 +249,17 @@ class IBPool:
 
         return status
 
-    async def disconnect_all(self, roles: Optional[Iterable[str]] = None) -> None:
-        """Disconnect pool connections (default: all).
+    async def disconnect_all(
+        self, roles: Optional[Iterable[str]] = None, timeout: Optional[float] = None
+    ) -> None:
+        """Disconnect pool connections (default: all). Never raises.
+
+        Roles disconnect in parallel, each on its own worker. With ``timeout``
+        each role gets at most that many seconds (shutdown: the container's
+        stop grace period must cover it). A role whose worker is still busy
+        past the budget is logged CRITICAL — its socket then closes only with
+        the process, which is how stale gateway clientIds appeared after a
+        redeploy (operator check: ``lsof`` the gateway port before restart).
 
         With every role, the role executors shut down too (queued work is
         cancelled). With a subset — the gateway-restart path, which leaves
@@ -258,18 +267,33 @@ class IBPool:
         """
         loop = asyncio.get_running_loop()
         only = set(roles) if roles is not None else None
-        for role, client in list(self._clients.items()):
-            if only is not None and role not in only:
-                continue
+
+        async def _one(role: str, client: IBClient) -> None:
             try:
-                await loop.run_in_executor(
-                    self._role_executors[role], client.disconnect
+                await asyncio.wait_for(
+                    loop.run_in_executor(self._role_executors[role], client.disconnect),
+                    timeout,
                 )
                 logger.info("IB pool: %s disconnected", role)
-            except Exception as e:
+            except asyncio.TimeoutError:
+                logger.critical(
+                    "IB pool: %s did not disconnect within %ss — its clientId may stay "
+                    "in use on the gateway; check the gateway for stale sockets before restart",
+                    role,
+                    timeout,
+                )
+            except Exception as e:  # noqa: BLE001
                 logger.warning("IB pool: %s disconnect error: %s", role, e)
             self._connected[role] = False
             self._clients.pop(role, None)
+
+        await asyncio.gather(
+            *(
+                _one(role, client)
+                for role, client in list(self._clients.items())
+                if only is None or role in only
+            )
+        )
         if only is not None:
             return
         for role, executor in self._role_executors.items():

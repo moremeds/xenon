@@ -95,6 +95,9 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+    # PR-10: room for uvicorn's 10s drain + the 35s graceful IB disconnect;
+    # the default 10s SIGKILLs the api with its gateway sockets still open.
+    stop_grace_period: 60s
 
   web:
     build:
