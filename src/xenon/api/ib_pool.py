@@ -180,6 +180,11 @@ class IBPool:
         # own new socket instead of registering it (nobody would disconnect it).
         self._closing = False
         self._close_lock = threading.Lock()
+        # Pool lifecycle generation, bumped by every full close. A connect
+        # captures it when submitted; a result from an older generation (a
+        # worker that outlived a close and a reopen) is closed, never
+        # registered over the current client.
+        self._generation = 0
         # Serializes a FULL open (connect_all()) with a FULL close
         # (disconnect_all()); subset paths never take it.
         self._lifecycle_lock = asyncio.Lock()
@@ -245,7 +250,9 @@ class IBPool:
                     # Pin connect to the role's executor so the event loop
                     # ib_async creates lands on the worker that every later
                     # run_sync call will reuse.
-                    await loop.run_in_executor(self._role_executors[role], self._connect_owned, role, client_id, 10)
+                    await loop.run_in_executor(
+                        self._role_executors[role], self._connect_owned, role, client_id, 10, self._generation
+                    )
                     status[role] = True
                     self.connect_errors.pop(role, None)
                     logger.info("IB pool: %s connected (client_id=%d)", role, client_id)
@@ -263,14 +270,17 @@ class IBPool:
 
         return status
 
-    def _connect_owned(self, role: str, client_id: int, timeout: int) -> IBClient:
+    def _connect_owned(self, role: str, client_id: int, timeout: int, generation: Optional[int] = None) -> IBClient:
         """Worker side: connect, then register the client — or, when shutdown
         began while the connect ran, disconnect it at once. Registration runs
         on the worker, so a cancelled awaiter (owner supervisor stopped
-        mid-reconnect) never orphans the socket. Never another clientId."""
+        mid-reconnect) never orphans the socket. Never another clientId.
+        ``generation`` is captured by the submitter (default: now)."""
+        if generation is None:
+            generation = self._generation
         client = _connect_in_thread(self._host, self._port, client_id, timeout)
         with self._close_lock:
-            if not self._closing:
+            if not self._closing and generation == self._generation:
                 self._clients[role] = client
                 self._connected[role] = True
                 return client
@@ -278,7 +288,7 @@ class IBPool:
             client.disconnect()
         except Exception as exc:  # noqa: BLE001
             logger.warning("IB pool: %s late connect close failed: %s", role, exc)
-        raise ConnectionError(f"IB pool: {role} connected during shutdown; closed it")
+        raise ConnectionError(f"IB pool: {role} connected during or across a shutdown; closed it")
 
     async def disconnect_all(self, roles: Optional[Iterable[str]] = None, timeout: Optional[float] = None) -> None:
         """Disconnect pool connections (default: all). Never raises.
@@ -309,7 +319,9 @@ class IBPool:
         # stays set, so a late connect still closes itself.
         # One deadline covers the lock wait AND the disconnect wait, so the
         # shutdown budget (server._SHUTDOWN_IB_DISCONNECT_S) holds.
-        self._closing = True
+        with self._close_lock:
+            self._closing = True
+            self._generation += 1
         loop = asyncio.get_running_loop()
         deadline = None if timeout is None else loop.time() + timeout
         locked = False
@@ -436,7 +448,9 @@ class IBPool:
                 await loop.run_in_executor(self._role_executors[role], old.disconnect)
             except Exception as exc:  # noqa: BLE001 — a dead socket may refuse a clean close
                 logger.debug("IB pool: %s old client disconnect failed: %s", role, exc)
-        await loop.run_in_executor(self._role_executors[role], self._connect_owned, role, client_id, 5)
+        await loop.run_in_executor(
+            self._role_executors[role], self._connect_owned, role, client_id, 5, self._generation
+        )
         logger.info("IB pool: %s reconnected (client_id=%d)", role, client_id)
 
     async def _reconnect(self, role: str) -> bool:

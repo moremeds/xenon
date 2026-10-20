@@ -206,3 +206,54 @@ async def test_full_connect_overlapping_full_shutdown_never_orphans(scenario, mo
         assert pool._clients == {}
     for executor in list(pool._role_executors.values()):
         executor.shutdown(wait=True)
+
+
+async def test_connect_worker_outliving_close_and_reopen_never_registers(monkeypatch):
+    """Astra T5 R3-1: a cancelled full connect leaves its worker running; a
+    close and a reopen follow; the old worker then returns. Its client (old
+    generation) is disconnected, and the reopened pool keeps its own client."""
+    import asyncio
+
+    from xenon.api import ib_pool as ib_pool_mod
+
+    pool = IBPool()
+    first_started, release_first = threading.Event(), threading.Event()
+    created: list[MagicMock] = []
+
+    def connect(host, port, client_id, timeout):
+        client = MagicMock()
+        if not created:  # the first connect (old generation) is held
+            created.append(client)
+            first_started.set()
+            release_first.wait(5)
+            return client
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(ib_pool_mod, "_connect_in_thread", connect)
+
+    first_role = next(iter(POOL_ROLES))
+    task = asyncio.create_task(pool.connect_all())
+    while not first_started.is_set():
+        await asyncio.sleep(0.01)
+    old_executor = pool._role_executors[first_role]
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await pool.disconnect_all(timeout=0.01)  # nothing registered yet
+
+    await pool.connect_all()  # reopen: new executors, new clients
+    new_client = pool._clients[first_role]
+    assert new_client is not created[0]
+
+    release_first.set()  # the old worker returns after the reopen
+    old_executor.shutdown(wait=True)
+
+    old_client = created[0]
+    assert pool._clients[first_role] is new_client
+    assert old_client.disconnect.call_count == 1
+    assert new_client.disconnect.call_count == 0
+
+    await pool.disconnect_all(timeout=5)
+    for executor in list(pool._role_executors.values()):
+        executor.shutdown(wait=True)
