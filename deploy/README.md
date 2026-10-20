@@ -33,14 +33,24 @@ Names and booleans only: never print secret values. `docker-compose` below is `/
 
 A. Staged compose validation and backup
 1. From the laptop: `scp deploy/compose.prod.yml macmini:/opt/xenon/compose.new.yml`.
-2. On the mini, first put the webhook variable in place. Add `WATCHTOWER_NOTIFICATION_URL=<current ntfy URL from the live compose>` to `/opt/xenon/.env`, (an unquoted value; step 3 checks the effective value). Also confirm `GHCR_USER`, `GHCR_PAT`, `XENON_INTERNAL_API_TOKEN` exist there (names only: `grep -c '^NAME=' .env`).
-3. `cd /opt/xenon && docker-compose -f compose.new.yml config -q` (must exit 0; needs `.env`, `web.env` and the variables from step 2). Then check that the effective webhook is a non-empty string, printing only a boolean: `docker-compose -f compose.new.yml config --format json | jq -e '.services.watchtower.environment.WATCHTOWER_NOTIFICATION_URL | type == "string" and (gsub("\\s"; "") | length > 0)'` prints `true` and exits 0. Stop on `false` or a non-zero exit.
+2. On the mini, first put the webhook variable in place. Check whether it is already defined, printing only a count: `grep -c '^WATCHTOWER_NOTIFICATION_URL=' /opt/xenon/.env` (expect `1`). If it prints `0`, add `WATCHTOWER_NOTIFICATION_URL=<current ntfy URL from the live compose>` to `/opt/xenon/.env` (an unquoted value; never echo it; step 3 checks the effective value). Also confirm `GHCR_USER`, `GHCR_PAT`, `XENON_INTERNAL_API_TOKEN` exist there (names only: `grep -c '^NAME=' .env`).
+3. `cd /opt/xenon && docker-compose -f compose.new.yml config -q` (must exit 0; needs `.env`, `web.env` and the variables from step 2). Then check that the effective webhook is a non-empty string, printing only a boolean: `docker-compose -f compose.new.yml config --format json | jq -e '.services.watchtower.environment.WATCHTOWER_NOTIFICATION_URL | type == "string" and (gsub("\\s"; "") | length > 0)'` prints `true` and exits 0. Stop on `false` or a non-zero exit. Then check the PR-10 values as rendered, printing only a boolean:
+   `docker-compose -f compose.new.yml config --format json | jq -e '(.services.api.environment.XENON_IB_CLIENT_ID_BASE == "0") and (.services.realtime.environment.XENON_IB_CLIENT_ID_BASE == "0") and (.services.api.environment.IB_REALTIME_STATUS_URL == "http://realtime:8765/status") and (.services.watchtower.environment.WATCHTOWER_TIMEOUT == "60s") and (.services.api.stop_grace_period | IN("60s", "1m0s"))'` prints `true`. (The rendered form of the 60s duration differs between docker-compose versions; both forms are accepted.) Stop on `false`.
 4. Back up: `cp -p compose.yml compose.yml.bak-$(date +%Y%m%d%H%M)`.
-5. Diff without printing the webhook URL: `diff <(grep -v WATCHTOWER_NOTIFICATION_URL compose.yml) <(grep -v WATCHTOWER_NOTIFICATION_URL compose.new.yml)` (expect: header comment lines only; the filtered webhook line differs by design).
+5. Diff without printing the webhook URL: `diff <(grep -v WATCHTOWER_NOTIFICATION_URL compose.yml) <(grep -v WATCHTOWER_NOTIFICATION_URL compose.new.yml)`. Expected differences (PR-10 staging), and nothing else:
+   - header and comment lines;
+   - `api.environment.XENON_IB_CLIENT_ID_BASE: "0"` and `realtime.environment.XENON_IB_CLIENT_ID_BASE: "0"` added;
+   - `api.environment.IB_REALTIME_STATUS_URL: http://realtime:8765/status` added;
+   - `api.stop_grace_period: 60s` added;
+   - `watchtower.environment.WATCHTOWER_TIMEOUT: 60s` added;
+   - `WATCHTOWER_NOTIFICATION_URL` becomes `${WATCHTOWER_NOTIFICATION_URL}` interpolation (filtered out of this diff by design; step 3 checked the effective value).
+
+   Explain every other difference before you continue; if you cannot, stop.
 6. Only then: `mv compose.new.yml compose.yml && docker-compose up -d --pull never` (`--pull never`: no image changes in this step), and do section A only when no release is in flight.
 
 B. Rollback
 - `cp -p compose.yml.bak-<stamp> compose.yml && docker-compose up -d`. This restores the previous definition. Images are `:latest`; Watchtower still tracks them, so a rollback of the file does not pin an image.
+- Rolling back across PR-10 (single order owner): follow `docs/runbooks/pr10-order-owner-cutover.md` § 7 (pause Watchtower, dispose of orders placed by clientId 4, pin and verify the previous image, stop/check sockets/start).
 - Jobs: `launchctl bootout gui/$(id -u)/com.xenon.nav-flex-refresh` and the same for `com.xenon.refresh-core-test`; `rm` the two plists from `~/Library/LaunchAgents`.
 
 C. Post-up checks

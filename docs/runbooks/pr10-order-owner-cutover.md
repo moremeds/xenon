@@ -26,18 +26,26 @@ Zones inside a block (absolute id = base + offset):
 
 ## 2. Before the deploy
 
-1. **Apply the compose change first.** PR-10 sets `stop_grace_period: 60s` on `api` and `WATCHTOWER_TIMEOUT: 60s` on Watchtower. Watchtower stops containers with its own timeout (default 10s), not with the service's grace period. Copy the new `deploy/compose.prod.yml` with `deploy/README.md` § Operator rollout checklist, section A, **before** the PR-10 image is published. Otherwise Watchtower replaces the old api with a 10s stop and can leave stale sockets (§ 4).
-2. **List the open orders that the new build will refuse.** On the mini, run against `core_dev` (read-only):
+1. **Apply the compose change first.** Watchtower stops containers with its own timeout (default 10s), not with the service's grace period. Stage the new `deploy/compose.prod.yml` with `deploy/README.md` § Operator rollout checklist, section A, **before** the PR-10 image is published. Otherwise Watchtower replaces the old api with a 10s stop and can leave stale sockets (§ 4). Section A checks, in this order:
+   - `WATCHTOWER_NOTIFICATION_URL` is defined in `/opt/xenon/.env` (`grep -c`, never print the value);
+   - `docker-compose config` renders the PR-10 values: `XENON_IB_CLIENT_ID_BASE` `"0"` on `api` and `realtime`, `IB_REALTIME_STATUS_URL`, `api` `stop_grace_period` 60s, `WATCHTOWER_TIMEOUT` `60s`, and a non-empty webhook;
+   - the diff against the live file shows only those changes plus `WATCHTOWER_NOTIFICATION_URL` becoming `${WATCHTOWER_NOTIFICATION_URL}` interpolation and comment lines. Explain any other difference before you apply; if you cannot, stop.
+2. **List the open orders that the new build will refuse, and save the list.** On the mini, read-only against `core_dev` (the read-only session setting refuses any write):
 
-   ```sql
-   SELECT submission_id, ticker, action, quantity, state,
-          placing_client_id, ib_order_id, perm_id, submitted_at
-   FROM xenon.order_submissions
-   WHERE broker = 'IB' AND account_env = 'live'
-     AND state IN ('PENDING', 'WORKING', 'PARTIALLY_FILLED', 'UNKNOWN')
-     AND placing_client_id IS DISTINCT FROM 4
-   ORDER BY submitted_at;
+   ```bash
+   cd /opt/xenon
+   PGOPTIONS='-c default_transaction_read_only=on' PGHOST=localhost PGUSER=xenon_migrator \
+   PGPASSFILE=/opt/xenon/.pgpass-refresh psql core_dev --csv -c "
+     SELECT submission_id, ticker, action, quantity, state,
+            placing_client_id, ib_order_id, perm_id, submitted_at
+     FROM xenon.order_submissions
+     WHERE broker = 'IB' AND account_env = 'live'
+       AND state IN ('PENDING', 'WORKING', 'PARTIALLY_FILLED', 'UNKNOWN')
+       AND placing_client_id IS DISTINCT FROM 4
+     ORDER BY submitted_at" > pr10-predeploy-inventory.csv
    ```
+
+   Add a `disposition` for every row in a copy of the file (`pr10-predeploy-dispositions.csv`): `cancel-before-deploy`, `manage-in-TWS`, or `unresolved-UNKNOWN`. § 5 step 2 re-checks every saved `submission_id`.
 
    - `placing_client_id` 20–49 (old place subprocess) or 26 (old fallback id): after the deploy, cancel and modify answer 409 `ORDER_NOT_OWNED`. Give every row a disposition before the deploy: cancel it now with the old build, or plan to manage it in TWS / IBKR Mobile. "Operator manages it in TWS" is a workflow; the order does not transfer to the owner.
    - `placing_client_id` 0–2, 10–19, or another block: also 409, as before.
@@ -59,16 +67,19 @@ Observed on 2026-10-20 (v0.10.0 Watchtower redeploy): the old api's pool sockets
 
 With PR-10, a startup 326 on `orders` latches `ORDERS_HALTED` with that cause. This fails closed: no order action is sent.
 
-- **Prevention:** the api disconnects every pool role on SIGTERM (bounded, 35s), uvicorn's request drain is bounded to 10s, and the compose and Watchtower stop budgets are 60s.
+- **Prevention:** on SIGTERM the api stops the order owner and queues a disconnect for every pool role first (waits up to 35s; a queued disconnect is never dropped), uvicorn's request drain is bounded to 10s, other cleanup to 10s, and the compose and Watchtower stop budgets are 60s. Limit: an order core blocked on a broker call can outlive the budget; SIGKILL then ends the process and its socket may stay open — hence the check below.
 - **Check on the mini, before every api (re)start:**
 
   ```bash
   lsof -nP -iTCP:4001 -sTCP:ESTABLISHED
   ```
 
-  With the api stopped, only the relay (and any other known client) may stay connected. A `limactl` connection that remains after the api container is gone is a stale socket.
+  `lsof` shows processes and local ports, not IB clientIds, and the realtime relay also connects through colima (`limactl`). Attribute every connection to the known client inventory before you act:
+  - run the check once while the old api is still up and save it (expected: the api pool's 3 connections plus the relay and any other known client; on 2026-10-20 the gateway had 4 API clients: pool 3/4/5 and relay 10);
+  - run it again after the api container is gone. Expected: the count drops by the api's 3 connections.
+  - A `limactl` connection that should have closed but did not is a **suspected** stale socket until gateway evidence (its API client list or log, if available) or the count difference attributes it to the old api.
 
-- **Clear stale sockets** before you start the api. Restart IB Gateway (it may need IBKR mobile 2FA), or restart colima (this restarts every container). Both options are inferred from the 2026-10-20 incident; neither has been tested as a recovery step.
+- **Clear stale sockets** only when they are attributed to the old api. Restart IB Gateway (it may need IBKR mobile 2FA), or restart colima (this restarts every container). Do not restart these shared services on the process name alone. Both options are inferred from the 2026-10-20 incident; neither has been tested as a recovery step.
 
 ## 5. After the deploy
 
@@ -76,7 +87,17 @@ With PR-10, a startup 326 on `orders` latches `ORDERS_HALTED` with that cause. T
    - `status` is `ok`, not `orders_halted`;
    - `orders_owner.client_id` is `4`, `halted` is `false`, `halt_reason` is `null`;
    - `ib_pool.orders.connected` is `true` and `ib_pool.orders.broker_readiness` is `ready` (`unknown` until the first open-orders round trip completes; `lost` after IB 1100/2110).
-2. Recheck the open orders against a READY broker snapshot: the `/orders` page (or `GET /orders`) must list every order from § 2 step 2, each with its disposition.
+2. Reconcile the saved inventory, row by row. The `/orders` page is not an exhaustive check (one account scope, no UNKNOWN rows, at most 200 open rows). Re-query exactly the saved ids, read-only:
+
+   ```bash
+   ids=$(tail -n +2 pr10-predeploy-inventory.csv | cut -d, -f1 | sed "s/.*/'&'/" | paste -sd, -)
+   PGOPTIONS='-c default_transaction_read_only=on' PGHOST=localhost PGUSER=xenon_migrator \
+   PGPASSFILE=/opt/xenon/.pgpass-refresh psql core_dev --csv -c "
+     SELECT submission_id, state, reason_code, placing_client_id, ib_order_id, perm_id, filled_qty
+     FROM xenon.order_submissions WHERE submission_id IN ($ids) ORDER BY submitted_at" > pr10-postdeploy-inventory.csv
+   ```
+
+   (Skip the query when the inventory is empty.) For every row, compare its state with its disposition and with a broker snapshot taken while `ib_pool.orders.broker_readiness` is `ready` (or TWS): `cancel-before-deploy` rows are terminal and absent at IB; `manage-in-TWS` rows match the order TWS shows. An `UNKNOWN` row stays unresolved until real evidence (an IB order or fill with orderRef `xo:<submission_id>`, or TWS) settles it; absence from a page is not evidence.
 3. Optional on paper only: place, modify and cancel one order. The stored `placing_client_id` must be `base + 4`.
 
 ## 6. `ORDERS_HALTED` — meaning and recovery
@@ -91,7 +112,28 @@ Recovery:
 
 A loss that is positively a gateway outage (1100/2110 before the loss, gateway port down, the whole pool down, or a gateway restart by the API) is not a halt. The owner reconnects on its worker with backoff and answers 503 `IB_BROKER_DISCONNECTED` until the broker is READY again.
 
-## 7. Reason codes the user sees
+## 7. Rollback to the previous build
+
+Restoring an image is not an ownership transfer. The previous build manages an order by reconnecting a subprocess as the order's recorded clientId; for an order placed by PR-10 that id is 4, which the previous build's own pool `orders` connection also uses. Do not count on the previous build to cancel or modify orders that PR-10 placed.
+
+1. **Pause Watchtower:** `docker stop xenon-watchtower-1`; `docker inspect -f '{{.State.Running}}' xenon-watchtower-1` prints `false`.
+2. **Inventory the orders PR-10 placed**, read-only, and save it (same connection settings as § 2 step 2):
+
+   ```sql
+   SELECT submission_id, ticker, action, quantity, state, ib_order_id, perm_id, submitted_at
+   FROM xenon.order_submissions
+   WHERE broker = 'IB' AND account_env = 'live'
+     AND state IN ('PENDING', 'WORKING', 'PARTIALLY_FILLED', 'UNKNOWN')
+     AND placing_client_id = 4
+   ORDER BY submitted_at;
+   ```
+
+   Give every row a disposition: cancel it now through the current (PR-10) api, only if you intend to, or manage it in TWS / IBKR Mobile after the rollback. Keep `UNKNOWN` rows and their reservations as they are; never edit or clear rows to make a downgrade easier.
+3. **Pin and verify the previous image** (`PREV` = previous release version without the `v`): `docker pull ghcr.io/moremeds/xenon-api:PREV`, then check its version / revision labels and digest as in `deploy/README.md` § D step 2. Point the local alias at it: `docker tag ghcr.io/moremeds/xenon-api:PREV ghcr.io/moremeds/xenon-api:latest` (same for `web` / `realtime` if they changed). Restore the previous compose file from its backup (`cp -p compose.yml.bak-<stamp> compose.yml`).
+4. **Stop, check, start:** `docker-compose stop -t 60 api`; run the stale-socket check (§ 4); `docker-compose up -d --pull never api`; then `/health` (`ib_pool.*.connected`). Reconcile the step-2 inventory as in § 5 step 2.
+5. **Resume Watchtower** (`docker start xenon-watchtower-1`) only when the registry `:latest` is no longer a PR-10 image (a release that reverts PR-10 is published). Until then Watchtower would pull PR-10 again; keep it stopped.
+
+## 8. Reason codes the user sees
 
 | Code                     | HTTP | Meaning                                                                               |
 | ------------------------ | ---- | ------------------------------------------------------------------------------------- |
