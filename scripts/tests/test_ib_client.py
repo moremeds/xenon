@@ -194,7 +194,8 @@ class TestConstants:
         assert isinstance(CLIENT_IDS, dict)
         assert "ib_sync" in CLIENT_IDS
         assert "ib_order" in CLIENT_IDS
-        assert "ib_order_manage" in CLIENT_IDS
+        # PR-10: no order-write CLI ids remain (the API's orders role owns them).
+        assert "ib_order_manage" not in CLIENT_IDS and "ib_place_order" not in CLIENT_IDS
 
     def test_default_ports(self):
         # DEFAULT_HOST comes from env/dotenv — verify it's a non-empty string
@@ -219,9 +220,9 @@ class TestConnection:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(host="127.0.0.1", port=4001, client_id=1)
+        client.connect(host="127.0.0.1", port=4001, client_id=91)
 
-        mock_ib.connect.assert_called_once_with("127.0.0.1", 4001, clientId=1, timeout=3)
+        mock_ib.connect.assert_called_once_with("127.0.0.1", 4001, clientId=91, timeout=3)
         assert client.is_connected()
 
     @patch("xenon.clients.ib_client.IB")
@@ -231,9 +232,9 @@ class TestConnection:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_name="ib_sync")
+        client.connect(client_name="fetch_analyst_ratings")
 
-        expected_id = CLIENT_IDS["ib_sync"]
+        expected_id = CLIENT_IDS["fetch_analyst_ratings"]
         mock_ib.connect.assert_called_once_with(DEFAULT_HOST, DEFAULT_GATEWAY_PORT, clientId=expected_id, timeout=3)
 
     @patch("xenon.clients.ib_client.IB")
@@ -249,7 +250,7 @@ class TestConnection:
 
         client = IBClient()
         with pytest.raises(IBConnectionError):
-            client.connect()
+            client.connect(client_id=90)
 
     @patch("xenon.clients.ib_client.IB")
     def test_connect_timeout_raises_ib_connection_error(self, MockIB):
@@ -258,7 +259,7 @@ class TestConnection:
 
         client = IBClient()
         with pytest.raises(IBConnectionError):
-            client.connect()
+            client.connect(client_id=90)
 
     @patch("xenon.clients.ib_client.IB")
     def test_connect_custom_timeout(self, MockIB):
@@ -266,9 +267,9 @@ class TestConnection:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(port=4001, client_id=1, timeout=30)
+        client.connect(port=4001, client_id=91, timeout=30)
 
-        mock_ib.connect.assert_called_once_with(DEFAULT_HOST, 4001, clientId=1, timeout=30)
+        mock_ib.connect.assert_called_once_with(DEFAULT_HOST, 4001, clientId=91, timeout=30)
 
     @patch("xenon.clients.ib_client.IB")
     def test_disconnect(self, MockIB):
@@ -276,7 +277,7 @@ class TestConnection:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         client.disconnect()
 
         mock_ib.disconnect.assert_called_once()
@@ -308,7 +309,7 @@ class TestConnection:
         mock_ib.isConnected.return_value = True
 
         with IBClient() as client:
-            client.connect(client_id=1)
+            client.connect(client_id=91)
             assert client.is_connected()
 
         mock_ib.disconnect.assert_called()
@@ -321,7 +322,7 @@ class TestConnection:
 
         with pytest.raises(RuntimeError):
             with IBClient() as client:
-                client.connect(client_id=1)
+                client.connect(client_id=91)
                 raise RuntimeError("boom")
 
         mock_ib.disconnect.assert_called()
@@ -345,7 +346,7 @@ class TestPortfolioOperations:
         ]
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         positions = client.get_positions()
 
         mock_ib.positions.assert_called_once()
@@ -359,7 +360,7 @@ class TestPortfolioOperations:
         mock_ib.positions.return_value = []
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         positions = client.get_positions()
 
         assert positions == []
@@ -391,7 +392,7 @@ class TestOrderOperations:
         mock_ib.placeOrder.return_value = expected_trade
 
         client = IBClient()
-        client.connect(client_id=2)
+        client.connect(client_id=92)
 
         contract = MagicMock()
         order = MagicMock()
@@ -407,7 +408,7 @@ class TestOrderOperations:
         mock_ib.placeOrder.side_effect = Exception("order rejected")
 
         client = IBClient()
-        client.connect(client_id=2)
+        client.connect(client_id=92)
 
         with pytest.raises(IBOrderError):
             client.place_order(MagicMock(), MagicMock())
@@ -421,7 +422,7 @@ class TestOrderOperations:
         mock_ib.cancelOrder.return_value = trade
 
         client = IBClient()
-        client.connect(client_id=0)
+        client.connect(client_id=90)
         client.cancel_order(trade.order)
 
         mock_ib.cancelOrder.assert_called_once_with(trade.order)
@@ -433,7 +434,7 @@ class TestOrderOperations:
         mock_ib.cancelOrder.side_effect = Exception("cancel failed")
 
         client = IBClient()
-        client.connect(client_id=0)
+        client.connect(client_id=90)
 
         with pytest.raises(IBOrderError):
             client.cancel_order(MagicMock())
@@ -452,7 +453,7 @@ class TestOrderOperations:
         ]
 
         client = IBClient()
-        client.connect(client_id=0)
+        client.connect(client_id=90)
         orders = client.get_open_orders()
 
         mock_ib.reqAllOpenOrders.assert_called_once()
@@ -470,7 +471,7 @@ class TestOrderOperations:
         mock_ib.openTrades.return_value = [_make_trade(order_id=7, status="Submitted")]
 
         client = IBClient()
-        client.connect(client_id=3)
+        client.connect(client_id=93)
 
         assert client.get_open_orders() == []
         mock_ib.reqAllOpenOrders.assert_called_once()
@@ -492,7 +493,7 @@ class TestMarketData:
         mock_ib.reqMktData.return_value = ticker
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         contract = MagicMock()
         quote = client.get_quote(contract)
 
@@ -511,7 +512,7 @@ class TestMarketData:
         mock_ib.reqMktData.return_value = ticker
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         quote = client.get_quote(MagicMock(), snapshot=True)
 
         # snapshot=True should be passed through
@@ -534,7 +535,7 @@ class TestMarketData:
         mock_ib.reqSecDefOptParams.return_value = [chain_data]
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         chains = client.get_option_chain("AAPL")
 
         mock_ib.reqSecDefOptParams.assert_called_once()
@@ -547,7 +548,7 @@ class TestMarketData:
         mock_ib.reqSecDefOptParams.return_value = []
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         chains = client.get_option_chain("ZZZZZ")
 
         assert chains == []
@@ -563,7 +564,7 @@ class TestMarketData:
         mock_ib.qualifyContracts.return_value = [qualified_contract]
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         result = client.qualify_contract(contract)
 
         mock_ib.qualifyContracts.assert_called_once_with(contract)
@@ -576,7 +577,7 @@ class TestMarketData:
         mock_ib.qualifyContracts.return_value = []
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         with pytest.raises(IBContractError, match="qualify"):
             client.qualify_contract(MagicMock())
@@ -594,7 +595,7 @@ class TestMarketData:
         mock_ib.qualifyContracts.return_value = [c1, c2]
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         results = client.qualify_contracts(c1, c2)
 
         mock_ib.qualifyContracts.assert_called_once_with(c1, c2)
@@ -606,7 +607,7 @@ class TestMarketData:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         contract = MagicMock()
         client.cancel_market_data(contract)
 
@@ -618,7 +619,7 @@ class TestMarketData:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         client.set_market_data_type(3)  # Delayed
 
         mock_ib.reqMarketDataType.assert_called_once_with(3)
@@ -642,7 +643,7 @@ class TestExecutionOperations:
         ]
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         executions = client.get_executions()
 
         mock_ib.reqExecutions.assert_called_once()
@@ -657,7 +658,7 @@ class TestExecutionOperations:
         ]
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         exec_filter = MagicMock()
         executions = client.get_executions(exec_filter)
 
@@ -673,7 +674,7 @@ class TestExecutionOperations:
         ]
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         fills = client.get_fills()
 
         mock_ib.fills.assert_called_once()
@@ -699,7 +700,7 @@ class TestFlexQuery:
         MockFlexReport.return_value = mock_report
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         client.run_flex_query(query_id=123456, token="test_token")
 
         MockFlexReport.assert_called_once_with(token="test_token", queryId=123456)
@@ -713,7 +714,7 @@ class TestFlexQuery:
         MockFlexReport.side_effect = Exception("Flex query failed")
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         with pytest.raises(IBError, match="Flex"):
             client.run_flex_query(query_id=123456, token="bad_token")
@@ -734,7 +735,7 @@ class TestErrorHandling:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         # Simulate error callback
         client._on_error(10358, "10358", "Reuters Fundamentals subscription inactive")
@@ -747,7 +748,7 @@ class TestErrorHandling:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         # The error handler should store the error for the next operation to check
         client._on_error(103, "103", "Duplicate order id")
@@ -759,7 +760,7 @@ class TestErrorHandling:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         # Simulate disconnect error
         client._on_error(1100, "1100", "Connectivity between IB and TWS has been lost")
@@ -772,7 +773,7 @@ class TestErrorHandling:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         # These should be handled gracefully
         client._on_error(2104, "2104", "Market data farm connection is OK")
@@ -794,12 +795,12 @@ class TestFastTimeout:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(host="127.0.0.1", port=4001, client_id=1)
+        client.connect(host="127.0.0.1", port=4001, client_id=91)
 
         mock_ib.connect.assert_called_once_with(
             "127.0.0.1",
             4001,
-            clientId=1,
+            clientId=91,
             timeout=3,
         )
 
@@ -810,12 +811,12 @@ class TestFastTimeout:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(host="127.0.0.1", port=4001, client_id=1, timeout=10)
+        client.connect(host="127.0.0.1", port=4001, client_id=91, timeout=10)
 
         mock_ib.connect.assert_called_once_with(
             "127.0.0.1",
             4001,
-            clientId=1,
+            clientId=91,
             timeout=10,
         )
 
@@ -834,7 +835,7 @@ class TestRetryLogic:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1, max_retries=2)
+        client.connect(client_id=91, max_retries=2)
 
         assert mock_ib.connect.call_count == 2
 
@@ -847,7 +848,7 @@ class TestRetryLogic:
 
         client = IBClient()
         with pytest.raises(IBConnectionError):
-            client.connect(client_id=1, max_retries=3)
+            client.connect(client_id=91, max_retries=3)
 
         assert mock_ib.connect.call_count == 3
 
@@ -873,7 +874,7 @@ class TestLogging:
 
         client = IBClient()
         with caplog.at_level(logging.INFO):
-            client.connect(client_id=1)
+            client.connect(client_id=91)
 
         assert any("connect" in r.message.lower() or "connected" in r.message.lower() for r in caplog.records)
 
@@ -883,7 +884,7 @@ class TestLogging:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         with caplog.at_level(logging.INFO):
             client.disconnect()
 
@@ -913,7 +914,7 @@ class TestHistoricalData:
         mock_ib.reqHistoricalData.return_value = [bar]
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         contract = MagicMock()
         bars = client.get_historical_data(contract, duration="1 D", bar_size="1 hour")
 
@@ -938,7 +939,7 @@ class TestContractDetails:
         mock_ib.reqContractDetails.return_value = [cd]
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         contract = MagicMock()
         details = client.get_contract_details(contract)
 
@@ -960,7 +961,7 @@ class TestUtilities:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
         client.sleep(1.5)
 
         mock_ib.sleep.assert_called_once_with(1.5)

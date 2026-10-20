@@ -7,9 +7,11 @@ element of the identity tuple (scope account, owner clientId, orderId,
 permId) that disagrees with the live trade rejects with an ownership-class
 reason instead of guessing.
 
-The module must emit the stdout JSON error contract — never a traceback —
-when ``IBConnectionError`` (the real type from ``xenon.clients.ib_client``)
-surfaces from connect, owner-reconnect, or mid-operation reads.
+An ``IBConnectionError`` (the real type from ``xenon.clients.ib_client``)
+from a mid-operation read or send is the ``connection`` reply — never a
+traceback. Since PR-10 the cores run on the order owner (no CLI, no
+owner-reconnect); ``scripts/tests/order_core_shims.py`` keeps the old call
+shape for these tests.
 """
 
 import json
@@ -24,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from xenon.clients.ib_client import IBConnectionError
 from xenon.execution import ib_order_manage
-from xenon.execution.ib_order_manage import cancel_order, find_trade, modify_order
+from scripts.tests.order_core_shims import cancel_order, find_trade, modify_order
 
 
 # ─── Helpers (mirror sibling tests, extended with account/clientId) ──────
@@ -372,26 +374,6 @@ class TestModifyIdentity:
 
 
 class TestFrozenIdentity:
-    def test_cancel_orderid_only_ignores_stranger_after_reconnect(self, capsys):
-        """orderId-only request: first snapshot holds client 9's order, the
-        post-reconnect snapshot holds client 26's DIFFERENT order with the
-        same orderId. The frozen identity (clientId=9, permId=111) must not
-        match it — 'not found' error, stranger's order never cancelled."""
-        ours = make_trade(order_id=10, perm_id=111, client_id=9)
-        stranger = make_trade(order_id=10, perm_id=222, client_id=26)
-        client = make_client()
-        client.ib.client.clientId = 0  # must reconnect as owner 9
-        client.ib.errorEvent = ErrorEvent()
-        client.get_open_orders.side_effect = [[ours], [stranger]]
-        client.cancel_order = MagicMock()
-        with pytest.raises(SystemExit) as exc:
-            cancel_order(client, 10, 0, "127.0.0.1", 4002)
-        assert exc.value.code == 1
-        data = _emitted(capsys)
-        assert data["status"] == "error"
-        assert data["upstream"]["code"] == 10147
-        client.cancel_order.assert_not_called()
-
     def test_cancel_orderid_only_success_acts_on_frozen_order(self, capsys):
         """Our order cancels then vanishes while a stranger's same-orderId
         order stays open — disappearance-as-ack holds because the FROZEN
@@ -430,21 +412,6 @@ class TestFrozenIdentity:
         data = _emitted(capsys)
         assert data["status"] == "error"
         client.cancel_order.assert_called_once_with(ours.order)
-
-    def test_modify_orderid_only_ignores_stranger_after_reconnect(self, capsys):
-        ours = make_trade(order_id=10, perm_id=111, client_id=9)
-        stranger = make_trade(order_id=10, perm_id=222, client_id=26)
-        client = make_client()
-        client.ib.client.clientId = 0  # must reconnect as owner 9
-        client.ib.errorEvent = ErrorEvent()
-        client.get_open_orders.side_effect = [[ours], [stranger]]
-        client.place_order = MagicMock()
-        with pytest.raises(SystemExit) as exc:
-            modify_order(client, 10, 0, 22.50, "127.0.0.1", 4002)
-        assert exc.value.code == 1
-        data = _emitted(capsys)
-        assert data["upstream"]["code"] == 10147
-        client.place_order.assert_not_called()
 
     def test_modify_confirmation_requires_the_same_order(self, capsys):
         """A refresh containing a DIFFERENT order that happens to carry the
@@ -511,26 +478,6 @@ class TestPermIdLatch:
         assert data["status"] == "ok"
         assert data["finalStatus"] == "Cancelled"
         client.cancel_order.assert_called_once_with(ours.order)
-
-    def test_cancel_latches_permid_on_reconnect_lookup(self, capsys):
-        """Same latch through the reconnect path: post-reconnect snapshot
-        assigns permId 111 → pinned; a later 222 replacement is 'not found'
-        → disappearance-ack for ours, cancel sent to the 111 order."""
-        ours = make_trade(order_id=10, perm_id=0, client_id=9)
-        assigned = make_trade(order_id=10, perm_id=111, client_id=9)
-        replacement = make_trade(order_id=10, perm_id=222, client_id=9)
-        client = make_client()
-        client.ib.client.clientId = 0  # must reconnect as owner 9
-        client.ib.errorEvent = ErrorEvent()
-        client.get_open_orders.side_effect = (
-            [[ours]] + [[assigned]] + [[replacement]] * 12
-        )
-        client.cancel_order = MagicMock()
-        with pytest.raises(SystemExit) as exc:
-            cancel_order(client, 10, 0, "127.0.0.1", 4002)
-        assert exc.value.code == 0
-        assert _emitted(capsys)["status"] == "ok"
-        client.cancel_order.assert_called_once_with(assigned.order)
 
     def test_cancel_zero_to_permid_still_succeeds(self, capsys):
         """0→111: the latched order itself reports Cancelled → ok."""
@@ -603,121 +550,29 @@ class TestIBConnectionErrorContract:
         )
         assert ib_order_manage.classify_failure(None, exc) == "ownership"
 
-    def test_reconnect_as_owner_emits_json_on_ibconnectionerror(self, capsys):
-        """IBConnectionError from owner-reconnect emits the JSON contract
-        (classification=connection), not a crash/traceback."""
-        client = make_client([])
-        client.connect.side_effect = IBConnectionError("Failed to connect to IB on 127.0.0.1:4002")
-        with pytest.raises(SystemExit) as exc:
-            ib_order_manage._reconnect_as_owner(client, "127.0.0.1", 4002, 9)
-        assert exc.value.code == 1
-        data = _emitted(capsys)
-        assert data["status"] == "error"
-        assert data["classification"] == "connection"
-
-    def test_main_connect_ibconnectionerror_emits_json(self, capsys, monkeypatch):
-        """Initial connect raising the real IBConnectionError emits JSON."""
+    def test_mid_cancel_ibconnectionerror_is_a_connection_reply(self, capsys):
+        """get_open_orders raising IBConnectionError mid-cancel is the
+        connection reply, never a crash."""
         fake = make_client()
-        fake.connect.side_effect = IBConnectionError(
-            "Failed to connect to IB on 127.0.0.1:4002: all client IDs 20-49 in use"
-        )
-        monkeypatch.setattr(ib_order_manage, "IBClient", lambda: fake)
-        monkeypatch.setattr(sys, "argv", ["x", "cancel", "--order-id", "10", "--perm-id", "12345"])
-        with pytest.raises(SystemExit) as exc:
-            ib_order_manage.main()
-        assert exc.value.code == 1
-        data = _emitted(capsys)
-        assert data["status"] == "error"
-        assert data["classification"] == "connection"
-
-    def test_mid_cancel_ibconnectionerror_emits_json(self, capsys, monkeypatch):
-        """get_open_orders raising IBConnectionError mid-cancel must emit
-        JSON instead of crashing with a traceback."""
-        fake = make_client()
-        fake.connect.return_value = None
         fake.get_open_orders.side_effect = IBConnectionError("Not connected to IB. Call connect() first.")
-        monkeypatch.setattr(ib_order_manage, "IBClient", lambda: fake)
-        monkeypatch.setattr(sys, "argv", ["x", "cancel", "--order-id", "10", "--perm-id", "12345"])
         with pytest.raises(SystemExit) as exc:
-            ib_order_manage.main()
+            cancel_order(fake, 10, 12345)
         assert exc.value.code == 1
         data = _emitted(capsys)
         assert data["status"] == "error"
         assert data["classification"] == "connection"
 
-    def test_mid_modify_ibconnectionerror_emits_json(self, capsys, monkeypatch):
+    def test_mid_modify_ibconnectionerror_is_a_connection_reply(self, capsys):
         """Same contract on the modify path — place_order raising
-        IBConnectionError after lookup must still emit JSON."""
+        IBConnectionError after lookup is the connection reply, unconfirmed."""
         t = make_trade(order_id=10, perm_id=12345, client_id=0)
         fake = make_client()
-        fake.connect.return_value = None
         fake.get_open_orders.return_value = [t]
         fake.ib.errorEvent = ErrorEvent()
-        fake.place_order = MagicMock(
-            side_effect=IBConnectionError("Not connected to IB. Call connect() first.")
-        )
-        monkeypatch.setattr(ib_order_manage, "IBClient", lambda: fake)
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            ["x", "modify", "--order-id", "10", "--perm-id", "12345", "--new-price", "22.50"],
-        )
+        fake.place_order = MagicMock(side_effect=IBConnectionError("Not connected to IB. Call connect() first."))
         with pytest.raises(SystemExit) as exc:
-            ib_order_manage.main()
+            modify_order(fake, 10, 12345, 22.50)
         assert exc.value.code == 1
         data = _emitted(capsys)
         assert data["status"] == "error"
-        assert data["classification"] == "connection"
-
-
-# ─── CLI plumbing ─────────────────────────────────────────────────────────
-
-
-class TestIdentityArgsPlumbing:
-    def test_cancel_accepts_account_and_client_id_args(self, capsys, monkeypatch):
-        t = make_trade(order_id=10, perm_id=12345, client_id=0, account="DU0000000")
-        fake = make_client()
-        fake.connect.return_value = None
-        fake.ib.errorEvent = ErrorEvent()
-        fake.get_open_orders.side_effect = [[t], []]
-        fake.cancel_order = MagicMock()
-        monkeypatch.setattr(ib_order_manage, "IBClient", lambda: fake)
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            [
-                "x",
-                "cancel",
-                "--order-id",
-                "10",
-                "--perm-id",
-                "12345",
-                "--account",
-                "DU0000000",
-                "--client-id",
-                "0",
-            ],
-        )
-        with pytest.raises(SystemExit) as exc:
-            ib_order_manage.main()
-        assert exc.value.code == 0
-
-    def test_cancel_cli_account_mismatch_emits_json(self, capsys, monkeypatch):
-        t = make_trade(order_id=10, perm_id=12345, client_id=0, account="DU9999999")
-        fake = make_client()
-        fake.connect.return_value = None
-        fake.get_open_orders.return_value = [t]
-        fake.cancel_order = MagicMock()
-        monkeypatch.setattr(ib_order_manage, "IBClient", lambda: fake)
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            ["x", "cancel", "--order-id", "10", "--perm-id", "12345", "--account", "DU0000000"],
-        )
-        with pytest.raises(SystemExit) as exc:
-            ib_order_manage.main()
-        assert exc.value.code == 1
-        data = _emitted(capsys)
-        assert data["status"] == "error"
-        assert data["classification"] == "ownership"
-        fake.cancel_order.assert_not_called()
+        assert (data["classification"], data["amend_outcome"]) == ("connection", "unconfirmed")

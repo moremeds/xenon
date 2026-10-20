@@ -179,3 +179,42 @@ def test_server_factories_use_reconnect_helper_not_raw_get():
             f"{fn.__name__} still calls ib_pool.get('sync') — that is the "
             f"bypass that needs to go away"
         )
+
+
+# --- PR-10: only the order owner's supervisor reconnects ``orders`` ----------
+
+
+def test_sync_reconnect_refuses_the_orders_role(monkeypatch):
+    pool = IBPool()
+    pool._clients["orders"] = _make_fake_client(connected=False)
+    monkeypatch.setattr(
+        "xenon.api.ib_pool._connect_in_thread", lambda *a, **k: pytest.fail("orders reconnected from a request path")
+    )
+    with pytest.raises(ValueError, match="supervisor"):
+        pool.get_with_reconnect_sync("orders")
+
+
+@pytest.mark.asyncio
+async def test_acquire_never_reconnects_orders(monkeypatch):
+    pool = IBPool()
+    pool._clients["orders"] = _make_fake_client(connected=False)
+    monkeypatch.setattr(
+        "xenon.api.ib_pool._connect_in_thread", lambda *a, **k: pytest.fail("orders reconnected from a request path")
+    )
+    with pytest.raises(ConnectionError):
+        async with pool.acquire("orders"):
+            pass
+    assert not pool._locks["orders"].locked()
+
+
+@pytest.mark.asyncio
+async def test_partial_disconnect_keeps_orders_and_executors():
+    """The gateway-restart path closes sync/data only: orders stays with the
+    order owner and the role executors keep running."""
+    pool = IBPool()
+    for role in ("sync", "orders", "data"):
+        pool._clients[role] = _make_fake_client(connected=True)
+    await pool.disconnect_all(roles=("sync", "data"))
+    assert set(pool._clients) == {"orders"}
+    assert not any(ex._shutdown for ex in pool._role_executors.values())
+    await pool.disconnect_all()

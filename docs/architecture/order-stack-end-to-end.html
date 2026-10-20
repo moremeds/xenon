@@ -223,6 +223,16 @@
   </head>
   <body>
     <h1>Order Stack — End-to-End Architecture</h1>
+    <blockquote>
+      <strong>PR-10 update (2026-10-20) — read first.</strong> The order-write subprocesses
+      (<code>xenon-ib-place-order</code> / <code>xenon-ib-order-manage</code>, clientIds 20–49,
+      reconnect as the original clientId) are gone. Place, cancel, modify and wizard protect run
+      in-process on the API pool <code>orders</code> connection (clientId base+4) through the order
+      owner (<code>src/xenon/api/order_owner.py</code>). Orders not placed by that connection get
+      409 <code>ORDER_NOT_OWNED</code>. Current rules: <code>src/xenon/api/CLAUDE.md</code> § Order
+      owner; cutover: <code>docs/runbooks/pr10-order-owner-cutover.md</code>. Diagrams below that show
+      the subprocess layer are historical.
+    </blockquote>
     <p class="meta">
       Companion to <code>order-stack-end-to-end.md</code>. Markdown carries
       every detail; this file adds Mermaid diagrams.

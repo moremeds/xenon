@@ -3,13 +3,10 @@ MODIFY_PENDING recovery (item 4) at the gate4 / orders_store layer."""
 
 from __future__ import annotations
 
-import subprocess
-import sys
 from datetime import datetime, timedelta, timezone
 
 from scripts.tests.test_gate4_reserve import (
     SCOPE,
-    _env_for_subprocess,
     _reserve,
     _seed_snapshot,
     _snapshot_payload,
@@ -127,11 +124,7 @@ def test_unapplied_quantity_amend_keeps_max_until_fresh_read_after_sender_finish
 def test_api_restart_amend_expires_only_after_cli_bound():
     """No settle at all (API process died mid-modify). The deadline is
     send_by + grace (round 5): no sender transmits after send_by (route and
-    CLI fence), so after that only IB's processing grace remains."""
-    from xenon.api import server
-    from xenon.execution import ib_order_manage
-
-    assert server._MODIFY_SUBPROCESS_TIMEOUT_S < ib_order_manage.MODIFY_WALL_CLOCK_S
+    core fence), so after that only IB's processing grace remains."""
     _seed_snapshot(_snapshot_payload([_stock("SPY", 300)]))
     sub_id = _working_with_legs("r4-restart", qty=1)
     _set_perm(sub_id, "990203")
@@ -172,14 +165,6 @@ def test_expired_amend_needs_a_read_after_the_last_write():
     assert "expired" not in out
     assert _legs(sub_id)[1]["pending_amend_qty"] == 2
     assert _mirror("990204", 1, observed_at=deadline + timedelta(seconds=6))["expired"] is True
-
-
-def test_modify_cli_watchdog_ends_the_sender():
-    code = (
-        "import time\nfrom xenon.execution import ib_order_manage as m\nm._arm_sender_watchdog(0.2)\ntime.sleep(10)\n"
-    )
-    proc = subprocess.run([sys.executable, "-c", code], env=_env_for_subprocess(), timeout=8)
-    assert proc.returncode == 3
 
 
 def test_reconcile_requires_fresh_read():

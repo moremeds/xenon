@@ -38,6 +38,7 @@ from ib_async import (
 from sqlalchemy import insert, select, text, update
 
 from scripts.tests.test_gate4_route import (  # noqa: F401 — autouse fixtures
+    _order_owner,
     _pg,
     _pg_engine,
     _sell_call_body,

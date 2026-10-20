@@ -48,6 +48,7 @@ def dev_sh_dryrun(tmp_path):
         'echo "XENON_BROKER_ACCOUNT=$XENON_BROKER_ACCOUNT"\n'
         'echo "IB_GATEWAY_HOST=$IB_GATEWAY_HOST"\n'
         'echo "IB_GATEWAY_PORT=$IB_GATEWAY_PORT"\n'
+        'echo "XENON_IB_CLIENT_ID_BASE=$XENON_IB_CLIENT_ID_BASE"\n'
         "exit 0\n"
     )
     out = tmp_path / "dev.sh"
@@ -149,3 +150,19 @@ def test_live_mode_honors_xenon_live_account(dev_sh_dryrun):
     out = _run_dryrun(dev_sh_dryrun, "live", env_overrides={"XENON_LIVE_ACCOUNT": "U1234567"})
     assert out.get("XENON_BROKER_ACCOUNT") == "U1234567"
     assert out.get("XENON_TRADING_MODE") == "live"
+
+
+@pytest.mark.parametrize(
+    ("mode", "account_var", "account"),
+    [("paper", "XENON_PAPER_ACCOUNT", "DU9876543"), ("live", "XENON_LIVE_ACCOUNT", "U1234567")],
+)
+def test_dev_sh_exports_dev_client_id_base(dev_sh_dryrun, mode, account_var, account):
+    """PR-10 / A5 (F9): dev.sh always uses clientId block 100, never prod's 0,
+    even when the caller's env says 0 — so `dev.sh live` on the prod gateway
+    never opens the prod pool ids 3/4/5."""
+    if not shutil.which("bash"):
+        pytest.skip("bash not on PATH")
+    out = _run_dryrun(
+        dev_sh_dryrun, mode, env_overrides={account_var: account, "XENON_IB_CLIENT_ID_BASE": "0"}
+    )
+    assert out.get("XENON_IB_CLIENT_ID_BASE") == "100"

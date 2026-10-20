@@ -128,7 +128,7 @@ describe("/api/orders/modify route", () => {
 
   it.each([
     [409, { reason_code: "REPLACEMENT_IN_PROGRESS", detail: "in progress", state: "PENDING" }],
-    [409, { reason_code: "OWNERSHIP", detail: { message: "x" }, replacement_placed: false, cancelled: [] }],
+    [409, { reason_code: "ORDER_NOT_OWNED", detail: { message: "x" }, replacement_placed: false, cancelled: [] }],
     [400, { reason_code: "ETF_CALL_UNCOVERED", detail: "naked", error: "CRITICAL: Original order cancelled" }],
     [502, { reason_code: "PLACE_OUTCOME_UNKNOWN", detail: "unknown", error: "status unknown", submission_id: "s" }],
   ])("forwards FastAPI %i body unchanged", async (status, body) => {

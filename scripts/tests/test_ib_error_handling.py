@@ -30,7 +30,7 @@ class TestPacingViolation:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         client._on_error(1, 162, "Historical Market Data pacing violation")
 
@@ -44,7 +44,7 @@ class TestPacingViolation:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         client._on_error(2, 366, "No historical data query found for ticker id:2")
 
@@ -58,7 +58,7 @@ class TestPacingViolation:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         client._on_error(5, 162, "pacing violation")
         client._on_error(5, 162, "pacing violation")
@@ -73,7 +73,7 @@ class TestPacingViolation:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         # Fire 5 pacing errors for same reqId
         for _ in range(5):
@@ -89,7 +89,7 @@ class TestPacingViolation:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         client._on_error(1, 162, "pacing violation")
         client._on_error(1, 162, "pacing violation")
@@ -114,7 +114,7 @@ class TestInvalidContract:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         contract = MagicMock()
         contract.__str__ = lambda self: "AAPL OPT 20260320 200 C"
@@ -129,7 +129,7 @@ class TestInvalidContract:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         contract = MagicMock()
         client._on_error(2, 354, "Requested market data not subscribed", contract)
@@ -143,7 +143,7 @@ class TestInvalidContract:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         contract = MagicMock()
         client._on_error(1, 200, "No security definition found", contract)
@@ -157,7 +157,7 @@ class TestInvalidContract:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         assert isinstance(client.failed_contracts, set)
         assert len(client.failed_contracts) == 0
@@ -174,7 +174,7 @@ class TestInvalidContract:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         c1 = MagicMock()
         c1.conId = 111
@@ -202,7 +202,7 @@ class TestExistingErrorHandling:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         # Should not raise, not add to failed contracts
         client._on_error(1, 10358, "Reuters Fundamentals subscription inactive")
@@ -217,7 +217,7 @@ class TestExistingErrorHandling:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         # These should not raise or add to any tracking
         client._on_error(0, 2104, "Market data farm connection is OK")
@@ -233,7 +233,7 @@ class TestExistingErrorHandling:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         # Should not raise
         client._on_error(0, 1100, "Connectivity between IB and TWS has been lost")
@@ -247,7 +247,7 @@ class TestExistingErrorHandling:
         mock_ib.isConnected.return_value = True
 
         client = IBClient()
-        client.connect(client_id=1)
+        client.connect(client_id=91)
 
         client._on_error(99, 999, "Some unknown error")
         assert client._last_error == (999, "Some unknown error")

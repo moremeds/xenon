@@ -50,8 +50,9 @@ from xenon.api.guards import (
     require_mode_verified,
 )
 from xenon.api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_mode, is_docker_mode, restart_ib_gateway
-from xenon.api.ib_pool import IBPool
-from xenon.api.pool_order_manage import pool_cancel_order, pool_modify_order  # noqa: F401  (PR-10 decides)
+from xenon.api.ib_pool import IBPool, check_client_id_base_mapping
+from xenon.utils.ib_connection import TEST_BROKER_GUARD_ENV
+from xenon.api.order_owner import BROKER_DISCONNECTED, ORDERS_HALTED, OrderOwner
 from xenon.api.routes.historical import router as historical_router
 from xenon.api.routes.journal import router as journal_router
 from xenon.api.routes.orders import orders_payload_for_scope
@@ -63,13 +64,13 @@ from xenon.api.routes.wizard import router as wizard_router
 from xenon.api.services.flex_token import flex_token_status
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
-from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
+from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, pool_client_id
 from xenon.db.engine import dispose_engine, get_sync_engine, init_engine
 from xenon.db.queries.blotter import blotter_has_trades, fetch_blotter_pg, fetch_futu_blotter, merge_pg_and_flex
 from xenon.db.schema import account_snapshots, order_events, order_submissions
-from xenon.execution import gate4, orders_store, preflight, quote_guard, quote_tokens
+from xenon.execution import gate4, ib_order_manage, orders_store, preflight, quote_guard, quote_tokens
 from xenon.execution.account_scope import IBAccountSelectionError, resolve_from_app_state, select_ib_account
-from xenon.execution.ib_place_order import TERMINAL_STATUSES, is_hard_error
+from xenon.execution import ib_place_order
 from xenon.execution.preflight import (
     PortfolioView,
     PreflightRequest,
@@ -184,6 +185,9 @@ def _futu_cleanup_after_timeout(
 # Shared state
 # ---------------------------------------------------------------------------
 ib_pool: Optional[IBPool] = None
+# The single order owner (PR-10): every cancel/modify/wizard-protect runs on
+# the pool ``orders`` connection through it. None until lifespan starts it.
+order_owner: Optional[OrderOwner] = None
 uw_available: bool = False
 
 
@@ -430,6 +434,26 @@ async def _stop_wizard_risk_alert() -> None:
         pass
 
 
+async def _cancel_task(task) -> None:
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+
+
+async def _bounded_cleanup(name: str, aw, seconds: float) -> None:
+    """One shutdown step: bounded, logged, never raises."""
+    try:
+        await asyncio.wait_for(aw, seconds)
+    except asyncio.TimeoutError:
+        logger.error("shutdown: %s did not finish within %ss; continuing", name, seconds)
+    except Exception:  # noqa: BLE001
+        logger.exception("shutdown: %s failed", name)
+
+
 def _maybe_start_futu_history_loop() -> None:
     """Start the nightly Futu trades + cashflows + NAV walk loop.
 
@@ -600,7 +624,7 @@ def _get_managed_account_for_health() -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start IB pool and UW client on startup, tear down on shutdown."""
-    global ib_pool, uw_available
+    global ib_pool, order_owner, uw_available
 
     logger.info(validate_auth_config())  # logs posture; raises if internal token == query key
 
@@ -620,6 +644,13 @@ async def lifespan(app: FastAPI):
         logger.info("Xenon API test mode shut down")
         return
 
+    # A5: refuse an unsafe clientId base ↔ database pairing before anything
+    # dials the gateway (base 0 only with core_dev; dev.sh exports 100).
+    check_client_id_base_mapping(
+        os.environ.get("DATABASE_URL"),
+        test_session=os.environ.get(TEST_BROKER_GUARD_ENV) == "1",
+    )
+
     # Ensure IB Gateway is running before connecting pool
     gw_status = await ensure_ib_gateway()
     logger.info("IB Gateway: %s", gw_status)
@@ -629,6 +660,10 @@ async def lifespan(app: FastAPI):
     app.state.ib_pool = ib_pool
     pool_status = await ib_pool.connect_all()
     logger.info("IB pool status: %s", pool_status)
+    # Order owner + its orders-connection supervisor (A2): the only code that
+    # ever reconnects the orders role.
+    order_owner = OrderOwner(ib_pool)
+    order_owner.start()
 
     # Trading-mode prefix guard — verify Gateway login matches XENON_TRADING_MODE.
     # Failure does not abort startup; it sets app.state.mode_verified=False
@@ -722,39 +757,40 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        # Shutdown — always runs, even if the app raised.
-        listener = getattr(app.state, "journal_auto_import", None)
-        if listener is not None:
-            try:
-                await listener.stop()
-            except Exception:  # noqa: BLE001
-                logger.exception("journal auto-import listener failed to stop")
-        ib_activity_task = getattr(app.state, "ib_activity_poller_task", None)
-        if ib_activity_task is not None:
-            ib_activity_task.cancel()
-            try:
-                await ib_activity_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
-        await _stop_wizard_risk_alert()
-        futu_loop_task = getattr(app.state, "futu_history_loop_task", None)
-        if futu_loop_task is not None:
-            futu_loop_task.cancel()
-            try:
-                await futu_loop_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
-        if ib_pool:
-            try:
-                await ib_pool.disconnect_all()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("ib_pool.disconnect_all failed: %s", exc)
-        if _futu_client is not None:
-            try:
-                _futu_client.disconnect()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("FutuClient disconnect on shutdown failed: %s", exc)
-        await dispose_engine()
+        # Shutdown — always runs, even if the app raised. The IB section goes
+        # FIRST and in its own try/finally, so no other cleanup (a stalled
+        # Postgres LISTEN close, Futu, ...) can delay or skip it. Every await
+        # here is bounded; see _SHUTDOWN_* for the budget.
+        try:
+            if order_owner is not None:
+                # stop() refuses admission at once, abandons queued order jobs
+                # (zero sends) and cancels the supervisor.
+                await _bounded_cleanup("order owner stop", order_owner.stop(), _SHUTDOWN_STEP_S["owner"])
+            if ib_pool:
+                try:
+                    await ib_pool.disconnect_all(timeout=_SHUTDOWN_IB_DISCONNECT_S)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("ib_pool.disconnect_all failed: %s", exc)
+        finally:
+            listener = getattr(app.state, "journal_auto_import", None)
+            if listener is not None:
+                await _bounded_cleanup("journal auto-import listener", listener.stop(), _SHUTDOWN_STEP_S["listener"])
+            await _bounded_cleanup(
+                "ib activity poller",
+                _cancel_task(getattr(app.state, "ib_activity_poller_task", None)),
+                _SHUTDOWN_STEP_S["poller"],
+            )
+            await _bounded_cleanup("wizard risk alert", _stop_wizard_risk_alert(), _SHUTDOWN_STEP_S["wizard"])
+            await _bounded_cleanup(
+                "futu history loop",
+                _cancel_task(getattr(app.state, "futu_history_loop_task", None)),
+                _SHUTDOWN_STEP_S["futu_loop"],
+            )
+            if _futu_client is not None:
+                await _bounded_cleanup(
+                    "FutuClient disconnect", asyncio.to_thread(_futu_client.disconnect), _SHUTDOWN_STEP_S["futu"]
+                )
+            await _bounded_cleanup("engine dispose", dispose_engine(), _SHUTDOWN_STEP_S["engine"])
         logger.info("Xenon API shut down")
 
 
@@ -1203,11 +1239,15 @@ def _service_health_rows() -> list[dict]:
 @app.get("/health")
 async def health():
     gw = await check_ib_gateway()
+    owner = order_owner.status() if order_owner is not None else None
     return {
-        "status": "ok",
+        # Stays HTTP 200 (a failing healthcheck restart would clear the latch);
+        # a latched ORDERS_HALTED turns the status red.
+        "status": "orders_halted" if owner and owner["halted"] else "ok",
         "test_mode": _is_test_mode(),
         "ib_gateway": gw,
         "ib_pool": ib_pool.status() if ib_pool else {},
+        "orders_owner": owner,
         "uw": uw_available,
         "futu": _compute_futu_health(),
         "trading_mode": getattr(app.state, "trading_mode", trading_mode.MODE),
@@ -1877,10 +1917,11 @@ def _preflight_block_response(verdict: Verdict) -> JSONResponse:
     )
 
 
-# The route SIGKILLs the modify subprocess after this many seconds. Stays
-# below ib_order_manage.MODIFY_WALL_CLOCK_S (the CLI's own backstop). Gate 4
-# expiry does not depend on either: it uses the --send-by fence.
-_MODIFY_SUBPROCESS_TIMEOUT_S = 15
+# How long a cancel/modify request waits for the order owner's worker. After
+# it the request answers (unsent if the job never started, else unconfirmed)
+# and a started job keeps running and settles Gate 4 itself. Gate 4 expiry
+# does not depend on it: the send_by fence is checked right before the send.
+_ORDER_ACTION_TIMEOUT_S = 15
 
 
 def _gate4_reject_verdict(
@@ -2628,7 +2669,7 @@ async def _place_reserved(body: dict, submission_id: str, scope: dict):
             submission_id=submission_id,
             ib_order_id=str(order_id),
             perm_id=str(perm_id),
-            placing_client_id=26,
+            placing_client_id=pool_client_id("orders"),
             expected_states=("PENDING",),
         )
         return {
@@ -2642,61 +2683,110 @@ async def _place_reserved(body: dict, submission_id: str, scope: dict):
         }
 
     # Place on the account the reservation row was stamped with — never on an
-    # account named by the request body, never on IB's default. The
-    # subprocess fails closed if it is legacy_unknown or not managed.
-    # submission_id becomes orderRef "xo:<submission_id>" (recovery key); a
-    # body-supplied orderRef is dropped.
-    cli_body = {k: v for k, v in body.items() if k != "orderRef"}
-    order_json = json.dumps({**cli_body, "account": scope["broker_account"], "submission_id": submission_id})
-    # Budget: connect (10 s) + qualify + ack wait (5 s combo) must fit with
-    # margin — a kill mid-place leaves the order's fate unknown.
-    result = await _run_ib_script_with_recovery(
-        "xenon-ib-place-order", ["--json", order_json], timeout=_PLACE_SUBPROCESS_TIMEOUT_S
+    # account named by the request body, never on IB's default. The core
+    # fails closed if it is legacy_unknown or not managed. submission_id
+    # becomes orderRef "xo:<submission_id>" (recovery key); a body-supplied
+    # orderRef is dropped.
+    params = {
+        **{k: v for k, v in body.items() if k != "orderRef"},
+        "account": scope["broker_account"],
+        "submission_id": submission_id,
+    }
+    if order_owner is None:
+        return _finish_place(submission_id, _owner_unavailable_reply())
+    settled: dict = {}
+
+    def settle(reply: dict) -> None:
+        # Runs exactly once: on the orders worker for a started job (even
+        # when this request is gone), else here for a job that never started.
+        settled["response"] = _finish_place(submission_id, reply)
+
+    await order_owner.run(
+        lambda client: ib_place_order.place_order_on_client(client, params),
+        timeout=_PLACE_TIMEOUT_S,
+        settle=settle,
     )
-    if not result.ok and result.spawned:
-        # Timeout (SIGKILL), crash, or a Gateway drop after the CLI started:
-        # IB may hold the order. Never FAILED without broker evidence (OP-1).
-        logger.warning("place subprocess failed after spawn: submission=%s error=%s", submission_id, result.error)
-        return _place_outcome_unknown(submission_id, result.data or {})
-    if not result.ok:
-        # Refused before the CLI started (cooldown / Gateway down / spawn
-        # failure): nothing reached IB, so the reservation is released.
-        orders_store.mark_terminal(
+    if "response" in settled:
+        return settled["response"]
+    # Deadline after the job started: IB may hold the order. The worker
+    # still owns the final write (PENDING / UNKNOWN → WORKING / REJECTED).
+    logger.warning("place: deadline after start, outcome pending on the worker: submission=%s", submission_id)
+    return _place_outcome_unknown(submission_id, {})
+
+
+# Owner classifications that prove nothing was sent → reason code on the
+# FAILED row and the 503 body (a known 5xx code is terminal in the web).
+_PLACE_NOT_SENT_REASONS = {
+    "connection": ReasonCode.IB_CONNECTION,
+    BROKER_DISCONNECTED: ReasonCode.IB_BROKER_DISCONNECTED,
+    ORDERS_HALTED: ReasonCode.ORDERS_HALTED,
+}
+
+
+def _owner_unavailable_reply() -> dict:
+    return {
+        "status": "error",
+        "message": "Order owner is not running; nothing was sent",
+        "classification": BROKER_DISCONNECTED,
+        "amend_outcome": "not_sent",
+    }
+
+
+def _finish_place(submission_id: str, reply: dict) -> Any:
+    """Persist one place outcome and build its response (A3). Runs on the
+    orders worker for a started job, so it never depends on the request.
+
+    - owner refusal / abandoned before start (``amend_outcome: not_sent``)
+      → FAILED (from PENDING or UNKNOWN), 503 with IB_CONNECTION /
+      IB_BROKER_DISCONNECTED / ORDERS_HALTED: nothing was sent;
+    - possibly sent, not confirmed (``amend_outcome: unconfirmed``) →
+      UNKNOWN with the ids the core learned (PENDING or UNKNOWN), 502;
+    - otherwise the core's result through the verdict. Final writes accept
+      PENDING or UNKNOWN (the request may have marked UNKNOWN at its
+      deadline) and never overwrite a state the poller set from broker
+      evidence. The placing clientId stored is always the owner's.
+    """
+    owner_id = pool_client_id("orders")
+    outcome = reply.get("amend_outcome")
+    if outcome == "not_sent" and reply.get("classification") in _PLACE_NOT_SENT_REASONS:
+        reason = _PLACE_NOT_SENT_REASONS[reply["classification"]].value
+        # PENDING or UNKNOWN: the request may have marked UNKNOWN at its
+        # deadline before the worker proved nothing was sent. Never a state
+        # the poller set from broker evidence.
+        applied = orders_store.mark_terminal(
             submission_id=submission_id,
             state="FAILED",
-            reason_code="SUBPROCESS_ERROR",
+            reason_code=reason,
             filled_qty=0,
             avg_fill_price=None,
-            expected_states=("PENDING",),
+            expected_states=_PLACE_FINAL_FROM,
         )
-        # Top-level reason_code: an explicit "not sent" the UI treats as final.
-        return JSONResponse(
-            status_code=502,
-            content={"detail": result.error, "reason_code": ReasonCode.SUBPROCESS_ERROR.value},
-        )
-    verdict = _place_verdict(result.data)
+        if not applied:
+            # Stronger evidence won the row: do not claim FAILED.
+            logger.warning(
+                "place: proven unsent (%s) but submission %s is no longer PENDING/UNKNOWN; row left as is",
+                reason,
+                submission_id,
+            )
+            return JSONResponse(status_code=502, content={**_PLACE_UNKNOWN_BODY, "submission_id": submission_id})
+        return JSONResponse(status_code=503, content={"detail": reply.get("message"), "reason_code": reason})
+    if outcome == "unconfirmed":
+        logger.warning("place: possibly sent, unconfirmed: submission=%s (%s)", submission_id, reply.get("message"))
+        return _place_outcome_unknown(submission_id, {**reply, "clientId": owner_id}, from_states=_PLACE_FINAL_FROM)
+    return _place_result(submission_id, reply, owner_id)
+
+
+# States a worker's final place write may leave: PENDING, or UNKNOWN set by
+# the request at its deadline. Never a broker-observed or terminal state.
+_PLACE_FINAL_FROM = ("PENDING", "UNKNOWN")
+
+
+def _place_result(submission_id: str, data: dict, owner_id: int) -> Any:
+    """Verdict + persistence for a place-core result."""
+    final_states = _PLACE_FINAL_FROM
+    verdict = _place_verdict(data)
     if verdict == "unknown":
-        return _place_outcome_unknown(submission_id, result.data or {})
-    if verdict == "accepted" and result.data.get("status") == "error":
-        # Legacy payload (no ``outcome``): IB holds the order (permId > 0,
-        # non-terminal status, notice-only code) though the CLI said error.
-        # Never mark it REJECTED: the user would retry and place a duplicate.
-        logger.warning(
-            "IB order accepted despite CLI error: submission=%s ib_code=%s status=%s permId=%s",
-            submission_id,
-            result.data.get("code"),
-            result.data.get("initialStatus"),
-            result.data.get("permId"),
-        )
-        _record_place_event(
-            submission_id,
-            {
-                "ib_code": result.data.get("code"),
-                "ib_message": result.data.get("message"),
-                "initial_status": result.data.get("initialStatus"),
-            },
-        )
-        result.data = {**result.data, "status": "ok"}
+        return _place_outcome_unknown(submission_id, {**data, "clientId": owner_id}, from_states=final_states)
     if verdict == "rejected":
         # B6 — write a reason_code the UI toast map can resolve. Most IB
         # rejections collapse to IB_REJECT, but tick-rule rejections
@@ -2704,11 +2794,15 @@ async def _place_reserved(body: dict, submission_id: str, scope: dict):
         # actionable message instead of raw IB error text. The raw IB
         # numeric code + message always go into the orders_events audit
         # row so we don't lose the info.
-        ib_code = result.data.get("code")
-        ib_message = result.data.get("message", "Order failed")
-        account_reason = result.data.get("reason_code")
-        if account_reason in (ReasonCode.ACCOUNT_UNRESOLVED.value, ReasonCode.ACCOUNT_NOT_MANAGED.value):
-            reason_code = account_reason
+        ib_code = data.get("code")
+        ib_message = data.get("message", "Order failed")
+        core_reason = data.get("reason_code")
+        if core_reason in (
+            ReasonCode.ACCOUNT_UNRESOLVED.value,
+            ReasonCode.ACCOUNT_NOT_MANAGED.value,
+            ReasonCode.INVALID_ORDER_BODY.value,
+        ):
+            reason_code = core_reason
         elif str(ib_code) == "110":
             reason_code = ReasonCode.LIMIT_OFF_TICK.value
             logger.warning(
@@ -2719,16 +2813,16 @@ async def _place_reserved(body: dict, submission_id: str, scope: dict):
         else:
             reason_code = ReasonCode.IB_REJECT.value
         # Conditional: a poller that already saw this order at IB wins, and
-        # then the CLI's "rejected" is contradicted by broker evidence.
+        # then the core's "rejected" is contradicted by broker evidence.
         if not orders_store.mark_terminal(
             submission_id=submission_id,
             state="REJECTED",
             reason_code=reason_code,
             filled_qty=0,
             avg_fill_price=None,
-            expected_states=("PENDING",),
+            expected_states=final_states,
         ):
-            logger.warning("place: CLI rejected but row %s already moved on; not rejecting", submission_id)
+            logger.warning("place: core rejected but row %s already moved on; not rejecting", submission_id)
             return JSONResponse(status_code=502, content={**_PLACE_UNKNOWN_BODY, "submission_id": submission_id})
         try:
             orders_store.record_event(
@@ -2747,18 +2841,19 @@ async def _place_reserved(body: dict, submission_id: str, scope: dict):
             status_code=502,
             content={"detail": ib_message, "reason_code": reason_code},
         )
-    # The CLI returns the clientId it really placed with ("auto" allocates
-    # one); cancel / modify must reuse it. 26 is only the legacy fallback.
+    if data.get("clientId") not in (None, owner_id):
+        logger.warning("place: core reported clientId %s, owner is %s", data.get("clientId"), owner_id)
+    data = {**data, "clientId": owner_id}
     try:
-        # PENDING only: the activity poller may already have bound (WORKING)
-        # or finished (FILLED) this row from broker evidence; never demote it.
+        # PENDING / UNKNOWN only: the activity poller may already have bound
+        # (WORKING) or finished (FILLED) this row from broker evidence;
+        # never demote it.
         orders_store.mark_submitted(
             submission_id=submission_id,
-            ib_order_id=str(result.data.get("orderId") or ""),
-            perm_id=str(result.data.get("permId") or ""),
-            # clientId 0 is a real IB client; only a missing value falls back.
-            placing_client_id=int(result.data["clientId"]) if result.data.get("clientId") is not None else 26,
-            expected_states=("PENDING",),
+            ib_order_id=str(data.get("orderId") or ""),
+            perm_id=str(data.get("permId") or ""),
+            placing_client_id=owner_id,
+            expected_states=final_states,
         )
     except Exception as exc:
         # IB accepted the order: report it (never a 5xx that invites a
@@ -2766,24 +2861,23 @@ async def _place_reserved(body: dict, submission_id: str, scope: dict):
         logger.error("place: IB accepted but persist failed: submission=%s", submission_id, exc_info=True)
         _record_place_event(submission_id, {"persist_error": str(exc)})
         return {
-            **result.data,
+            **data,
             "submission_id": submission_id,
             "persist_warning": "Order accepted by IB but not saved; it will be reconciled from IB.",
         }
-    if result.data.get("ibNotices"):
-        _record_place_event(submission_id, {"notices": result.data["ibNotices"]})
-    return result.data
+    if data.get("ibNotices"):
+        _record_place_event(submission_id, {"notices": data["ibNotices"]})
+    return data
 
 
 def _place_verdict(data: dict | None) -> str:
-    """``accepted`` | ``rejected`` | ``unknown`` for a place CLI result.
+    """``accepted`` | ``rejected`` | ``unknown`` for a place-core result.
 
-    The CLI's explicit ``outcome`` (from the ordered ib_async Trade.log) is
+    The core's explicit ``outcome`` (from the ordered ib_async Trade.log) is
     trusted: ``accepted`` / ``unconfirmed`` → accepted (stored WORKING),
-    ``rejected`` → rejected. Payloads without ``outcome`` (older CLI, or an
-    error raised before placement) fall back conservatively: an error with
-    permId > 0 and a non-terminal status is never REJECTED — accepted when
-    its code is a notice, UNKNOWN when it is a hard error.
+    ``rejected`` → rejected; ``status: uncertain`` → unknown. Every result
+    after ``placeOrder`` carries an outcome or ``uncertain``, so a
+    ``status: error`` without one is a pre-send error → rejected.
 
     A WORKING row is then updated by the activity poller / fill mirror, but
     the activity-mirror sweep (``sweep_disappeared_orders``) skips an empty
@@ -2798,16 +2892,8 @@ def _place_verdict(data: dict | None) -> str:
         return "unknown"
     if outcome == "rejected":
         return "rejected"
-    if outcome in ("accepted", "unconfirmed"):
+    if outcome in ("accepted", "unconfirmed") or data.get("status") != "error":
         return "accepted"
-    if data.get("status") != "error":
-        return "accepted"
-    try:
-        perm_id = int(data.get("permId") or 0)
-    except (TypeError, ValueError):
-        perm_id = 0
-    if perm_id > 0 and str(data.get("initialStatus") or "") not in TERMINAL_STATUSES:
-        return "unknown" if is_hard_error(data.get("code")) else "accepted"
     return "rejected"
 
 
@@ -2817,7 +2903,9 @@ _PLACE_UNKNOWN_BODY = {
 }
 
 
-def _place_outcome_unknown(submission_id: str, data: dict) -> JSONResponse:
+def _place_outcome_unknown(
+    submission_id: str, data: dict, from_states: tuple[str, ...] = ("PENDING",)
+) -> JSONResponse:
     """IB may or may not hold the order. Never leave the row PENDING (it
     would age into a rehydrate decision) and never call it rejected. UNKNOWN
     is the uncertain state /health counts; it keeps the Gate-4 reservation.
@@ -2825,7 +2913,12 @@ def _place_outcome_unknown(submission_id: str, data: dict) -> JSONResponse:
     (PENDING → UNKNOWN only: a row the poller already bound or filled from
     broker evidence is left as is). The activity poller resolves the row by
     orderRef "xo:<submission_id>". A DB failure still returns the uncertain
-    502 (the row then stays PENDING, which keeps the reservation too)."""
+    502 (the row then stays PENDING, which keeps the reservation too).
+
+    The request's deadline write is PENDING-only and carries no ids. The
+    worker's late uncertain write passes ``from_states`` PENDING/UNKNOWN: it
+    enriches the row with the ids it learned and the owner id (non-empty
+    values only, so neither write ever clears the other's evidence)."""
     try:
         applied = orders_store.mark_place_unknown(
             submission_id=submission_id,
@@ -2833,7 +2926,7 @@ def _place_outcome_unknown(submission_id: str, data: dict) -> JSONResponse:
             perm_id=str(data.get("permId") or "") or None,
             placing_client_id=int(data["clientId"]) if data.get("clientId") is not None else None,
             reason_code=ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
-            expected_states=("PENDING",),
+            expected_states=from_states,
         )
         if applied and (data.get("orderId") or data.get("permId") or data.get("code")):
             _record_place_event(
@@ -2872,12 +2965,18 @@ def _map_ib_reject_status(upstream_code: Any) -> int:
 
 
 def _classify_to_http(data: dict) -> tuple[int, str]:
-    """Map subprocess classification → (http_status, reason_code)."""
+    """Map an order-action reply classification → (http_status, reason_code)."""
     classification = data.get("classification")
-    if classification in ("connection", "send_window_closed"):
+    if classification in ("connection", "send_window_closed", "unconfirmed"):
+        # "unconfirmed": the action reached IB without an ack (amend_outcome
+        # carries it); the routes treat it as uncertain, never as a reject.
         return 503, ReasonCode.IB_CONNECTION.value
+    if classification == BROKER_DISCONNECTED:
+        return 503, ReasonCode.IB_BROKER_DISCONNECTED.value
+    if classification == ORDERS_HALTED:
+        return 503, ReasonCode.ORDERS_HALTED.value
     if classification == "ownership":
-        return 409, ReasonCode.OWNERSHIP.value
+        return 409, ReasonCode.ORDER_NOT_OWNED.value
     if classification == "ib_reject":
         upstream = data.get("upstream") or {}
         return _map_ib_reject_status(upstream.get("code")), ReasonCode.IB_REJECT.value
@@ -2938,16 +3037,16 @@ def _record_manage_event(
 
 @app.post("/orders/cancel")
 async def orders_cancel(request: Request):
-    """Cancel an open order via subprocess.
+    """Cancel an open order through the single order owner (PR-10).
 
-    IB scopes cancelOrder by clientId — only the clientId that placed the
-    order can cancel it. The subprocess detects the original clientId and
-    reconnects as that client before cancelling.
-
-    F5.4 classifies subprocess failures into HTTP statuses:
-      classification=connection → 503 IB_CONNECTION
-      classification=ownership  → 409 OWNERSHIP
-      classification=ib_reject  → 400 (or 404 for 10147/10148) IB_REJECT
+    IB scopes cancelOrder by clientId, so only orders placed by this API's
+    ``orders`` connection are cancelled here; any other placing clientId →
+    409 ORDER_NOT_OWNED (cancel it in TWS / IBKR Mobile). Reply mapping:
+      classification=connection          → 503 IB_CONNECTION
+      classification=broker_disconnected → 503 IB_BROKER_DISCONNECTED
+      classification=orders_halted       → 503 ORDERS_HALTED
+      classification=ownership           → 409 ORDER_NOT_OWNED
+      classification=ib_reject           → 400 (or 404 for 10147/10148) IB_REJECT
     The full upstream payload (code + message) is preserved in detail.
     """
     if is_read_only():
@@ -2964,10 +3063,80 @@ async def _orders_cancel_from_body(body: dict):
     return response
 
 
+def _int_id(value: Any) -> int:
+    """orderId/permId from a request body (0 when absent); ValueError if not an integer."""
+    if value is None or value == "":
+        return 0
+    if isinstance(value, bool):
+        raise ValueError(f"not an order id: {value!r}")
+    return int(value)
+
+
+_NOT_OWNED_HINT = "Cancel or modify it in TWS / IBKR Mobile."
+
+
+def _not_owned_refusal(placing_client_id: Any, order_id: Any, **extra) -> JSONResponse | None:
+    """Positive routing (A1): only an order placed by this environment's
+    ``orders`` connection takes the owner path. A recorded placing clientId
+    that is anything else (legacy subprocess 20–49 / 26, clientId 0 / TWS /
+    mobile, relay, another environment's base) → 409 ORDER_NOT_OWNED with no
+    broker work at all. No recorded clientId → the owner path, whose fresh
+    scoped open-order snapshot refuses a foreign owner before any send."""
+    if placing_client_id is None:
+        return None
+    owner = pool_client_id("orders")
+    try:
+        placing = int(placing_client_id)
+    except (TypeError, ValueError):
+        placing = None
+    if placing == owner:
+        return None
+    return order_error(
+        409,
+        ReasonCode.ORDER_NOT_OWNED.value,
+        {
+            "classification": "ownership",
+            "message": (
+                f"Order {order_id} was placed by clientId {placing_client_id}, not this API's order "
+                f"connection (clientId {owner}). Nothing was sent. {_NOT_OWNED_HINT}"
+            ),
+            "originalClientId": placing,
+            "http_status": 409,
+            **extra,
+        },
+    )
+
+
+def _owner_unavailable(**extra) -> JSONResponse:
+    return order_error(
+        503,
+        ReasonCode.IB_BROKER_DISCONNECTED.value,
+        {"message": "Order owner is not running; nothing was sent", "http_status": 503, **extra},
+    )
+
+
+def _owner_error_detail(data: dict, **extra) -> tuple[int, str, dict]:
+    """(http_status, reason_code, detail) for an error reply from the owner."""
+    http_status, reason_code = _classify_to_http(data)
+    message = data.get("message")
+    if reason_code == ReasonCode.ORDER_NOT_OWNED.value:
+        message = f"{message}. {_NOT_OWNED_HINT}"
+    detail = {
+        "reason_code": reason_code,
+        "classification": data.get("classification"),
+        "message": message,
+        "upstream": data.get("upstream"),
+        "amend_outcome": data.get("amend_outcome"),
+        "http_status": http_status,
+        **extra,
+    }
+    return http_status, reason_code, detail
+
+
 async def _cancel_order(body: dict, row: dict | None = None) -> tuple[str, Any]:
-    """Cancel one order → (kind, response). kind: "ok"; "failed" (nothing
-    proves the cancel reached IB — refused, unreachable, or IB said no);
-    "uncertain" (the CLI started and died: the cancel may have landed).
+    """Cancel one order through the order owner → (kind, response). kind:
+    "ok"; "failed" (nothing was sent, or IB said no and the order is still
+    working); "uncertain" (the cancel may have reached IB unconfirmed).
 
     `row` = the target's submission row already resolved by the caller
     ({submission_id, placing_client_id}); else it is resolved canonically
@@ -2991,29 +3160,31 @@ async def _cancel_order(body: dict, row: dict | None = None) -> tuple[str, Any]:
                 "http_status": 400,
             },
         )
+    try:
+        oid, pid = _int_id(order_id), _int_id(perm_id)
+    except (TypeError, ValueError):
+        return "failed", order_error(
+            400,
+            ReasonCode.ORDER_IDENTIFIER_REQUIRED.value,
+            {"message": "orderId and permId must be integers.", "http_status": 400},
+        )
 
     scope = _resolve_scope_kwargs()
 
-    args = ["cancel"]
-    if order_id:
-        args.extend(["--order-id", str(order_id)])
-    if perm_id:
-        args.extend(["--perm-id", str(perm_id)])
-
-    # PR-05 identity tuple: the subprocess asserts the scope account plus the
+    # PR-05 identity tuple: the core asserts the scope account plus the
     # recorded placing clientId (when a submission row carries one), so a
-    # cancel can never land on a different account's/client's order.
-    # --account is emitted only when the scope resolved a real account —
-    # the legacy_unknown fallback would otherwise fail every identity check.
+    # cancel can never land on a different account's/client's order. The
+    # account is asserted only when the scope resolved a real account — the
+    # legacy_unknown fallback would otherwise fail every identity check.
     _broker_account = scope.get("broker_account") or ""
-    if _broker_account and _broker_account != "legacy_unknown":
-        args.extend(["--account", _broker_account])
+    account = _broker_account if _broker_account and _broker_account != "legacy_unknown" else None
     if row is None:
         if not perm_id and (
             orders_store.count_submissions_for_order_id(str(order_id), client_id=body.get("clientId"), **scope) > 1
         ):
-            # Several rows share this orderId (different clients): the CLI
-            # could cancel the wrong one. No row at all (TWS order) → CLI.
+            # Several rows share this orderId (different clients): the core
+            # could cancel the wrong one. No row at all (TWS order) → owner
+            # path, which refuses an order it does not own.
             return "failed", order_error(
                 409,
                 ReasonCode.ORDER_TARGET_AMBIGUOUS.value,
@@ -3025,31 +3196,27 @@ async def _cancel_order(body: dict, row: dict | None = None) -> tuple[str, Any]:
         row = orders_store.load_submission_for_modify(
             order_id=str(order_id or ""), perm_id=str(perm_id or ""), client_id=body.get("clientId"), **scope
         )
-    if row and row.get("placing_client_id") is not None:
-        args.extend(["--client-id", str(row["placing_client_id"])])
+    placing = row.get("placing_client_id") if row else None
 
-    result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=15)
-    if not result.ok:
-        detail = {
-            "reason_code": ReasonCode.IB_CONNECTION.value,
-            "message": result.error or "Subprocess failed",
-            "http_status": 503,
-        }
-        _record_manage_event(str(order_id or ""), "CANCEL", detail, perm_id=str(perm_id or ""), scope=scope)
-        return ("uncertain" if result.spawned else "failed"), order_error(503, ReasonCode.IB_CONNECTION.value, detail)
+    refusal = _not_owned_refusal(placing, order_id or perm_id)
+    if refusal is None and order_owner is None:
+        refusal = _owner_unavailable()
+    if refusal is not None:
+        _record_manage_event(
+            str(order_id or ""), "CANCEL", _json_body(refusal)["detail"], perm_id=str(perm_id or ""), scope=scope
+        )
+        return "failed", refusal
 
-    data = result.data or {}
+    client_id = int(placing) if placing is not None else None
+    data = await order_owner.run(
+        lambda client: ib_order_manage.cancel_order_on_client(client, oid, pid, account=account, client_id=client_id),
+        timeout=_ORDER_ACTION_TIMEOUT_S,
+    )
     if data.get("status") == "error":
-        http_status, reason_code = _classify_to_http(data)
-        detail = {
-            "reason_code": reason_code,
-            "classification": data.get("classification"),
-            "message": data.get("message"),
-            "upstream": data.get("upstream"),
-            "http_status": http_status,
-        }
+        http_status, reason_code, detail = _owner_error_detail(data)
         _record_manage_event(str(order_id or ""), "CANCEL", detail, perm_id=str(perm_id or ""), scope=scope)
-        return "failed", order_error(http_status, reason_code, detail)
+        kind = "uncertain" if data.get("amend_outcome") == "unconfirmed" else "failed"
+        return kind, order_error(http_status, reason_code, detail)
 
     _record_manage_event(
         str(order_id or ""),
@@ -3260,17 +3427,16 @@ def _mark_submission_cancelled(submission_id: str | None) -> None:
 
 @app.post("/orders/modify")
 async def orders_modify(request: Request):
-    """Modify an open order via subprocess.
+    """Modify an open order through the single order owner (PR-10).
 
-    Modify requires the original clientId that placed the order (IB scopes
-    placeOrder by clientId). The subprocess detects the original clientId
-    and reconnects as that client before modifying.
+    Only orders placed by this API's ``orders`` connection are modified
+    (409 ORDER_NOT_OWNED otherwise). The worker settles the Gate 4 amend.
 
-    F5.4: modifySequence monotonic gate runs BEFORE the subprocess.
+    F5.4: modifySequence monotonic gate runs BEFORE the owner is called.
       - missing modifySequence → 400 MODIFY_SEQUENCE_REQUIRED
       - unknown ib_order_id     → 404 ORDER_NOT_FOUND
       - stale sequence          → 409 MODIFY_STALE (detail.applied=<current>)
-    Subprocess failures classified the same as cancel.
+    Owner replies are classified the same as cancel.
     """
     if is_read_only():
         return read_only_403()
@@ -3331,7 +3497,7 @@ async def _orders_modify_from_body(body: dict):
             },
         )
 
-    # Apply sequence gate BEFORE spawning the subprocess. If only permId is
+    # Apply sequence gate BEFORE the owner is called. If only permId is
     # supplied (UI-initiated modifies often have orderId=0), route through the
     # perm_id variant so we can still find the submissions row.
     if not order_id and not perm_id:
@@ -3370,33 +3536,42 @@ async def _orders_modify_from_body(body: dict):
             },
         )
 
-    args = ["modify"]
-    if order_id:
-        args.extend(["--order-id", str(order_id)])
-    if perm_id:
-        args.extend(["--perm-id", str(perm_id)])
-    if new_price is not None:
-        args.extend(["--new-price", str(new_price)])
-    if new_quantity is not None:
-        args.extend(["--new-quantity", str(new_quantity)])
-    if outside_rth is True:
-        args.append("--outside-rth")
-    elif outside_rth is False:
-        args.append("--no-outside-rth")
+    try:
+        oid, pid = _int_id(order_id), _int_id(perm_id)
+        price = float(new_price) if new_price is not None else None
+        quantity = int(new_quantity) if new_quantity is not None else None
+    except (TypeError, ValueError):
+        return order_error(
+            400,
+            ReasonCode.INVALID_ORDER_BODY.value,
+            {
+                "message": "orderId/permId/newQuantity must be integers and newPrice a number",
+                "applied_sequence": modify_sequence,
+                "http_status": 400,
+            },
+        )
 
-    # PR-05 identity tuple: the subprocess asserts the scope account plus the
+    # PR-05 identity tuple: the core asserts the scope account plus the
     # recorded placing clientId (when a submission row carries one), so a
-    # modify can never land on a different account's/client's order.
-    # --account is emitted only when the scope resolved a real account —
-    # the legacy_unknown fallback would otherwise fail every identity check.
+    # modify can never land on a different account's/client's order. The
+    # account is asserted only when the scope resolved a real account.
     _broker_account = _scope.get("broker_account") or ""
-    if _broker_account and _broker_account != "legacy_unknown":
-        args.extend(["--account", _broker_account])
+    account = _broker_account if _broker_account and _broker_account != "legacy_unknown" else None
     _row = orders_store.load_submission_for_modify(
         order_id=str(order_id or ""), perm_id=str(perm_id or ""), **_scope
     )
-    if _row and _row.get("placing_client_id") is not None:
-        args.extend(["--client-id", str(_row["placing_client_id"])])
+    placing = _row.get("placing_client_id") if _row else None
+
+    # Positive routing (A1) before any amend opens: an order this API's
+    # orders connection does not own is refused with no broker work.
+    refusal = _not_owned_refusal(placing, order_id or perm_id, applied_sequence=modify_sequence)
+    if refusal is None and order_owner is None:
+        refusal = _owner_unavailable(applied_sequence=modify_sequence)
+    if refusal is not None:
+        _record_manage_event(
+            str(order_id or ""), "MODIFY", _json_body(refusal)["detail"], perm_id=str(perm_id or ""), scope=_scope
+        )
+        return refusal
 
     # BAG guarantee mode is durable order state, never client-mutable. The
     # broker always receives it explicitly — a resubmitted BAG without
@@ -3404,6 +3579,7 @@ async def _orders_modify_from_body(body: dict):
     # default could silently flip a guaranteed combo to non-guaranteed.
     # Checked BEFORE the amend opens so a refused mode change never leaves
     # a pending amend behind.
+    effective_ng: int | None = None
     if _row and _row.get("security_type") == "BAG":
         stored_guaranteed = gate4.persisted_guarantee(_row)
         effective_ng = 0 if stored_guaranteed else 1
@@ -3422,7 +3598,6 @@ async def _orders_modify_from_body(body: dict):
                         "http_status": 400,
                     },
                 )
-        args.extend(["--non-guaranteed", str(effective_ng)])
 
     # Gate 4 (PR-03b): every modify of a known row opens one amend generation
     # under the account-scope advisory lock. A row with an unresolved amend
@@ -3431,6 +3606,7 @@ async def _orders_modify_from_body(body: dict):
     # an acknowledgement lost in flight keeps reserving max(old, new) - filled.
     _submission_id = _row.get("submission_id") if _row else None
     _amend_id: str | None = None
+    _send_by = None
     if new_quantity is not None and _submission_id is None:
         return order_error(
             404,
@@ -3467,75 +3643,56 @@ async def _orders_modify_from_body(body: dict):
                 },
             )
         _amend_id = mod_outcome.amend_id
-        if mod_outcome.send_by is not None:
-            # Send-by fence (round 5, item 2): the spawner refuses to start
-            # the CLI after it, and the CLI re-checks before placeOrder.
-            args.extend(["--send-by", mod_outcome.send_by.isoformat()])
+        # Send-by fence (round 5, item 2): the core re-checks it right
+        # before placeOrder, so a job that starts late sends nothing.
+        _send_by = mod_outcome.send_by
 
-    result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=_MODIFY_SUBPROCESS_TIMEOUT_S)
-    if not result.ok:
-        # DB sequence is already advanced; don't roll back — prevents
-        # double-apply on a retry. Log and surface to caller.
-        logger.warning(
-            "Modify subprocess failed after apply_modify(order=%s, seq=%s): %s",
-            order_id,
-            modify_sequence,
-            result.error,
-        )
-        if _amend_id is not None:
-            # Refused before any spawn (cooldown, gateway down, send window
-            # closed): nothing reached IB, release the token (round 6,
-            # item 3). After a spawn the amend may have reached the broker —
-            # keep the max reservation rather than release cover we may owe.
-            gate4.settle_modify(
-                _submission_id, _amend_id, "rejected" if not getattr(result, "spawned", True) else "uncertain", _scope
-            )
-        detail = {
-            "reason_code": ReasonCode.IB_CONNECTION.value,
-            "message": result.error or "Subprocess failed",
-            "applied_sequence": modify_sequence,
-            "http_status": 503,
-        }
-        _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""), scope=_scope)
-        return order_error(503, ReasonCode.IB_CONNECTION.value, detail)
-
-    data = result.data or {}
-    if data.get("status") == "error":
-        if _amend_id is not None:
-            # Only an amend the producer proves unapplied (never sent, or an
-            # explicit IB rejection) releases the pending reservation. A
-            # sent-but-unconfirmed amend — or a reply without the field — is
-            # uncertain: keep max(old, new).
+    def _settle_amend(reply: dict) -> None:
+        """Gate 4 settlement with the captured amend id — runs exactly once,
+        on the worker for a started job (even after this request timed out),
+        never "uncertain" from the request path for a job the worker owns.
+        Only an amend proven unapplied (never sent, or an explicit IB
+        rejection) releases the reservation; anything else is uncertain."""
+        if _amend_id is None:
+            return
+        if reply.get("status") == "ok":
             gate4.settle_modify(
                 _submission_id,
                 _amend_id,
-                "rejected" if data.get("amend_outcome") in ("rejected", "not_sent") else "uncertain",
+                "confirmed",
                 _scope,
+                # The broker's confirmed values, never the request:
+                # confirmation tolerates a <0.001 price difference.
+                new_qty=_confirmed_int(reply.get("confirmedQuantity"), new_quantity),
+                new_limit_price=reply.get("confirmedPrice"),
             )
-        http_status, reason_code = _classify_to_http(data)
-        detail = {
-            "reason_code": reason_code,
-            "classification": data.get("classification"),
-            "message": data.get("message"),
-            "upstream": data.get("upstream"),
-            "applied_sequence": modify_sequence,
-            "http_status": http_status,
-        }
+            return
+        outcome = "rejected" if reply.get("amend_outcome") in ("rejected", "not_sent") else "uncertain"
+        gate4.settle_modify(_submission_id, _amend_id, outcome, _scope)
+
+    client_id = int(placing) if placing is not None else None
+    data = await order_owner.run(
+        lambda client: ib_order_manage.modify_order_on_client(
+            client,
+            oid,
+            pid,
+            price,
+            outside_rth=outside_rth if isinstance(outside_rth, bool) else None,
+            new_quantity=quantity,
+            account=account,
+            client_id=client_id,
+            non_guaranteed=effective_ng,
+            send_by=_send_by,
+        ),
+        timeout=_ORDER_ACTION_TIMEOUT_S,
+        settle=_settle_amend,
+    )
+
+    if data.get("status") == "error":
+        http_status, reason_code, detail = _owner_error_detail(data, applied_sequence=modify_sequence)
         _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""), scope=_scope)
         return order_error(http_status, reason_code, detail)
 
-    if _amend_id is not None:
-        gate4.settle_modify(
-            _submission_id,
-            _amend_id,
-            "confirmed",
-            _scope,
-            # The broker's confirmed values (CLI confirmedPrice /
-            # confirmedQuantity), never the request: confirmation tolerates
-            # a <0.001 price difference.
-            new_qty=_confirmed_int(data.get("confirmedQuantity"), new_quantity),
-            new_limit_price=data.get("confirmedPrice"),
-        )
     _record_manage_event(
         str(order_id or ""),
         "MODIFY",
@@ -4001,15 +4158,33 @@ _IB_CONN_REFUSED_PATTERNS = (
     "request timed out",
 )
 
-# Cooldown: after an IB subprocess fails with a connection error, skip
-# subsequent attempts for this many seconds to avoid churn. Tracked per
-# traffic class — order-mutating entries and data/read entries get separate
-# timestamps so a failure in one class never blocks the other.
+# Cooldown: after an IB data subprocess fails with a connection error, skip
+# subsequent attempts for this many seconds to avoid churn. Order writes
+# never spawn (PR-10: they run on the order owner).
 _IB_SCRIPT_COOLDOWN_SECS = 15.0
-# connect timeout 10 s + qualify + ack wait 5 s (combo) ≈ 15 s; 30 s leaves margin.
-_PLACE_SUBPROCESS_TIMEOUT_S = 30
-_IB_ORDER_ENTRIES = frozenset({"xenon-ib-place-order", "xenon-ib-order-manage"})
-_ib_last_failure: dict[str, float] = {"data": 0.0, "order": 0.0}
+_ib_last_failure: dict[str, float] = {"data": 0.0}
+# The order owner's wait for one place: readiness round trip + qualify + ack
+# wait (5 s combo) + queueing behind another order action.
+_PLACE_TIMEOUT_S = 30
+# Lifespan shutdown budget. uvicorn drains requests for 10 s
+# (--timeout-graceful-shutdown, docker/api.Dockerfile), then the lifespan
+# runs: IB disconnect wait 35 s + the other steps (sum 10 s) = 55 s, under
+# the 60 s compose stop_grace_period / WATCHTOWER_TIMEOUT. The IB wait
+# bounds only the wait: a disconnect queued behind a started order core is
+# never dropped and runs when the core ends. A core blocked on a broker call
+# with no timeout of its own (_PLACE_TIMEOUT_S bounds the HTTP caller, not
+# the core) can outlive the whole budget; SIGKILL is then the backstop and
+# the socket may stay open on the gateway (runbook: stale-socket check).
+_SHUTDOWN_IB_DISCONNECT_S = 35
+_SHUTDOWN_STEP_S = {
+    "owner": 2,
+    "listener": 2,
+    "poller": 1,
+    "wizard": 1,
+    "futu_loop": 1,
+    "futu": 1,
+    "engine": 2,
+}
 
 
 def _is_ib_connection_error(error_msg: str) -> bool:
@@ -4031,37 +4206,24 @@ def _pool_has_any_connection() -> bool:
     return False
 
 
-def _send_window_closed(args: list) -> bool:
-    """True when args carry `--send-by <iso>` and that instant has passed."""
-    if "--send-by" not in args:
-        return False
-    i = args.index("--send-by")
-    try:
-        send_by = datetime.fromisoformat(str(args[i + 1]))
-    except (IndexError, ValueError):
-        return True  # malformed fence: fail closed, send nothing
-    return datetime.now(timezone.utc) >= send_by
-
-
 async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 30) -> ScriptResult:
-    """Run an IB-dependent xenon-* entry point with pre-flight health check and cooldown.
+    """Run an IB-dependent xenon-* DATA entry point with pre-flight health
+    check and cooldown. Order writes never come here (order owner).
 
     Three layers of fast-fail:
     1. Cooldown: if a recent IB script failed, skip for _IB_SCRIPT_COOLDOWN_SECS
     2. Pool check: if pool is disconnected, verify Gateway before spawning
     3. Post-failure: verify Gateway health before restarting
     """
-    kind = "order" if entry in _IB_ORDER_ENTRIES else "data"
 
-    # Layer 1: Cooldown — skip if a recent failure occurred in this lane
+    # Layer 1: Cooldown — skip if a recent failure occurred
     now = time.monotonic()
-    last_failure = _ib_last_failure.get(kind, 0.0)
+    last_failure = _ib_last_failure["data"]
     if last_failure > 0 and (now - last_failure) < _IB_SCRIPT_COOLDOWN_SECS:
         elapsed = now - last_failure
         logger.debug(
-            "Skipping %s — IB %s cooldown active (%.1fs since last failure, %ds cooldown)",
+            "Skipping %s — IB cooldown active (%.1fs since last failure, %ds cooldown)",
             entry,
-            kind,
             elapsed,
             _IB_SCRIPT_COOLDOWN_SECS,
         )
@@ -4078,7 +4240,7 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
         upstream_dead = gw_status.get("upstream_dead", False)
 
         if not port_ok or upstream_dead:
-            _ib_last_failure[kind] = now
+            _ib_last_failure["data"] = now
             logger.warning(
                 "Skipping %s — Gateway down (port=%s, upstream_dead=%s), pool disconnected",
                 entry,
@@ -4091,24 +4253,15 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
                 spawned=False,
             )
 
-    if _send_window_closed(args):
-        # Cooldown / gateway probe delayed the spawn past the amend's send-by
-        # instant: never start a sender Gate 4 already counts as finished.
-        return ScriptResult(
-            ok=False,
-            error="Modify send window closed before the IB request was sent. Retry the change.",
-            spawned=False,
-        )
-
     result = await run_entry_point(entry, args, timeout=timeout)
 
     # Clear cooldown on success
     if result.ok:
-        _ib_last_failure[kind] = 0.0
+        _ib_last_failure["data"] = 0.0
 
     if not result.ok and _is_ib_connection_error(result.error):
         # Set cooldown to prevent churn from repeated failures
-        _ib_last_failure[kind] = time.monotonic()
+        _ib_last_failure["data"] = time.monotonic()
 
         # Verify Gateway is actually down before restarting
         gw_status = await check_ib_gateway()
@@ -4149,25 +4302,16 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
             gw_result = await restart_ib_gateway()
 
             if gw_result.get("restarted") and gw_result.get("port_listening"):
-                _ib_last_failure[kind] = 0.0  # Clear cooldown after successful restart
+                _ib_last_failure["data"] = 0.0  # Clear cooldown after successful restart
                 if ib_pool:
-                    await ib_pool.disconnect_all()
-                    await ib_pool.connect_all()
-                if kind == "order":
-                    # OP-1: the first attempt may have reached IB before the
-                    # connection dropped — resending could duplicate the order.
-                    logger.warning(
-                        "IB Gateway restarted; NOT resending order entry %s (possible duplicate)",
-                        entry,
-                    )
-                    result = ScriptResult(
-                        ok=False,
-                        error="IB Gateway restarted; order request NOT resent — check open orders before retrying",
-                        spawned=result.spawned,
-                    )
-                else:
-                    logger.info("IB Gateway restarted, retrying %s", entry)
-                    result = await run_entry_point(entry, args, timeout=timeout)
+                    # orders is left to the order owner's supervisor (A2):
+                    # the restart is noted so its socket loss is an outage.
+                    if order_owner is not None:
+                        order_owner.note_gateway_restart()
+                    await ib_pool.disconnect_all(roles=("sync", "data"))
+                    await ib_pool.connect_all(roles=("sync", "data"))
+                logger.info("IB Gateway restarted, retrying %s", entry)
+                result = await run_entry_point(entry, args, timeout=timeout)
             else:
                 logger.error("IB Gateway restart failed: %s", gw_result)
                 result = ScriptResult(

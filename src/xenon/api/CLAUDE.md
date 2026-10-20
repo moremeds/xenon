@@ -23,8 +23,8 @@ Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xeno
   - `ib_activity_mirror.py` — IB→PG fills + open-orders mirror
   - `journal_auto_import.py` — PG-event-driven journal auto-import
   - `position_rules_cancel.py`, `position_rules_health.py` — position-rule supervision
-- `ib_pool.py` — persistent IB connection pool (clientId 0–9)
-- `pool_order_manage.py` — pool-based helpers (but see cancel/modify rule below — real cancel/modify uses subprocess)
+- `ib_pool.py` — persistent IB connection pool: roles `sync` / `orders` / `data` = clientId base+3 / base+4 / base+5
+- `order_owner.py` — the single order owner: runs every place / cancel / modify / wizard protect on the `orders` connection (see § Order owner)
 - `ws_ticket.py` — 30s single-use WebSocket auth tickets
 - `ib_gateway.py` — docker/cloud/launchd gateway lifecycle
 - `auth.py` — credential-only auth: internal token + path-scoped API keys (no localhost pass)
@@ -70,35 +70,44 @@ Surfaces that gate on the flag:
 
 Tests: `src/xenon/api/tests/test_read_only_mode.py` (routes), `scripts/tests/test_ib_sync_read_only.py` (writer no-ops), `scripts/tests/test_writer_entry_points_read_only.py` (writer CLIs).
 
-## Cancel / Modify Failure Propagation
+## Order owner (PR-10)
 
-1. **Cancel and modify MUST use subprocess with original clientId.**
-   - IB scopes both `cancelOrder` and `placeOrder` (modify) by clientId.
-   - Master client (clientId=0) can SEE all orders via `reqAllOpenOrders()` but CANNOT cancel/modify them (Error 10147 for cancel, Error 103 for modify).
-   - The subprocess (`ib_order_manage.py`) detects the original clientId from `trade.order.clientId` and reconnects as that client before executing.
-   - Pool-based cancel/modify does NOT work because orders are placed by subprocess clientIds (range 20-49), not pool clientIds (0-2).
-2. **Clear VOL fields before modify.**
+Runbook: `docs/runbooks/pr10-order-owner-cutover.md`. Incident rows 37–40.
+
+1. **One owner.** Place, cancel, modify and wizard protect run in-process on the pool `orders` connection (clientId `base + 4`) through `OrderOwner.run(core, timeout, settle)` on its pinned worker. No subprocess, no second IB connection, no reconnect as another clientId. The cores are `ib_place_order.place_order_on_client` and `ib_order_manage.cancel_order_on_client` / `modify_order_on_client`; only `server.py` may import them (`scripts/checks/order_path_caller_allowlist.py`).
+   - IB scopes `cancelOrder` and `placeOrder` (modify) by clientId: another client sees the order through `reqAllOpenOrders()` but cannot change it (Error 10147 cancel, Error 103 modify). So every Xenon order is placed by the owner, and `placing_client_id` stores the owner id.
+   - **Positive routing:** an order whose recorded `placing_client_id` is not this environment's `orders` id (TWS / mobile / clientId 0, the old subprocess range, relay or pool ids, another environment) gets 409 `ORDER_NOT_OWNED` with no broker work. A row without a recorded id goes to the owner; its fresh scoped open-order snapshot refuses a foreign or ambiguous owner before any send.
+2. **Invocation lifecycle:** queued → started → sent → done / abandoned. `settle` runs exactly once: on the worker for a started job (even after the request is gone), else on the request side.
+   - Request deadline while queued → abandoned, zero sends (place: row FAILED, 503 `IB_CONNECTION`; modify: amend released).
+   - Deadline after start → the request answers uncertain (place: 502 `PLACE_OUTCOME_UNKNOWN`, row UNKNOWN; cancel / modify: `amend_outcome: unconfirmed`). The worker still writes the final state. Worker final writes accept only PENDING / UNKNOWN (never a state the poller set from broker evidence); a late uncertain place only adds the ids it learned.
+   - Any failure after the possible-send mark is unconfirmed, never not-sent. Only an explicit IB reject (`amend_outcome: "rejected"`) keeps a sent action terminal.
+3. **Readiness before send.** The worker runs one fresh open-orders round trip before the core (READY only when that round trip completed with no readiness event in between). Right before every send a non-blocking check refuses on the halt latch or any readiness event since that round trip → 503 `IB_BROKER_DISCONNECTED` / `ORDERS_HALTED`, nothing sent. **Known limit:** the check only sees readiness events the orders worker has already processed; it is not an atomic network guarantee. A disconnect IB has not reported yet can still race a send, which is then reported as unconfirmed.
+4. **Loss policy.** A supervisor owns the `orders` socket. A loss that is positively a gateway outage (1100/2110 before the loss, gateway port down, the whole pool down, or a gateway restart by the API) gets reconnects with backoff on the orders worker. Any other loss, or a clientId-in-use (326) at startup or during recovery, latches `ORDERS_HALTED`: zero reconnects, CRITICAL log, `/health` `status: orders_halted` (still HTTP 200), until the API restarts. Request paths never reconnect `orders`.
+5. **Shutdown.** The lifespan's IB section runs first and cannot be skipped by later cleanup: owner stop (admission refused, queued jobs abandoned, supervisor cancelled), then `ib_pool.disconnect_all(timeout=35)`. The pool is marked closing first and a full close is terminal: a connect or reconnect that finishes later closes its own new socket instead of registering it, and a later `connect_all()` on the same pool connects nothing (one pool per api process; the gateway-restart path disconnects and reconnects role subsets and never closes the pool). Each role's disconnect is queued on its worker and is never cancelled: the 35 s bounds only the wait, and a disconnect behind a started order core runs when the core ends. Then the other cleanup steps (journal listener, poller, risk alert, Futu, engine) each run with a small bound (sum 10 s). Budget: uvicorn drain 10 s + 35 s + 10 s < 60 s compose `stop_grace_period` / `WATCHTOWER_TIMEOUT`. Limit: a core blocked on a broker call with no timeout of its own can outlive the budget; SIGKILL is then the backstop and its socket may stay open on the gateway (colima usernet, 2026-10-20; runbook stale-socket check).
+6. **Reason codes** (top-level `reason_code`, mapped in `web/lib/orderReasonCodes.ts`): `ORDER_NOT_OWNED` 409, `IB_BROKER_DISCONNECTED` 503, `ORDERS_HALTED` 503, `IB_CONNECTION` 503 (place refused before send, row FAILED), `PLACE_OUTCOME_UNKNOWN` 502 (may be at IB; do not resubmit). The web treats a 5xx with a known code as terminal, except `PLACE_OUTCOME_UNKNOWN`.
+
+## Cancel / Modify Semantics
+
+1. **Clear VOL fields before modify.**
    - IB open-order snapshots may contain stale `volatility` and `volatilityType` values. Re-submitting on a non-VOL order causes Error 321.
    - Reset both to IB sentinel values (`1.7976931348623157e+308` and `2147483647`) before `placeOrder`.
-3. **Do not trust the original IB `Trade` object as the only confirmation source.**
+2. **Do not trust the original IB `Trade` object as the only confirmation source.**
    - IB can confirm a cancel by removing the order from refreshed open orders without mutating the original `Trade` instance in place.
    - Cancel/modify flows must confirm against a refreshed open-order snapshot, not just the stale object reference.
-4. **Treat disappearance after cancel as success.**
-   - If the target order no longer appears in refreshed open orders after the cancel request, that is a valid IB acknowledgement.
-5. **Preserve the real upstream error detail end to end.**
-   - If a subprocess script exits non-zero with JSON on stdout, FastAPI must surface the human-readable `detail` / `message` / `error` field.
+3. **Treat disappearance after cancel as success.** A sent cancel with no acknowledgement and no disappearance is unconfirmed (503 `IB_CONNECTION`, uncertain), never an IB reject.
+4. **Preserve the real upstream error detail end to end.**
+   - FastAPI surfaces the core's human-readable `message` as `detail` with a top-level `reason_code`.
    - Next order routes must preserve upstream HTTP status/detail instead of collapsing provider failures to generic `500`s.
-6. **Required regressions for cancel/modify bugs:**
+5. **Required regressions for cancel/modify bugs:**
    - Python/unit coverage for refreshed open-order confirmation semantics
    - route coverage for upstream status/detail propagation
    - browser coverage for the visible toast/error state
-7. **Modify route advances `modify_sequence` BEFORE subprocess; on subprocess failure, the error response includes `applied_sequence` so the client counter can sync.**
-   - Both the `result.ok=False` (503 `IB_CONNECTION`) and `status=="error"` (4xx/5xx by classification) branches echo `applied_sequence: <N>` in the HTTPException detail.
+6. **Modify route advances `modify_sequence` BEFORE the owner runs; every failure response includes `applied_sequence` so the client counter can sync.**
    - Without this, a client retry at the old N loses to the advanced DB counter → `MODIFY_STALE` loop.
 
 ## Client ID Allocation Rule
 
-On-demand scripts MUST use `client_id="auto"` (range 20-49). Never hardcode — pool holds persistent connections on 0-9. Full range map in `docs/architecture/api-infrastructure.md`. Tests: `test_client_id_allocation.py` (17).
+Each environment owns a block `XENON_IB_CLIENT_ID_BASE` (0-800, step 100; prod 0, `dev.sh` 100). Inside the block: pool base+3/4/5, relay base+10..19, `client_id="auto"` base+20..49 (read/data scripts only — no order writes). `IBClient.connect` refuses an id outside the caller's zone; the api refuses a base that does not match its database. Never hardcode an id. Full map: `docs/architecture/api-infrastructure.md`; deployment contract: `docs/runbooks/pr10-order-owner-cutover.md`. Tests: `scripts/tests/test_client_id_allocation.py`.
 
 ## Auth — Security-Relevant Behavior
 
@@ -147,7 +156,9 @@ The script is **not idempotent** — it writes a sentinel `orders_events` row (`
 
 ```bash
 curl http://localhost:8321/health
-# Returns: ib_gateway, ib_pool (sync/orders/data), uw, futu, trading_mode,
+# Returns: status (ok | orders_halted), ib_gateway, ib_pool (sync/orders/data,
+# each with connected + broker_readiness unknown|ready|lost), orders_owner
+# (client_id, halted, halt_reason, recovering), uw, futu, trading_mode,
 # account, mode_verified, snapshotter, order_submissions, flex_divergence,
 # flex_token, realtime_subscribers
 ```

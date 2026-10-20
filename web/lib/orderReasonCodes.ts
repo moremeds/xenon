@@ -74,7 +74,19 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
   },
   // F5 — cancel/modify failure classification
   IB_CONNECTION: { severity: "error", copy: "IB connection lost — retry." },
-  OWNERSHIP: { severity: "error", copy: "Order owned by another session." },
+  // PR-10 — single order owner
+  ORDER_NOT_OWNED: {
+    severity: "error",
+    copy: "This order was not placed by Xenon's order connection. Cancel or modify it in TWS / IBKR Mobile.",
+  },
+  IB_BROKER_DISCONNECTED: {
+    severity: "error",
+    copy: "IB is not connected to its servers. Nothing was sent — retry when IB reconnects.",
+  },
+  ORDERS_HALTED: {
+    severity: "error",
+    copy: "Order actions are halted after an unexplained IB disconnect. Nothing was sent — the operator must restart the API.",
+  },
   IB_REJECT: {
     severity: "error",
     copy: "IB rejected the order. See details.",

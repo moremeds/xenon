@@ -24,7 +24,7 @@ from xenon.execution.universe import is_index, is_known
 class ReasonCode(StrEnum):
     """Preflight / submit-gate block reasons. UI copy maps these in F6.
 
-    F5 adds IB_CONNECTION / OWNERSHIP; F6 adds MODIFY_STALE.
+    F5 adds IB_CONNECTION; F6 adds MODIFY_STALE.
     """
 
     # F2 — preflight (PR-A)
@@ -53,7 +53,12 @@ class ReasonCode(StrEnum):
     ORDER_TARGET_AMBIGUOUS = "ORDER_TARGET_AMBIGUOUS"
     # F5 — cancel/modify failure classification (PR-C)
     IB_CONNECTION = "IB_CONNECTION"
-    OWNERSHIP = "OWNERSHIP"
+    # PR-10 — single order owner: an order this API's orders connection does
+    # not own (TWS/mobile, legacy subprocess ids, another environment) is
+    # never cancelled/modified here; broker connectivity / latched halt.
+    ORDER_NOT_OWNED = "ORDER_NOT_OWNED"
+    IB_BROKER_DISCONNECTED = "IB_BROKER_DISCONNECTED"
+    ORDERS_HALTED = "ORDERS_HALTED"
     IB_REJECT = "IB_REJECT"
     MODIFY_STALE = "MODIFY_STALE"
     MODIFY_SEQUENCE_REQUIRED = "MODIFY_SEQUENCE_REQUIRED"

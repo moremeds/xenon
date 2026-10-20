@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -676,3 +677,80 @@ def test_protect_endpoint_is_idempotent_for_already_protected_without_ib_pool(cl
     assert resp.status_code == 200
     assert resp.json()["state"] == "PROTECTED"
     assert resp.json()["noop"] is True
+
+
+# --------------------------------------------------------------------------
+# PR-10 — wizard protect on the single order owner: no request-path
+# reconnect (A2), halt + broker readiness re-checked right before the send (A4)
+# --------------------------------------------------------------------------
+
+_PROTECT_BODY = {"tp_target_price": "3.50", "alert_net_mid_threshold": "1.25", "polarity": "DEBIT"}
+
+
+@pytest.fixture
+def filled_session():
+    _seed_session("wiz-protect-owner", _plan_payload()["order_payload"])
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        cwq.update_session(conn, "wiz-protect-owner", state="FILLED")
+    engine.dispose()
+    return "wiz-protect-owner"
+
+
+@pytest.fixture
+def protect_owner(monkeypatch):
+    """Owner over a fake orders pool; ib_pool.acquire must never run; the
+    protect algorithm is faked to send one TP through its adapter."""
+    from scripts.tests.order_owner_fakes import install_owner
+    from xenon.execution.combo_wizard import protect as protect_mod
+
+    class _NoAcquirePool:
+        def acquire(self, role):
+            raise AssertionError("wizard protect must not acquire (reconnect) the orders role")
+
+        def is_connected(self, role):
+            raise AssertionError("wizard protect routes through the order owner")
+
+    monkeypatch.setattr(server_mod, "ib_pool", _NoAcquirePool())
+    owner, pool = install_owner(monkeypatch)
+    calls = []
+
+    def fake_attach(session_id, *, ib, **kw):
+        calls.append(session_id)
+        ib._ib.place_order("tp-contract", "tp-order")
+        return {"state": "PROTECTED", "tp_attached": True}
+
+    monkeypatch.setattr(protect_mod, "attach_protection", fake_attach)
+    return SimpleNamespace(owner=owner, pool=pool, calls=calls)
+
+
+def test_protect_runs_on_the_owner_with_a_fresh_pre_send_check(client, filled_session, protect_owner):
+    resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["state"] == "PROTECTED"
+    assert protect_owner.pool.client.sent == [("place", ("tp-contract", "tp-order"))]
+    assert protect_owner.pool.client.ready_checks == 1
+
+
+def test_protect_refused_when_orders_halted(client, filled_session, protect_owner):
+    protect_owner.owner._latch_halt("test")
+    resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+    assert (resp.status_code, resp.json()["reason_code"]) == (503, "ORDERS_HALTED")
+    assert protect_owner.calls == [] and protect_owner.pool.client.sent == []
+
+
+def test_protect_refused_when_orders_disconnected_without_reconnect(client, filled_session, protect_owner):
+    protect_owner.pool.connected["orders"] = False
+    resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+    assert (resp.status_code, resp.json()["reason_code"]) == (503, "IB_BROKER_DISCONNECTED")
+    assert protect_owner.pool.reconnects == [] and protect_owner.calls == []
+
+
+def test_protect_broker_not_ready_at_send_sends_nothing(client, filled_session, protect_owner):
+    """Admitted (socket up, readiness not LOST) but the round trip before the
+    core does not confirm the broker → refused before protect runs."""
+    protect_owner.pool.client.readiness = "unknown"
+    resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+    assert (resp.status_code, resp.json()["reason_code"]) == (503, "IB_BROKER_DISCONNECTED")
+    assert protect_owner.calls == []
+    assert protect_owner.pool.client.sent == []

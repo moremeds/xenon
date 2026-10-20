@@ -179,6 +179,13 @@ export XENON_TRADING_MODE="$MODE"
 export IB_GATEWAY_HOST="$IB_HOST"
 export IB_GATEWAY_PORT="$IB_PORT"
 
+# IB clientId block for this dev stack (PR-10 / A5). Prod owns base 0 (pool
+# 3/4/5, relay 10-12) on the shared gateway; a dev stack must never reuse
+# those ids, so dev.sh always uses base 100 (pool 103/104/105, relay 110-112,
+# auto 120-149). FastAPI refuses to start with base 0 on a non-prod DB. A
+# second dev stack on the same gateway needs another base or stays stopped.
+export XENON_IB_CLIENT_ID_BASE=100
+
 # Auth is credential-only and fail-closed — there is no localhost pass. Both
 # Next (server-side xenonFetch) and FastAPI need the same internal token so
 # Next→FastAPI calls authenticate. Source it from .env unless already set.

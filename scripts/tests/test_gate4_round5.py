@@ -5,11 +5,7 @@ match (5), fill lag (6), unstamped UUID rows (7)."""
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
-import io
 import json
-import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -29,6 +25,7 @@ from scripts.tests.test_gate4_reserve import (
 from scripts.tests.test_gate4_round3 import _legs, _mirror, _set_perm
 from scripts.tests.test_gate4_route import (  # noqa: F401 — fixtures
     _modify_qty,
+    _order_owner,
     _pg,
     _pg_engine,
     _sell_call_body,
@@ -55,7 +52,6 @@ from scripts.tests.test_gate4_sync_pass import (  # noqa: F401 — fixtures
     _trade,
 )
 from xenon.api import server as server_mod
-from xenon.api.subprocess import ScriptResult
 from xenon.db.schema import order_submissions
 from xenon.execution import gate4, ib_order_manage, ib_orders, orders_store
 
@@ -170,60 +166,67 @@ def test_confirm_needs_read_after_amend_opened():
 # ---------------------------------------------------------------------------
 
 
-def _refuse_cooldown(monkeypatch):
-    monkeypatch.setitem(server_mod._ib_last_failure, "order", time.monotonic())
+def _refuse_halted(monkeypatch):
+    server_mod.order_owner._latch_halt("test: ambiguous orders loss")
+    return "ORDERS_HALTED"
 
 
-def _refuse_gateway_down(monkeypatch):
-    async def _down():
-        return {"port_listening": False, "upstream_dead": False}
+def _refuse_orders_down(monkeypatch):
+    server_mod.order_owner._pool.connected["orders"] = False
+    return "IB_BROKER_DISCONNECTED"
 
-    monkeypatch.setattr(server_mod, "_pool_has_any_connection", lambda: False)
-    monkeypatch.setattr(server_mod, "check_ib_gateway", _down)
+
+def _refuse_broker_lost(monkeypatch):
+    server_mod.order_owner._pool.client.readiness = "lost"  # 1100 / 2110 seen
+    return "IB_BROKER_DISCONNECTED"
 
 
 def _refuse_send_window(monkeypatch):
-    async def _slow_probe():
-        await asyncio.sleep(0.3)  # spawn delayed past send_by
-        return {"port_listening": True, "upstream_dead": False}
+    """The REAL modify core on the owner: the job starts after send_by, so
+    the fence right before placeOrder refuses it (round 5 item 2)."""
+    from scripts.tests.order_owner_fakes import install_cores, orders_id
 
-    monkeypatch.setattr(server_mod, "_pool_has_any_connection", lambda: False)
-    monkeypatch.setattr(server_mod, "check_ib_gateway", _slow_probe)
-    monkeypatch.setattr(gate4, "MODIFY_SEND_WINDOW_S", 0.1)
+    trade = MagicMock()
+    trade.order.orderId, trade.order.permId, trade.order.clientId = 4242, 777001, orders_id()
+    trade.order.account = "DU0000000"
+    trade.order.totalQuantity = 1
+    trade.order.orderType, trade.order.lmtPrice = "LMT", 1.0
+    trade.orderStatus.status = "Submitted"
+    trade.contract.secType = "OPT"
+    fake = server_mod.order_owner._pool.client
+    fake.get_open_orders = lambda: [trade]
+    monkeypatch.setattr(gate4, "MODIFY_SEND_WINDOW_S", 0.0)
+    install_cores(monkeypatch, modify=ib_order_manage.modify_order_on_client)
+    return "IB_CONNECTION"
 
 
-@pytest.mark.parametrize("refuse", [_refuse_cooldown, _refuse_gateway_down, _refuse_send_window])
-def test_pre_spawn_refusal_sends_nothing_and_releases_token(refuse, client, broker_calls, fresh_quote, monkeypatch):
-    """Round 6 item 3 (Fable P3): the route refuses before any spawn —
-    cooldown, gateway down, or (round 5 item 2) send window closed. Nothing
-    reached IB, so the amend settles `rejected`: the token is released and a
-    retry is not blocked by MODIFY_PENDING."""
+@pytest.mark.parametrize("refuse", [_refuse_halted, _refuse_orders_down, _refuse_broker_lost, _refuse_send_window])
+def test_pre_send_refusal_sends_nothing_and_releases_token(refuse, client, broker_calls, fresh_quote, monkeypatch):
+    """Round 6 item 3 (Fable P3), on the single order owner (PR-10): a modify
+    refused before the send — latched halt, orders socket down, broker
+    connectivity lost (A4), or the send window closed — sends nothing, so the
+    amend settles `rejected`: the token is released and a retry is not
+    blocked by MODIFY_PENDING."""
     engine = _pg_engine()
     _route_seed_snapshot(engine, [_route_stock("SPY", 200)])
     engine.dispose()
     assert client.post("/orders/place", json=_sell_call_body("r6-refuse-1")).status_code == 200
-
-    spawned = []
-
-    async def _spawn(entry, args, timeout=30.0, cwd=None):
-        spawned.append(args)
-        return ScriptResult(ok=True, data={"status": "ok"})
-
-    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", _REAL_RUN_IB_SCRIPT)
-    monkeypatch.setattr(server_mod, "run_entry_point", _spawn)
-    monkeypatch.setitem(server_mod._ib_last_failure, "order", 0.0)
-    refuse(monkeypatch)
+    broker_calls.clear()
+    server_mod.order_owner._pool.client.sent.clear()  # the place itself
+    reason = refuse(monkeypatch)
 
     resp = _modify_qty(client, 2, 1)
 
     assert resp.status_code == 503, resp.text
-    assert spawned == []
+    assert resp.json()["reason_code"] == reason
+    assert server_mod.order_owner._pool.client.sent == []
+    assert broker_calls == []  # no spawn, no runner
     row = _submission_rows()[0]._mapping
     assert row["quantity"] == 1
     assert row["legs"]["pending_amend_id"] is None and row["legs"]["pending_amend_qty"] is None
     retry = _modify_qty(client, 2, 2)
     assert retry.json().get("reason_code") != "MODIFY_PENDING", retry.text
-    assert spawned == []
+    assert server_mod.order_owner._pool.client.sent == []
 
 
 def test_open_amend_never_expires_before_send_by_plus_grace():
@@ -243,17 +246,9 @@ def test_open_amend_never_expires_before_send_by_plus_grace():
     assert _mirror("990303", 1, observed_at=deadline + timedelta(seconds=1))["expired"] is True
 
 
-def test_route_passes_send_by_to_cli():
-    args = ["modify", "--order-id", "1", "--send-by", (_now() + timedelta(seconds=5)).isoformat()]
-    assert server_mod._send_window_closed(args) is False
-    args[-1] = (_now() - timedelta(seconds=1)).isoformat()
-    assert server_mod._send_window_closed(args) is True
-    assert server_mod._send_window_closed(["modify", "--order-id", "1"]) is False
-
-
-def _fence_cli_run(send_by, *, connect_delay=0.0):
-    """Run the REAL modify_order against a fake IB whose order is owned by
-    clientId 26 (forces the reconnect path). Returns (reply, place calls)."""
+def _fence_core_run(send_by):
+    """Run the REAL modify core on a connected client that owns the order.
+    Returns (reply, place calls)."""
 
     class _Event:
         def __iadd__(self, handler):
@@ -263,7 +258,7 @@ def _fence_cli_run(send_by, *, connect_delay=0.0):
             return self
 
     t = MagicMock()
-    t.order.orderId, t.order.permId, t.order.clientId = 4242, 777001, 26
+    t.order.orderId, t.order.permId, t.order.clientId = 4242, 777001, 0
     t.order.orderType, t.order.lmtPrice, t.order.totalQuantity = "LMT", 2.0, 1
     t.orderStatus.status = "Submitted"
     t.contract.secType = "OPT"
@@ -271,32 +266,15 @@ def _fence_cli_run(send_by, *, connect_delay=0.0):
     c.ib.client.clientId = 0
     c.ib.errorEvent = _Event()
     c.get_open_orders.return_value = [t]
-    c.connect.side_effect = lambda **kw: time.sleep(connect_delay)
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf), pytest.raises(SystemExit):
-        ib_order_manage.modify_order(c, 4242, 777001, None, "127.0.0.1", 4002, new_quantity=2, send_by=send_by)
-    return json.loads(buf.getvalue()), c.place_order.call_count
+    reply = ib_order_manage.modify_order_on_client(c, 4242, 777001, None, new_quantity=2, send_by=send_by)
+    return reply, c.place_order.call_count
 
 
-def test_cli_past_send_by_never_calls_place_order():
-    reply, placed = _fence_cli_run(_now() - timedelta(seconds=1))
+def test_core_past_send_by_never_calls_place_order():
+    reply, placed = _fence_core_run(_now() - timedelta(seconds=1))
     assert placed == 0
     assert reply["classification"] == "send_window_closed"
     assert reply["amend_outcome"] == "not_sent"
-
-
-def test_cli_send_by_rechecked_after_reconnect():
-    """send_by was in the future at start; the owner reconnect ate it."""
-    reply, placed = _fence_cli_run(_now() + timedelta(seconds=0.2), connect_delay=0.3)
-    assert placed == 0
-    assert reply["classification"] == "send_window_closed"
-
-
-def test_cli_rejects_naive_send_by():
-    import argparse
-
-    with pytest.raises(argparse.ArgumentTypeError):
-        ib_order_manage._parse_send_by("2026-10-17T10:00:00")
 
 
 # ---------------------------------------------------------------------------

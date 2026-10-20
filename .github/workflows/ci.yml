@@ -198,7 +198,7 @@ jobs:
         run: uv run --no-sync python scripts/checks/no_json_fallback_on_order_path.py
       - name: No JSON writes to data/ on order/API path
         run: uv run --no-sync python scripts/checks/no_json_write_on_order_path.py
-      - name: ib_place_order caller allowlist
+      - name: order-core caller allowlist
         run: uv run --no-sync python scripts/checks/order_path_caller_allowlist.py
       - name: No ib_insync references (migrated to ib_async in PR #81)
         run: uv run --no-sync python scripts/checks/no_ib_insync.py

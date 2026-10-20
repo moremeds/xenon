@@ -363,7 +363,7 @@ def test_ibclient_paper_ib_delegates_to_ib_connect():
     client = IBClient()
     calls: list = []
     client._ib.connect = lambda *a, **k: calls.append((a, k))
-    client.connect(host="127.0.0.1", port=4002, client_id=0)
+    client.connect(host="127.0.0.1", port=4002, client_id=90)
     assert len(calls) == 1
     assert calls[0][0][:2] == ("127.0.0.1", 4002)
 

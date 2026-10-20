@@ -1,38 +1,25 @@
-#!/usr/bin/env python3
 """
-IB Order Placement — JSON-in / JSON-out for web API.
-
-Places a limit order via IB, waits briefly for acknowledgement, returns JSON.
-Does NOT monitor fills or log trades (web layer handles that).
-
-Usage:
-  xenon-ib-place-order --json '{"type":"stock","symbol":"AAPL","action":"BUY","quantity":100,"limitPrice":214.50,"tif":"DAY"}'
-  xenon-ib-place-order --json '{"type":"option","symbol":"GOOG","action":"BUY","quantity":10,"limitPrice":9.00,"tif":"GTC","expiry":"20260417","strike":315,"right":"C"}'
+IB order placement core — places one limit order on the API's ``orders``
+connection (run by ``api/order_owner.py`` on its worker) and returns the
+structured result. Does NOT monitor fills or log trades (the route handles
+that). There is no standalone CLI: every order write goes through the API.
 """
 
 import json
-import os
+import logging
 import re
-import sys
 
-try:
-    from ib_async import ComboLeg, Contract, LimitOrder, Option, OrderStatus, Stock, TagValue
-except ImportError:
-    print(json.dumps({"status": "error", "message": "ib_async not installed"}))
-    sys.exit(1)
+from ib_async import ComboLeg, Contract, LimitOrder, Option, OrderStatus, Stock, TagValue
 
 from xenon.clients.ib_client import (
-    CLIENT_IDS,
-    DEFAULT_GATEWAY_PORT,
-    DEFAULT_HOST,
     IBClient,
     IBContractError,
     IBOrderAccountError,
+    SendRefused,
 )
 from xenon.execution.orders_store import order_ref_for
 
-CLIENT_ID = CLIENT_IDS.get("ib_place_order", 26)
-PORT = DEFAULT_GATEWAY_PORT
+logger = logging.getLogger("xenon.ib_place_order")
 
 # IB error 435 "You must specify an account": the gateway login manages more
 # than one account and the order named none.
@@ -158,8 +145,43 @@ def _build_stock_contract(params: dict) -> "Stock":
     return Stock(symbol, exchange, currency)
 
 
-def place_order(params: dict) -> dict:
-    """Place a limit order and return result as dict.
+def _invalid_params(params: dict) -> dict | None:
+    """``INVALID_ORDER_BODY`` error for a body the core cannot place, else None."""
+    missing = [f for f in ("symbol", "action", "quantity", "limitPrice") if f not in params]
+    if params.get("type") == "option":
+        missing += [f for f in ("expiry", "strike", "right") if f not in params]
+    if params.get("type") == "combo":
+        legs = params.get("legs")
+        if not isinstance(legs, list) or len(legs) < 2:
+            missing.append("legs (2+ entries)")
+        else:
+            for i, leg in enumerate(legs):
+                missing += [f"legs[{i}].{f}" for f in ("expiry", "strike", "right", "action") if f not in (leg or {})]
+    if missing:
+        return {
+            "status": "error",
+            "reason_code": "INVALID_ORDER_BODY",
+            "message": f"Missing fields: {', '.join(missing)}",
+        }
+    return _invalid_quantity(params)
+
+
+def _invalid_quantity(params: dict) -> dict | None:
+    """``INVALID_ORDER_BODY`` error when quantity is not a positive whole number."""
+    if _parse_quantity(params.get("quantity")) is None:
+        return {
+            "status": "error",
+            "reason_code": "INVALID_ORDER_BODY",
+            "message": f"quantity must be a positive whole number, got {params.get('quantity')!r}",
+        }
+    return None
+
+
+def place_order_on_client(client: IBClient, params: dict) -> dict:
+    """Place a limit order on an already-connected client; return the result.
+
+    No print, exit or disconnect; the errorEvent listener is removed in
+    ``finally`` so a long-lived client does not accumulate listeners.
 
     After the ack wait the result carries an explicit ``outcome`` from
     ``decide_outcome`` (the ordered ``Trade.log`` timeline, never the final
@@ -174,31 +196,30 @@ def place_order(params: dict) -> dict:
     stores the row UNKNOWN (OP-1) and the activity poller binds it back via
     ``orderRef = "xo:<submission_id>"``.
     """
+    invalid = _invalid_params(params)
+    if invalid is not None:
+        return invalid
     order_type = params.get("type", "stock")
     symbol = params["symbol"].upper()
     action = params["action"].upper()
     quantity = _parse_quantity(params.get("quantity"))
-    if quantity is None:
-        return {
-            "status": "error",
-            "reason_code": "INVALID_ORDER_BODY",
-            "message": f"quantity must be a positive whole number, got {params.get('quantity')!r}",
-        }
     limit_price = float(params["limitPrice"])
     tif = params.get("tif", "DAY").upper()
-    # FastAPI forwards the scope account it stamped on the reservation row.
-    # Direct CLI use falls back to the sync-subprocess scope env var. An empty
-    # value is rejected by IBClient.place_order (fail closed).
-    account = str(params.get("account") or os.environ.get("XENON_BROKER_ACCOUNT", "")).strip()
+    # The route forwards the scope account it stamped on the reservation row.
+    # An empty value is rejected by IBClient.place_order (fail closed).
+    account = str(params.get("account") or "").strip()
 
-    client = IBClient()
     placed = False
     trade = None
+    # Invocation-local: IB error events seen during the ack wait. Only events
+    # whose reqId is THIS order's orderId can reject it; reqId -1 is a
+    # connection-wide message and other reqIds belong to other requests.
+    ib_events: list[tuple[int, int, str]] = []
+    listening = False
 
-    try:
-        client.connect(host=DEFAULT_HOST, port=PORT, client_id="auto", timeout=10)
-    except Exception as e:
-        return {"status": "error", "message": f"Connection failed: {e}"}
+    def _on_error(reqId, errorCode, errorString, contract=None):
+        if errorCode not in _IB_FARM_STATUS_CODES:
+            ib_events.append((reqId, errorCode, errorString))
 
     try:
         # Build contract
@@ -254,16 +275,9 @@ def place_order(params: dict) -> dict:
             contract = _build_stock_contract(params)
             contract = client.qualify_one(contract)
 
-        # Capture IB error events during the ack wait. Only events whose
-        # reqId is THIS order's orderId can reject it; reqId -1 is a
-        # connection-wide message and other reqIds belong to other requests.
-        ib_events: list[tuple[int, int, str]] = []
-
-        def _on_error(reqId, errorCode, errorString, contract=None):
-            if errorCode not in _IB_FARM_STATUS_CODES:
-                ib_events.append((reqId, errorCode, errorString))
-
+        # Capture IB error events during the ack wait (listener above).
         client._ib.errorEvent += _on_error
+        listening = True
 
         # Build order
         order = LimitOrder(
@@ -291,8 +305,11 @@ def place_order(params: dict) -> dict:
             if non_guaranteed not in (0, 1):
                 non_guaranteed = 1
             order.smartComboRoutingParams = [TagValue("NonGuaranteed", str(non_guaranteed))]
-            print(
-                f"  Combo order: {len(legs_data)} legs, NonGuaranteed={non_guaranteed}, ratios={[int(l.get('ratio', 1)) for l in legs_data]}"
+            logger.info(
+                "Combo order: %d legs, NonGuaranteed=%s, ratios=%s",
+                len(legs_data),
+                non_guaranteed,
+                [int(leg.get("ratio", 1)) for leg in legs_data],
             )
 
         # Send boundary. ib_async ``IB.placeOrder`` writes the order to the
@@ -331,7 +348,7 @@ def place_order(params: dict) -> dict:
             # under-approximated the real tick rule for this instrument.
             # Log structured so we can grep and measure how often it bites.
             if code == 110:
-                print(
+                logger.warning(
                     json.dumps(
                         {
                             "level": "warning",
@@ -344,7 +361,6 @@ def place_order(params: dict) -> dict:
                             "note": "tick-rule stub returned 0.01; IB enforced true rule",
                         }
                     ),
-                    file=sys.stderr,
                 )
             reason = {"reason_code": "ACCOUNT_UNRESOLVED"} if code == _IB_ACCOUNT_REQUIRED else {}
             return {
@@ -358,6 +374,9 @@ def place_order(params: dict) -> dict:
                 "initialStatus": status,
                 "brokerStatus": broker_status,
                 "outcome": outcome,
+                # An explicit IB rejection after the send: the owner keeps it
+                # terminal (anything else after the send is unconfirmed).
+                "amend_outcome": "rejected",
                 "filled": False,
                 "fillCount": 0,
                 "clientId": client_id,
@@ -379,8 +398,13 @@ def place_order(params: dict) -> dict:
             "ibNotices": notices,
         }
 
+    except SendRefused:
+        raise  # the owner's pre-send guard: nothing was sent
+
     except IBOrderAccountError as e:
-        return {"status": "error", "reason_code": e.reason_code, "message": str(e)}
+        # Raised by IBClient.place_order before ib.placeOrder (after the
+        # owner's send mark): proven unsent and terminal.
+        return {"status": "error", "reason_code": e.reason_code, "message": str(e), "amend_outcome": "rejected"}
 
     except IBContractError as e:
         return {"status": "error", "message": str(e)}
@@ -401,59 +425,5 @@ def place_order(params: dict) -> dict:
         return {"status": "error", "message": str(e)}
 
     finally:
-        client.disconnect()
-
-
-def main():
-    if {"-h", "--help"} & set(sys.argv[1:]):
-        print("usage: xenon-ib-place-order --json '{...}'")
-        print("Place one order from a JSON payload (symbol, action, quantity, limitPrice, ...).")
-        print("Normally invoked by the FastAPI order route, not by hand.")
-        return
-    if "--json" not in sys.argv:
-        print(json.dumps({"status": "error", "message": "Usage: --json '{...}'"}))
-        sys.exit(1)
-
-    json_idx = sys.argv.index("--json")
-    if json_idx + 1 >= len(sys.argv):
-        print(json.dumps({"status": "error", "message": "Missing JSON argument after --json"}))
-        sys.exit(1)
-
-    try:
-        params = json.loads(sys.argv[json_idx + 1])
-    except json.JSONDecodeError as e:
-        print(json.dumps({"status": "error", "message": f"Invalid JSON: {e}"}))
-        sys.exit(1)
-
-    # Validate required fields
-    required = ["symbol", "action", "quantity", "limitPrice"]
-    missing = [f for f in required if f not in params]
-    if missing:
-        print(json.dumps({"status": "error", "message": f"Missing fields: {', '.join(missing)}"}))
-        sys.exit(1)
-
-    if params.get("type") == "option":
-        opt_required = ["expiry", "strike", "right"]
-        opt_missing = [f for f in opt_required if f not in params]
-        if opt_missing:
-            print(json.dumps({"status": "error", "message": f"Option missing: {', '.join(opt_missing)}"}))
-            sys.exit(1)
-
-    if params.get("type") == "combo":
-        legs = params.get("legs")
-        if not legs or not isinstance(legs, list) or len(legs) < 2:
-            print(json.dumps({"status": "error", "message": "Combo requires 'legs' array with 2+ entries"}))
-            sys.exit(1)
-        leg_required = ["expiry", "strike", "right", "action"]
-        for i, leg in enumerate(legs):
-            leg_missing = [f for f in leg_required if f not in leg]
-            if leg_missing:
-                print(json.dumps({"status": "error", "message": f"Leg {i} missing: {', '.join(leg_missing)}"}))
-                sys.exit(1)
-
-    result = place_order(params)
-    print(json.dumps(result))
-
-
-if __name__ == "__main__":
-    main()
+        if listening:
+            client._ib.errorEvent -= _on_error

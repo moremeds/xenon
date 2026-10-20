@@ -144,11 +144,13 @@ Global service: `local.ibc-gateway`. Install: `~/ibc-install/`, config: `~/ibc/`
 
 ### Client ID Ranges
 
+Offsets inside the environment's block `XENON_IB_CLIENT_ID_BASE` (prod 0, `dev.sh` 100; contract: `docs/runbooks/pr10-order-owner-cutover.md`). `IBClient.connect` refuses an id outside the caller's zone.
+
 | Range | Usage                                     |
 | ----- | ----------------------------------------- |
-| 0-9   | FastAPI IBPool (sync=3, orders=4, data=5) |
-| 10-19 | WS relay (rotates on conflict)            |
-| 20-49 | Subprocess scripts (`client_id="auto"`)   |
+| 0-9   | FastAPI IBPool (sync=3, orders=4, data=5). `orders` is the single order owner: every place / cancel / modify (PR-10) |
+| 10-19 | WS relay (rotates on conflict; Python never opens these) |
+| 20-49 | Read/data scripts (`client_id="auto"`); no order writes since PR-10 |
 | 50-69 | Scanners (CRI/VCG rotating)               |
 | 70-89 | Daemons (fill=70, exit=71)                |
 | 90-99 | CLI/standalone                            |

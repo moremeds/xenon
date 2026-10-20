@@ -25,9 +25,14 @@ from sqlalchemy import create_engine, select, text
 from xenon._test_db import sync_test_db_url as _sync_url
 from xenon.api import server as server_mod
 from xenon.api.subprocess import ScriptResult
+from xenon.clients.ib_client import pool_client_id
 from xenon.db.schema import order_submissions
 
 SCOPE = {"broker": "IB", "account_env": "paper", "broker_account": "DU0000000"}
+# PR-10: Xenon's own orders are placed by the pool orders connection
+# (base + 4; the root conftest pins base 0). Any other placing clientId is
+# not ours to cancel/modify (409 ORDER_NOT_OWNED).
+OWNER_ID = pool_client_id("orders")
 NOW = datetime.now(timezone.utc)
 
 
@@ -211,6 +216,16 @@ def _test_mode_off(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _order_owner(monkeypatch):
+    # PR-10: cancel/modify run through the order owner; its cores answer via
+    # the patched runner (scripts/tests/order_owner_fakes.py). Nothing spawns.
+    from scripts.tests.order_owner_fakes import install_runner_cores
+
+    owner, pool = install_runner_cores(monkeypatch)
+    return pool
+
+
 @pytest.fixture
 def broker_calls(monkeypatch):
     calls = []
@@ -219,7 +234,7 @@ def broker_calls(monkeypatch):
         calls.append({"entry": entry, "args": args})
         return ScriptResult(
             ok=True,
-            data={"status": "ok", "orderId": 4242, "permId": 777001, "clientId": 26},
+            data={"status": "ok", "orderId": 4242, "permId": 777001, "clientId": OWNER_ID},
         )
 
     monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake)
@@ -487,7 +502,7 @@ def test_place_outcome_vs_gate4_reservation(data, second_status, monkeypatch, cl
         broker_calls.append({"entry": entry, "args": args})
         if results:
             return results.pop(0)
-        return ScriptResult(ok=True, data={"status": "ok", "orderId": 4245, "permId": 777004, "clientId": 26})
+        return ScriptResult(ok=True, data={"status": "ok", "orderId": 4245, "permId": 777004, "clientId": OWNER_ID})
 
     monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake)
 
@@ -526,7 +541,7 @@ def test_uncertain_place_is_unknown_502_and_keeps_reservation(
         broker_calls.append({"entry": entry, "args": args, "timeout": timeout})
         if results:
             return results.pop(0)
-        return ScriptResult(ok=True, data={"status": "ok", "orderId": 4247, "permId": 777005, "clientId": 26})
+        return ScriptResult(ok=True, data={"status": "ok", "orderId": 4247, "permId": 777005, "clientId": OWNER_ID})
 
     monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake)
 
@@ -552,21 +567,30 @@ def test_uncertain_place_is_unknown_502_and_keeps_reservation(
     assert len(broker_calls) == 1
 
 
-def test_refused_before_spawn_is_failed_and_releases(monkeypatch, client, broker_calls, fresh_quote):
+@pytest.mark.parametrize(
+    ("kind", "reason"),
+    [("broker-not-ready", "IB_BROKER_DISCONNECTED"), ("core-raises-before-send", "IB_CONNECTION")],
+)
+def test_place_refused_before_send_is_failed_and_releases(kind, reason, monkeypatch, client, broker_calls, fresh_quote):
+    """PR-10 A3: proven zero sends → FAILED with a known 503 reason code
+    (the web treats it as terminal), reservation released."""
     engine = _pg_engine()
     _seed_snapshot(engine, [_stock("SPY", 100)])
     engine.dispose()
+    if kind == "broker-not-ready":
+        server_mod.order_owner._pool.client.readiness = "unknown"
+    else:
 
-    async def refused(entry: str, args: list, timeout: float = 30):
-        broker_calls.append({"entry": entry})
-        return ScriptResult(ok=False, error="IB Gateway is not accepting connections.", spawned=False)
+        async def refused(entry: str, args: list, timeout: float = 30):
+            broker_calls.append({"entry": entry})
+            return ScriptResult(ok=False, error="qualify failed: socket closed", spawned=False)
 
-    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", refused)
+        monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", refused)
     resp = client.post("/orders/place", json=_sell_call_body("rt-refused-1"))
-    assert resp.status_code == 502
-    assert resp.json()["reason_code"] == "SUBPROCESS_ERROR"
+    assert (resp.status_code, resp.json()["reason_code"]) == (503, reason), resp.text
     row = _submission_rows()[0]._mapping
-    assert (row["state"], row["reason_code"]) == ("FAILED", "SUBPROCESS_ERROR")
+    assert (row["state"], row["reason_code"]) == ("FAILED", reason)
+    assert server_mod.order_owner._pool.client.sent == []
 
 
 def _bind_and_fill_like_poller(args: list) -> str:
@@ -623,28 +647,6 @@ def test_late_route_outcome_never_demotes_poller_fill(late_result, monkeypatch, 
     assert resp.json().get("reason_code") != "IB_REJECT", resp.text
     row = _submission_rows()[0]._mapping
     assert (row["state"], row["filled_qty"], row["perm_id"]) == ("FILLED", 1, "777100")
-
-
-@pytest.mark.parametrize("kind", ["missing-binary", "exec-oserror"])
-def test_spawn_failure_is_not_sent_failed_and_releases(kind, tmp_path, monkeypatch, client, fresh_quote):
-    """The process never started → spawned=False → FAILED (not UNKNOWN),
-    explicit SUBPROCESS_ERROR, reservation released."""
-    import xenon.api.subprocess as sub_mod
-
-    engine = _pg_engine()
-    _seed_snapshot(engine, [_stock("SPY", 100)])
-    engine.dispose()
-    monkeypatch.setattr(sub_mod, "VENV_BIN", tmp_path)
-    if kind == "exec-oserror":
-        (tmp_path / "xenon-ib-place-order").write_text("not executable")  # no +x → PermissionError
-    monkeypatch.setattr(server_mod, "_pool_has_any_connection", lambda: True)
-    monkeypatch.setitem(server_mod._ib_last_failure, "order", 0.0)
-
-    resp = client.post("/orders/place", json=_sell_call_body("rt-spawn-1"))
-    assert resp.status_code == 502, resp.text
-    assert resp.json()["reason_code"] == "SUBPROCESS_ERROR"
-    row = _submission_rows()[0]._mapping
-    assert (row["state"], row["reason_code"]) == ("FAILED", "SUBPROCESS_ERROR")
 
 
 def test_body_order_ref_is_never_forwarded(client, broker_calls, fresh_quote):
@@ -1102,16 +1104,15 @@ def test_modify_uncertain_keeps_max_reservation(client, broker_calls, monkeypatc
 
 
 def _real_cli_modify_reply(*, reject_code=None, new_quantity=2):
-    """Run the REAL `ib_order_manage.modify_order` against a fake IB and
-    return the JSON it prints — the exact reply shape the route settles on.
+    """Run the REAL modify core (`ib_order_manage.modify_order_on_client`)
+    against a fake IB and return its reply — the exact shape the route
+    settles on.
 
     The fake's refreshed open orders never show the new quantity. With
     `reject_code`, IB emits that error for the order right after placeOrder
     (an explicit rejection); without it the amend is sent and simply never
     confirmed.
     """
-    import contextlib
-    import io
     from unittest.mock import MagicMock
 
     from xenon.execution import ib_order_manage as iom
@@ -1153,10 +1154,7 @@ def _real_cli_modify_reply(*, reject_code=None, new_quantity=2):
                 handler(4242, reject_code, "Order rejected - reason: amend refused")
 
     client.place_order.side_effect = _place
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf), pytest.raises(SystemExit):
-        iom.modify_order(client, 4242, 777001, None, "127.0.0.1", 4002, new_quantity=new_quantity, non_guaranteed=0)
-    return json.loads(buf.getvalue())
+    return iom.modify_order_on_client(client, 4242, 777001, None, new_quantity=new_quantity, non_guaranteed=0)
 
 
 def _manage_returns(monkeypatch, broker_calls, reply):
@@ -1165,7 +1163,7 @@ def _manage_returns(monkeypatch, broker_calls, reply):
         if entry == "xenon-ib-order-manage":
             # run_entry_point hands back exit-1 JSON as ok=True + data.
             return ScriptResult(ok=True, data=reply)
-        return ScriptResult(ok=True, data={"status": "ok", "orderId": 5151, "permId": 888001, "clientId": 26})
+        return ScriptResult(ok=True, data={"status": "ok", "orderId": 5151, "permId": 888001, "clientId": OWNER_ID})
 
     monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake)
 
@@ -1279,7 +1277,7 @@ def test_cancel_keeps_filled_quantity(client, broker_calls, monkeypatch, fresh_q
 def broker_calls_fake(calls):
     async def fake(entry: str, args: list, timeout: float = 30):
         calls.append({"entry": entry, "args": args})
-        return ScriptResult(ok=True, data={"status": "ok", "orderId": 4343, "permId": 777002, "clientId": 26})
+        return ScriptResult(ok=True, data={"status": "ok", "orderId": 4343, "permId": 777002, "clientId": OWNER_ID})
 
     return fake
 
@@ -1397,7 +1395,7 @@ class _Broker:
             return self.place_results.pop(0)
         self._perm += 1
         return ScriptResult(
-            ok=True, data={"status": "ok", "orderId": self._perm - 875000, "permId": self._perm, "clientId": 26}
+            ok=True, data={"status": "ok", "orderId": self._perm - 875000, "permId": self._perm, "clientId": OWNER_ID}
         )
 
     def count(self, entry: str) -> int:
@@ -1490,7 +1488,7 @@ def test_replace_happy_path_cancels_then_places_once(client, broker):
         {
             "perm_id": str(target["permId"]),
             "ib_order_id": str(target["orderId"]),
-            "client_id": "26",
+            "client_id": str(OWNER_ID),
             "submission_id": _row("orig-1")["submission_id"],
         }
     ]
@@ -1534,7 +1532,7 @@ def test_replace_cancel_fails_claim_failed_nothing_placed(client, broker):
     ]
     resp = client.post("/orders/replace", json=_replace_body(target, "rep-cf"))
     assert resp.status_code == 409, resp.text
-    assert resp.json()["reason_code"] == "OWNERSHIP"
+    assert resp.json()["reason_code"] == "ORDER_NOT_OWNED"
     assert resp.json()["replacement_placed"] is False
     assert (broker.cancels, broker.places) == (1, 0)
     assert (_row("rep-cf")["state"], _row("rep-cf")["reason_code"]) == ("FAILED", "REPLACE_CANCEL_FAILED")
@@ -1672,15 +1670,29 @@ def _placed(oid, perm, client):
     return ScriptResult(ok=True, data={"status": "ok", "orderId": oid, "permId": perm, "clientId": client})
 
 
+def _set_row_client(attempt_id: str, client_id: int) -> None:
+    """Re-stamp a row's placing clientId: a row placed before PR-10 by a
+    legacy subprocess client (the owner path always stores OWNER_ID)."""
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE xenon.order_submissions SET placing_client_id = :c WHERE client_attempt_id = :a"),
+            {"c": client_id, "a": attempt_id},
+        )
+    engine.dispose()
+
+
 def _two_clients_same_order_id(client, broker):
-    """A (pure-BUY combo, client 30) and B (short call holding all 100
-    shares, client 31) share orderId 7 with distinct permIds."""
+    """A (pure-BUY combo, placed by our orders connection) and B (short call
+    holding all 100 shares, legacy client 31 — not ours) share orderId 7
+    with distinct permIds."""
     engine = _pg_engine()
     _seed_snapshot(engine, [_stock("SPY", 100)])
     engine.dispose()
-    broker.place_results = [_placed(7, 9101, 30), _placed(7, 9102, 31)]
+    broker.place_results = [_placed(7, 9101, OWNER_ID), _placed(7, 9102, 31)]
     assert client.post("/orders/place", json=_combo("ord-a", legs=_PURE_BUY)).status_code == 200
     assert client.post("/orders/place", json=_sell_call_body("ord-b")).status_code == 200
+    _set_row_client("ord-b", 31)
     broker.calls.clear()
 
 
@@ -1697,7 +1709,7 @@ def test_replace_cross_client_same_order_id_leaves_the_other_order(client, broke
     ok = client.post("/orders/replace", json=_replace_body({"orderId": 7, "permId": 9101}, "rep-x2", legs=_PURE_BUY))
     assert ok.status_code == 200, ok.text
     assert (_row("ord-a")["state"], _row("ord-b")["state"]) == ("CANCELLED", "WORKING")
-    assert "9101" in broker.calls[0]["args"] and "30" in broker.calls[0]["args"]
+    assert "9101" in broker.calls[0]["args"] and str(OWNER_ID) in broker.calls[0]["args"]
 
 
 def test_replace_ambiguous_order_id_only_target_refused(client, broker, fresh_quote):
@@ -1707,7 +1719,7 @@ def test_replace_ambiguous_order_id_only_target_refused(client, broker, fresh_qu
     assert "nothing was cancelled" in resp.json()["detail"]
     assert broker.calls == []
     # The placing clientId disambiguates.
-    body = {"cancelOrders": [{"orderId": 7, "clientId": 30}], "replaceOrder": _combo("rep-amb-2", legs=_PURE_BUY)}
+    body = {"cancelOrders": [{"orderId": 7, "clientId": OWNER_ID}], "replaceOrder": _combo("rep-amb-2", legs=_PURE_BUY)}
     assert client.post("/orders/replace", json=body).status_code == 200
     assert (_row("ord-a")["state"], _row("ord-b")["state"]) == ("CANCELLED", "WORKING")
 
@@ -1721,8 +1733,10 @@ def test_replace_distinct_perm_ids_sharing_an_order_id_do_not_conflict(client, b
     resp = client.post(
         "/orders/replace", json=_replace_body({"permId": 9102}, "rep-d2", legs=((500.0, "BUY", 1), (510.0, "SELL", 1)))
     )
-    assert resp.status_code == 200, resp.text
-    assert broker.cancels == 2
+    # No claim conflict with A's replacement: B is refused only because it is
+    # not ours (PR-10), before any broker work.
+    assert (resp.status_code, resp.json()["reason_code"]) == (409, "ORDER_NOT_OWNED"), resp.text
+    assert broker.cancels == 1
 
 
 def test_replace_perm_only_and_order_id_only_aliases_conflict(client, broker):
@@ -1754,15 +1768,19 @@ def test_replace_same_attempt_id_different_target_cancels_nothing(client, broker
 
 def test_plain_cancel_marks_only_the_canonical_row(client, broker, fresh_quote):
     """/orders/cancel shares the persistence: an ambiguous orderId is refused
-    before the CLI; a permId cancels and marks exactly its row; an orderId
-    with no row at all (TWS order) still goes to the CLI."""
+    before the owner; a permId cancels and marks exactly its row; a row of
+    another client is ORDER_NOT_OWNED with no broker work; an orderId with no
+    row at all (TWS order) goes to the owner, whose fresh snapshot decides."""
     _two_clients_same_order_id(client, broker)
     amb = client.post("/orders/cancel", json={"orderId": 7})
     assert (amb.status_code, amb.json()["reason_code"]) == (409, "ORDER_TARGET_AMBIGUOUS")
     assert broker.calls == []
     assert (_row("ord-a")["state"], _row("ord-b")["state"]) == ("WORKING", "WORKING")
-    assert client.post("/orders/cancel", json={"orderId": 7, "permId": 9102}).status_code == 200
-    assert (_row("ord-a")["state"], _row("ord-b")["state"]) == ("WORKING", "CANCELLED")
+    foreign = client.post("/orders/cancel", json={"orderId": 7, "permId": 9102})
+    assert (foreign.status_code, foreign.json()["reason_code"]) == (409, "ORDER_NOT_OWNED")
+    assert broker.calls == []
+    assert client.post("/orders/cancel", json={"orderId": 7, "permId": 9101}).status_code == 200
+    assert (_row("ord-a")["state"], _row("ord-b")["state"]) == ("CANCELLED", "WORKING")
     assert client.post("/orders/cancel", json={"orderId": 4711}).status_code == 200
     assert broker.cancels == 2
 
@@ -1774,6 +1792,7 @@ def test_client_id_zero_is_a_real_client(client, broker, fresh_quote):
     engine.dispose()
     broker.place_results = [_placed(7, 9102, 31)]
     assert client.post("/orders/place", json=_sell_call_body("ord-b")).status_code == 200
+    _set_row_client("ord-b", 31)
     broker.calls.clear()
     # Only (client 31, order 7) is mirrored: (client 0, order 7) is missing.
     body = {"cancelOrders": [{"orderId": 7, "clientId": 0}], "replaceOrder": _combo("rep-c0", legs=_PURE_BUY)}
@@ -1783,17 +1802,21 @@ def test_client_id_zero_is_a_real_client(client, broker, fresh_quote):
     # Now (client 0, order 7) exists too: clientId 0 selects it, never B.
     broker.place_results = [_placed(7, 9101, 0)]
     assert client.post("/orders/place", json=_combo("ord-a", legs=_PURE_BUY)).status_code == 200
+    _set_row_client("ord-a", 0)  # a TWS-era row: clientId 0 stored as 0, not "unknown"
     assert _row("ord-a")["placing_client_id"] == 0
     broker.calls.clear()
     body["replaceOrder"] = _combo("rep-c0-2", legs=_PURE_BUY)
     resp = client.post("/orders/replace", json=body)
-    assert resp.status_code == 200, resp.text
-    args = broker.calls[0]["args"]
-    assert "9101" in args and args[args.index("--client-id") + 1] == "0"
-    assert (_row("ord-a")["state"], _row("ord-b")["state"]) == ("CANCELLED", "WORKING")
+    # clientId 0 (TWS / master) selects A — and A is not ours (PR-10 routing
+    # matrix): 409 ORDER_NOT_OWNED, nothing reaches the broker, B untouched.
+    assert (resp.status_code, resp.json()["reason_code"]) == (409, "ORDER_NOT_OWNED"), resp.text
+    assert broker.calls == []
+    assert (_row("ord-a")["state"], _row("ord-b")["state"]) == ("WORKING", "WORKING")
 
 
-def test_uncertain_place_keeps_client_id_zero(client, broker, fresh_quote):
+def test_uncertain_place_records_the_owner_client_id(client, broker, fresh_quote):
+    """PR-10 A3: the owner placed it — its id is stored even when the core
+    reported another (never the 26 fallback)."""
     engine = _pg_engine()
     _seed_snapshot(engine, [_stock("SPY", 100)])
     engine.dispose()
@@ -1803,4 +1826,4 @@ def test_uncertain_place_keeps_client_id_zero(client, broker, fresh_quote):
     resp = client.post("/orders/place", json=_sell_call_body("unc-c0"))
     assert resp.status_code == 502, resp.text
     row = _row("unc-c0")
-    assert (row["state"], row["ib_order_id"], row["placing_client_id"]) == ("UNKNOWN", "5", 0)
+    assert (row["state"], row["ib_order_id"], row["placing_client_id"]) == ("UNKNOWN", "5", OWNER_ID)

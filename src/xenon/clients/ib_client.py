@@ -77,6 +77,12 @@ class IBOrderError(IBError):
     """Raised when an order operation fails."""
 
 
+class SendRefused(Exception):
+    """A send guard refused right before ``placeOrder`` / ``cancelOrder``:
+    nothing was transmitted. Order cores must let it propagate (never read
+    it as a failure after the send)."""
+
+
 class IBOrderAccountError(IBOrderError):
     """A new order has no usable account; it was NOT sent to IB.
 
@@ -97,6 +103,14 @@ class IBContractError(IBError):
     """Raised when contract qualification or lookup fails."""
 
 
+class ClientIdNotAllowed(IBConnectionError):
+    """The requested clientId is outside the caller's zone; no connect was tried.
+
+    Raised by :func:`resolve_client_id` (and so by ``IBClient.connect`` and
+    every reconnect that goes through it) before any socket is opened.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Constants — re-exported from ib_connection for backward compat
 # ---------------------------------------------------------------------------
@@ -104,21 +118,32 @@ class IBContractError(IBError):
 # ---------------------------------------------------------------------------
 # Client ID Range Allocation
 # ---------------------------------------------------------------------------
-# IB allows client IDs 0-999. We partition the space into non-overlapping
-# zones so persistent services and on-demand scripts never collide.
+# IB allows client IDs 0-999. Each environment that shares a gateway gets its
+# own block of 100 ids starting at ``XENON_IB_CLIENT_ID_BASE`` (0-800, step
+# 100; prod = 0 on the Mac mini, dev = 100 via ``scripts/infra/dev.sh``). The
+# zones below are OFFSETS inside that block, so persistent services and
+# on-demand scripts never collide, inside one environment or across two:
 #
-#   0-9     Pool (persistent connections held by FastAPI IBPool)
-#   10-19   WS relay (persistent, ib_realtime_server.js)
-#   20-49   Subprocess scripts (on-demand, auto-allocated with retry)
-#   50-69   Scanners (CRI/VCG ad-hoc pools)
-#   70-89   Daemons (fill monitor, exit service)
-#   90-99   Standalone CLI (manual runs)
+#   +0-9     Pool (persistent connections held by FastAPI IBPool) — only the
+#            pool may open these (``pool_role=``)
+#   +10-19   WS relay (persistent, ib_realtime_server.js) — never from Python
+#   +20-49   Subprocess scripts (on-demand, ``client_id="auto"``)
+#   +50-69   Scanners (CRI/VCG ad-hoc pools)
+#   +70-89   Daemons (fill monitor, exit service)
+#   +90-99   Standalone CLI (manual runs)
 #
+# Ids 900-999 belong to no environment (raw probe harnesses only). The
+# allocation check in ``IBClient.connect`` is an operational contract, not
+# fencing: two processes that share a base can still collide.
 POOL_ID_RANGE = (0, 9)
 RELAY_ID_RANGE = (10, 19)
 SUBPROCESS_ID_RANGE = (20, 49)
 
-# Pool roles — persistent connections held by FastAPI IBPool
+CLIENT_ID_BASE_ENV = "XENON_IB_CLIENT_ID_BASE"
+CLIENT_ID_BASE_STEP = 100
+CLIENT_ID_BASE_MAX = 800
+
+# Pool roles — persistent connections held by FastAPI IBPool (offsets).
 # IDs 3-5 avoid collisions with stale clientId 0 reservations after unclean restarts
 POOL_ROLES: dict = {
     "sync": 3,
@@ -126,9 +151,9 @@ POOL_ROLES: dict = {
     "data": 5,
 }
 
-# Legacy registry — kept for backward compat with scripts that use client_name
+# Registry of named non-pool callers (offsets from the base). Names that map
+# into the pool or relay zone are refused by the allocation check.
 CLIENT_IDS: dict = {
-    "ib_order_manage": 20,  # subprocess range (auto-allocate preferred)
     "ib_sync": 3,  # pool role
     "ib_orders": 4,  # pool role
     "ib_reconcile": 21,  # subprocess range
@@ -136,13 +161,101 @@ CLIENT_IDS: dict = {
     "ib_fill_monitor": 70,  # daemon range
     "exit_order_service": 71,  # daemon range
     "fetch_analyst_ratings": 90,  # standalone CLI range
-    "ib_place_order": 24,  # subprocess range
+    "ib_option_chain": 27,  # subprocess range (/options/chain, /options/expirations)
     "vcg_scanner": 50,  # scanner range
     "cri_scanner": 5,  # pool data role
     "ib_realtime_server": 10,  # relay range
     "option_chain_snapshotter_a": 95,  # daemon range — pool A for option_chain archive snapshotter
     "option_chain_snapshotter_b": 96,  # daemon range — pool B for option_chain archive snapshotter
 }
+
+
+def client_id_base() -> int:
+    """Return this environment's clientId base from ``XENON_IB_CLIENT_ID_BASE``.
+
+    Read at call time. Unset or empty means 0 (prod). Anything that is not a
+    multiple of 100 in 0-800 raises :class:`ClientIdNotAllowed`.
+    """
+    raw = (os.environ.get(CLIENT_ID_BASE_ENV) or "").strip()
+    if not raw:
+        return 0
+    try:
+        base = int(raw)
+    except ValueError:
+        raise ClientIdNotAllowed(f"{CLIENT_ID_BASE_ENV}={raw!r} is not an integer") from None
+    if base < 0 or base > CLIENT_ID_BASE_MAX or base % CLIENT_ID_BASE_STEP:
+        raise ClientIdNotAllowed(
+            f"{CLIENT_ID_BASE_ENV}={base} is invalid — use 0-{CLIENT_ID_BASE_MAX} in steps of {CLIENT_ID_BASE_STEP}"
+        )
+    return base
+
+
+def pool_client_id(role: str) -> int:
+    """Absolute clientId of a pool role in this environment (base + offset)."""
+    if role not in POOL_ROLES:
+        raise ValueError(f"Unknown pool role: {role}. Valid: {list(POOL_ROLES.keys())}")
+    return client_id_base() + POOL_ROLES[role]
+
+
+def resolve_client_id(client_id: int, *, pool_role: Optional[str] = None) -> int:
+    """Check an explicit clientId against this environment's zones.
+
+    - ``pool_role`` given: the id must be exactly that role's id. Only
+      ``xenon.api.ib_pool`` passes ``pool_role``.
+    - otherwise the id must lie in ``base+20 .. base+99``: never the pool
+      zone (+0-9, which includes the master clientId 0 for base 0), never
+      the relay zone (+10-19), never another environment's block.
+
+    Raises :class:`ClientIdNotAllowed`; returns the id unchanged.
+    """
+    if isinstance(client_id, bool) or not isinstance(client_id, int):
+        raise ClientIdNotAllowed(f"clientId {client_id!r} is not an integer")
+    base = client_id_base()
+    if pool_role is not None:
+        expected = pool_client_id(pool_role)
+        if client_id != expected:
+            raise ClientIdNotAllowed(
+                f"pool role {pool_role!r} must use clientId {expected} (base {base}), not {client_id}"
+            )
+        return client_id
+    offset = client_id - base
+    if not 0 <= offset <= 99:
+        raise ClientIdNotAllowed(
+            f"clientId {client_id} is outside this environment's block {base}-{base + 99} ({CLIENT_ID_BASE_ENV}={base})"
+        )
+    if offset <= POOL_ID_RANGE[1]:
+        raise ClientIdNotAllowed(
+            f"clientId {client_id} is in the pool zone {base}-{base + 9}; only the API pool may use it"
+        )
+    if offset <= RELAY_ID_RANGE[1]:
+        raise ClientIdNotAllowed(
+            f"clientId {client_id} is in the relay zone {base + 10}-{base + 19}; Python never opens relay ids"
+        )
+    return client_id
+
+
+# ---------------------------------------------------------------------------
+# Broker readiness (A4)
+# ---------------------------------------------------------------------------
+# An open socket is not proof that the gateway can reach IB: during an outage
+# reqCurrentTime still answers locally and open-orders times out (observed
+# 2026-10-20). Each connection therefore tracks:
+#   unknown — after every (re)connect and after 1101, until a broker round trip
+#             (an open-orders request that returns) completes;
+#   ready   — round trip seen, or 1102 (restored, data maintained);
+#   lost    — 1100 (IB↔gateway lost) or 2110 (gateway↔server broken).
+# ib_async only processes these events while the connection's event loop runs,
+# so the value can lag until the next call on that connection.
+READINESS_UNKNOWN = "unknown"
+READINESS_READY = "ready"
+READINESS_LOST = "lost"
+
+_READINESS_LOST_CODES = frozenset({1100, 2110})
+_READINESS_RESTORED_CODE = 1102
+_READINESS_RECHECK_CODE = 1101
+
+DEFAULT_READINESS_PROBE_TIMEOUT_S = 5.0
+
 
 DEFAULT_HOST = os.environ.get("IB_GATEWAY_HOST", "127.0.0.1")
 DEFAULT_GATEWAY_PORT = _EXPECTED_PORT
@@ -239,6 +352,12 @@ class IBClient:
         # Invalid contracts — callers can check before requesting
         self._failed_contracts: Set[Any] = set()
 
+        # Broker readiness (A4). The generation changes on every readiness
+        # event so a round trip that started before an event never promotes.
+        self._pool_role: Optional[str] = None
+        self._readiness: str = READINESS_UNKNOWN
+        self._readiness_generation: int = 0
+
         # Wire up error callback
         self._ib.errorEvent += self._on_error
 
@@ -290,16 +409,22 @@ class IBClient:
         client_name: Optional[str] = None,
         timeout: int = 3,
         max_retries: int = 1,
+        pool_role: Optional[str] = None,
     ) -> None:
         """Connect to TWS / IB Gateway.
+
+        Every id goes through :func:`resolve_client_id` before a socket is
+        opened (A5 allocation check): ``"auto"`` stays in ``base+20..49``,
+        named and explicit ids must sit in ``base+20..99``, and pool role ids
+        are only reachable with ``pool_role`` (used by ``xenon.api.ib_pool``).
 
         Args:
             host: IB Gateway / TWS host.
             port: IB Gateway / TWS port.
             client_id: Explicit client ID (int), ``"auto"`` for range-based
                 allocation from :data:`SUBPROCESS_ID_RANGE`, or *None*.
-            client_name: Lookup client ID from ``CLIENT_IDS`` registry, or
-                from ``POOL_ROLES`` if the name matches a pool role.
+            client_name: Look up the client ID offset in ``CLIENT_IDS``
+                (resolved as ``base + offset``).
             timeout: Connection timeout in seconds (default 3s for fast
                 fallback when Gateway is unreachable).
             max_retries: Number of attempts before giving up (applies per-ID
@@ -309,6 +434,7 @@ class IBClient:
         Raises:
             ValueError: If *client_name* is not in the registry and no
                 *client_id* override is given.
+            ClientIdNotAllowed: If the id is outside the caller's zone.
             IBConnectionError: If the connection cannot be established.
         """
         # Test-session broker boundary allowlist — no-op outside pytest
@@ -317,21 +443,20 @@ class IBClient:
         assert_broker_endpoint_allowed(host, port)
         # Resolve client ID
         if client_id == "auto":
+            if pool_role is not None:
+                raise ClientIdNotAllowed("pool roles use a fixed clientId, never 'auto'")
             return self._connect_auto_allocate(host, port, timeout)
 
-        if client_id is None and client_name is not None:
-            # Check pool roles first, then legacy registry
-            if client_name in POOL_ROLES:
-                client_id = POOL_ROLES[client_name]
-            elif client_name in CLIENT_IDS:
-                client_id = CLIENT_IDS[client_name]
-            else:
-                raise ValueError(
-                    f"Unknown client name '{client_name}'. "
-                    f"Known names: {sorted(set(list(CLIENT_IDS.keys()) + list(POOL_ROLES.keys())))}"
-                )
+        if client_id is None and pool_role is not None:
+            client_id = pool_client_id(pool_role)
+        elif client_id is None and client_name is not None:
+            if client_name not in CLIENT_IDS:
+                raise ValueError(f"Unknown client name '{client_name}'. Known names: {sorted(CLIENT_IDS)}")
+            client_id = client_id_base() + CLIENT_IDS[client_name]
         elif client_id is None:
             client_id = 0
+        client_id = resolve_client_id(client_id, pool_role=pool_role)
+        self._pool_role = pool_role
 
         self._last_host = host
         self._last_port = port
@@ -346,6 +471,7 @@ class IBClient:
             try:
                 with self._capture_error_codes() as codes:
                     self._ib.connect(host, port, clientId=client_id, timeout=timeout)
+                self._reset_readiness()
                 self.logger.info(
                     "Connected to IB on %s:%s (clientId=%s)",
                     host,
@@ -356,7 +482,7 @@ class IBClient:
             except Exception as exc:
                 if CLIENT_ID_IN_USE_CODE in codes:
                     # Retrying the same id cannot succeed while the incumbent
-                    # holds it; callers (ib_order_manage) own their retry loop.
+                    # holds it; the caller decides (the order owner halts).
                     raise ClientIdInUse(client_id, str(exc)) from exc
                 last_exc = exc
                 self.logger.warning(
@@ -376,7 +502,7 @@ class IBClient:
         port: int,
         timeout: int,
     ) -> None:
-        """Try each ID in SUBPROCESS_ID_RANGE starting from a random offset.
+        """Try each ID in ``base + SUBPROCESS_ID_RANGE`` from a random offset.
 
         On IB 326 (seen via ``errorEvent``) or the legacy 'client id is already in
         use' text, rotates to the next ID.
@@ -384,7 +510,8 @@ class IBClient:
         """
         import random
 
-        lo, hi = SUBPROCESS_ID_RANGE
+        base = client_id_base()
+        lo, hi = base + SUBPROCESS_ID_RANGE[0], base + SUBPROCESS_ID_RANGE[1]
         range_size = hi - lo + 1
         start = random.randint(lo, hi)
 
@@ -394,6 +521,8 @@ class IBClient:
             try:
                 with self._capture_error_codes() as codes:
                     self._ib.connect(host, port, clientId=cid, timeout=timeout)
+                self._reset_readiness()
+                self._pool_role = None
                 self._last_host = host
                 self._last_port = port
                 self._last_client_id = cid
@@ -419,6 +548,7 @@ class IBClient:
 
     def disconnect(self) -> None:
         """Disconnect from IB. Safe to call when not connected."""
+        self._reset_readiness()
         if self._ib.isConnected():
             self._ib.disconnect()
             self.logger.info("Disconnected from IB")
@@ -461,8 +591,9 @@ class IBClient:
             self.logger.info("IB info %d: %s", code, errorString)
             return
 
-        if code in _CONNECTIVITY_CODES:
+        if code in _CONNECTIVITY_CODES or code in _READINESS_LOST_CODES:
             self.logger.warning("IB connectivity %d: %s", code, errorString)
+            self._apply_readiness_event(code)
             return
 
         # Pacing violations — track per reqId, cap at max retries
@@ -516,6 +647,9 @@ class IBClient:
         # Same boundary allowlist as connect() — this path calls
         # self._ib.connect directly, so it needs its own check.
         assert_broker_endpoint_allowed(self._last_host, self._last_port)
+        # Same allocation check as connect() (A5): a reconnect never reopens
+        # an id outside this caller's zone.
+        resolve_client_id(self._last_client_id, pool_role=self._pool_role)
 
         self._reconnecting = True
         self.logger.warning("Disconnected from IB — attempting reconnection")
@@ -531,6 +665,7 @@ class IBClient:
                         clientId=self._last_client_id,
                         timeout=self._last_timeout,
                     )
+                    self._reset_readiness()
                     self.logger.info(
                         "Reconnected to IB on attempt %d/%d",
                         attempt + 1,
@@ -694,7 +829,80 @@ class IBClient:
         (incident #35 in docs/reference/order-path-incident-history.md).
         """
         self._require_connection()
-        return list(self._ib.reqAllOpenOrders() or [])
+        generation = self._readiness_generation
+        trades = list(self._ib.reqAllOpenOrders() or [])
+        self._note_round_trip(generation)
+        return trades
+
+    # -- broker readiness (A4) -----------------------------------------------
+
+    @property
+    def broker_readiness(self) -> str:
+        """``unknown`` / ``ready`` / ``lost`` — see the module notes (A4)."""
+        return self._readiness
+
+    def _set_readiness(self, state: str) -> None:
+        self._readiness_generation += 1
+        if state != self._readiness:
+            self.logger.info("IB broker readiness %s -> %s", self._readiness, state)
+        self._readiness = state
+
+    def _reset_readiness(self) -> None:
+        """Start and every socket replacement drop stale state to unknown."""
+        self._set_readiness(READINESS_UNKNOWN)
+
+    def _apply_readiness_event(self, code: int) -> None:
+        if code in _READINESS_LOST_CODES:
+            self._set_readiness(READINESS_LOST)
+        elif code == _READINESS_RESTORED_CODE:
+            self._set_readiness(READINESS_READY)
+        elif code == _READINESS_RECHECK_CODE:
+            # Restored but data lost: ready only after a fresh round trip.
+            self._set_readiness(READINESS_UNKNOWN)
+
+    @property
+    def readiness_generation(self) -> int:
+        """Bumped by every readiness change; an unchanged value means no
+        1100/2110/1101/1102 or socket replacement arrived in between."""
+        return self._readiness_generation
+
+    def _note_round_trip(self, generation: int) -> bool:
+        """Promote unknown -> ready if no readiness event arrived meanwhile.
+
+        Returns False when an event moved readiness during the round trip.
+        """
+        if generation != self._readiness_generation:
+            return False
+        if self._readiness == READINESS_UNKNOWN:
+            self._set_readiness(READINESS_READY)
+        return True
+
+    def confirm_broker_ready(self, timeout: float = DEFAULT_READINESS_PROBE_TIMEOUT_S) -> str:
+        """Run one open-orders round trip and return the readiness it proves.
+
+        Only a completed open-orders request counts as evidence; an open
+        socket or ``reqCurrentTime`` does not (the gateway answers those
+        locally during an outage). READY is returned only when THIS call's
+        round trip completed and no readiness event moved the state during
+        it. A timeout, socket error or a concurrent event returns UNKNOWN (or
+        LOST) without changing the stored state. Runs on the caller's thread
+        — pool callers use the role executor.
+        """
+
+        def unproven() -> str:
+            return READINESS_LOST if self._readiness == READINESS_LOST else READINESS_UNKNOWN
+
+        if not self.is_connected():
+            return unproven()
+        generation = self._readiness_generation
+        try:
+            self._ib.run(self._ib.reqAllOpenOrdersAsync(), timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 — timeout / socket error: no evidence
+            self.logger.warning("IB readiness round trip failed (%s): %r", self._readiness, exc)
+            return unproven()
+        if not self._note_round_trip(generation):
+            return unproven()
+        return self._readiness
 
     # -- market data --------------------------------------------------------
 

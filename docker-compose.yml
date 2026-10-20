@@ -69,6 +69,9 @@ services:
       # `host.docker.internal` is the only hostname that actually reaches
       # it — a 127.0.0.1 default would dial the container's own loopback.
       FUTU_OPEND_HOST: host.docker.internal
+      # Local build stack: dev clientId block (PR-10). Base 0 is prod-only; the
+      # api refuses base 0 with a non-prod DB and base != 0 with core_dev.
+      XENON_IB_CLIENT_ID_BASE: ${XENON_IB_CLIENT_ID_BASE:-100}
       # /status on the realtime relay is token-only — reach it over the
       # compose network, not loopback. Token comes from ./.env via env_file.
       IB_REALTIME_STATUS_URL: http://realtime:8765/status
@@ -92,6 +95,9 @@ services:
       retries: 3
       start_period: 30s
     restart: unless-stopped
+    # PR-10: room for uvicorn's 10s drain + the 35s graceful IB disconnect;
+    # the default 10s SIGKILLs the api with its gateway sockets still open.
+    stop_grace_period: 60s
 
   web:
     build:
@@ -158,6 +164,8 @@ services:
       # host-published 127.0.0.1:8765 mapping reaches it. On bare metal the
       # relay default is loopback-only.
       WS_HOST: 0.0.0.0
+      # Relay ids derive from the same block as the api (base + 10..12).
+      XENON_IB_CLIENT_ID_BASE: ${XENON_IB_CLIENT_ID_BASE:-100}
       # Ticket validation targets the api service over the compose network —
       # the module default (127.0.0.1:8321) would dial the relay's own loopback.
       TICKET_VALIDATE_URL: http://api:8321/ws-ticket/validate

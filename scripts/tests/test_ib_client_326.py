@@ -15,8 +15,7 @@ from xenon.clients.ib_client import (
     IBClient,
     IBConnectionError,
 )
-from xenon.execution import ib_order_manage
-from xenon.execution.ib_order_manage import _is_clientid_in_use, _reconnect_as_owner, classify_failure
+from xenon.execution.ib_order_manage import _is_clientid_in_use, classify_failure
 
 
 pytestmark = pytest.mark.usefixtures("bypass_broker_boundary")
@@ -68,36 +67,28 @@ def test_explicit_326_raises_typed_error_without_retry(monkeypatch):
 
     sleeps: list[float] = []
     monkeypatch.setattr("xenon.clients.ib_client.time.sleep", sleeps.append)
-    fake = FakeIB(busy_ids={9})
+    fake = FakeIB(busy_ids={95})
     client = make_client(fake)
 
     with pytest.raises(ClientIdInUse) as ei:
-        client.connect(client_id=9, timeout=1, max_retries=3)
+        client.connect(client_id=95, timeout=1, max_retries=3)
 
-    assert ei.value.client_id == 9
+    assert ei.value.client_id == 95
     assert ei.value.code == 326
     assert isinstance(ei.value, IBConnectionError)
-    assert fake.attempted == [9]  # fail fast: no generic retry loop
+    assert fake.attempted == [95]  # fail fast: no generic retry loop
     assert sleeps == []
 
 
-def test_typed_error_is_ownership_and_409_path(capsys, monkeypatch):
+def test_typed_error_is_ownership_and_409_path():
+    """ClientIdInUse classifies as ownership (409). PR-10 removed the CLI
+    owner-reconnect retry loop; the order owner halts on it instead
+    (src/xenon/api/tests/test_order_owner.py)."""
     from xenon.clients.ib_client import ClientIdInUse
 
-    exc = ClientIdInUse(9)
+    exc = ClientIdInUse(95)
     assert _is_clientid_in_use(exc)
     assert classify_failure(None, exc) == "ownership"
-
-    # Owner reconnect: real IBClient + FakeIB, retries 3x then ownership.
-    monkeypatch.setattr(ib_order_manage.time, "sleep", lambda *_a, **_k: None)
-    fake = FakeIB(busy_ids={9})
-    client = make_client(fake)
-    with pytest.raises(SystemExit) as se:
-        _reconnect_as_owner(client, "127.0.0.1", 4002, 9)
-    assert se.value.code == 1
-    out = capsys.readouterr().out
-    assert '"classification": "ownership"' in out
-    assert fake.attempted == [9, 9, 9]
 
 
 def test_non_326_timeout_unchanged(monkeypatch):
@@ -115,11 +106,11 @@ def test_non_326_timeout_unchanged(monkeypatch):
     assert fake.attempted == [lo]
 
     # explicit: generic retries run, result is a plain IBConnectionError.
-    fake = FakeIB(timeout_ids={9})
+    fake = FakeIB(timeout_ids={95})
     with pytest.raises(IBConnectionError) as ei:
-        make_client(fake).connect(client_id=9, timeout=1, max_retries=2)
+        make_client(fake).connect(client_id=95, timeout=1, max_retries=2)
     assert not isinstance(ei.value, ClientIdInUse)
-    assert fake.attempted == [9, 9]
+    assert fake.attempted == [95, 95]
     assert classify_failure(None, ei.value) == "connection"
     assert not _is_clientid_in_use(ei.value)
 
@@ -141,15 +132,15 @@ def test_error_handler_unsubscribed_after_every_attempt(monkeypatch):
     # also released on the failure path
     from xenon.clients.ib_client import ClientIdInUse
 
-    fake2 = FakeIB(busy_ids={9})
+    fake2 = FakeIB(busy_ids={95})
     with pytest.raises(ClientIdInUse):
-        make_client(fake2).connect(client_id=9, timeout=1)
+        make_client(fake2).connect(client_id=95, timeout=1)
     assert len(fake2.errorEvent) == 0
 
     # ... and after a non-326 timeout
-    fake3 = FakeIB(timeout_ids={9})
+    fake3 = FakeIB(timeout_ids={95})
     with pytest.raises(IBConnectionError):
-        make_client(fake3).connect(client_id=9, timeout=1)
+        make_client(fake3).connect(client_id=95, timeout=1)
     assert len(fake3.errorEvent) == 0
 
 
@@ -177,7 +168,7 @@ def test_capture_entry_failure_keeps_original_error_and_no_stale_326(monkeypatch
     fake = FakeIB()
     fake.errorEvent = _BrokenSubscribeEvent(fail_times=99)
     with pytest.raises(IBConnectionError, match="subscribe failed") as ei:
-        make_client(fake).connect(client_id=9, timeout=1, max_retries=2)
+        make_client(fake).connect(client_id=95, timeout=1, max_retries=2)
     assert not isinstance(ei.value, ClientIdInUseType())
     assert fake.attempted == []  # never reached ib.connect
 
@@ -189,11 +180,11 @@ def test_capture_entry_failure_keeps_original_error_and_no_stale_326(monkeypatch
     client = make_client(fake)
     client.connect(client_id="auto", timeout=1)  # rotates past lo
     fake.busy_ids = set()
-    fake.timeout_ids = {9}
+    fake.timeout_ids = {95}
     with pytest.raises(IBConnectionError) as ei:
-        client.connect(client_id=9, timeout=1, max_retries=2)
+        client.connect(client_id=95, timeout=1, max_retries=2)
     assert not isinstance(ei.value, ClientIdInUseType())
-    assert fake.attempted[-2:] == [9, 9]
+    assert fake.attempted[-2:] == [95, 95]
 
     # auto: entry fails on the first id, works afterwards; failure is non-conflict -> original error
     fake = FakeIB()
