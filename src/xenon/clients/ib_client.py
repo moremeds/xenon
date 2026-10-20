@@ -342,6 +342,7 @@ class IBClient:
         last_exc: Optional[Exception] = None
         while attempt < max_retries:
             attempt += 1
+            codes: List[int] = []
             try:
                 with self._capture_error_codes() as codes:
                     self._ib.connect(host, port, clientId=client_id, timeout=timeout)
@@ -389,6 +390,7 @@ class IBClient:
 
         for i in range(range_size):
             cid = lo + (start - lo + i) % range_size
+            codes: List[int] = []
             try:
                 with self._capture_error_codes() as codes:
                     self._ib.connect(host, port, clientId=cid, timeout=timeout)

@@ -12,7 +12,6 @@ from eventkit import Event
 
 from xenon.clients.ib_client import (
     SUBPROCESS_ID_RANGE,
-    ClientIdInUse,
     IBClient,
     IBConnectionError,
 )
@@ -65,6 +64,8 @@ def test_auto_rotates_past_326_with_empty_timeout(monkeypatch):
 
 
 def test_explicit_326_raises_typed_error_without_retry(monkeypatch):
+    from xenon.clients.ib_client import ClientIdInUse
+
     sleeps: list[float] = []
     monkeypatch.setattr("xenon.clients.ib_client.time.sleep", sleeps.append)
     fake = FakeIB(busy_ids={9})
@@ -81,6 +82,8 @@ def test_explicit_326_raises_typed_error_without_retry(monkeypatch):
 
 
 def test_typed_error_is_ownership_and_409_path(capsys, monkeypatch):
+    from xenon.clients.ib_client import ClientIdInUse
+
     exc = ClientIdInUse(9)
     assert _is_clientid_in_use(exc)
     assert classify_failure(None, exc) == "ownership"
@@ -98,6 +101,8 @@ def test_typed_error_is_ownership_and_409_path(capsys, monkeypatch):
 
 
 def test_non_326_timeout_unchanged(monkeypatch):
+    from xenon.clients.ib_client import ClientIdInUse
+
     monkeypatch.setattr("xenon.clients.ib_client.time.sleep", lambda *_a: None)
     lo, _hi = SUBPROCESS_ID_RANGE
 
@@ -134,7 +139,71 @@ def test_error_handler_unsubscribed_after_every_attempt(monkeypatch):
     assert len(fake.errorEvent) == base
 
     # also released on the failure path
+    from xenon.clients.ib_client import ClientIdInUse
+
     fake2 = FakeIB(busy_ids={9})
     with pytest.raises(ClientIdInUse):
         make_client(fake2).connect(client_id=9, timeout=1)
     assert len(fake2.errorEvent) == 0
+
+    # ... and after a non-326 timeout
+    fake3 = FakeIB(timeout_ids={9})
+    with pytest.raises(IBConnectionError):
+        make_client(fake3).connect(client_id=9, timeout=1)
+    assert len(fake3.errorEvent) == 0
+
+
+class _BrokenSubscribeEvent:
+    """errorEvent whose ``+=`` raises, so capture entry fails before any connect."""
+
+    def __init__(self, fail_times):
+        self.fail_times = fail_times
+        self.adds = 0
+
+    def __iadd__(self, handler):
+        self.adds += 1
+        if self.adds <= self.fail_times:
+            raise RuntimeError("subscribe failed")
+        return self
+
+    def __isub__(self, handler):
+        return self
+
+
+def test_capture_entry_failure_keeps_original_error_and_no_stale_326(monkeypatch):
+    monkeypatch.setattr("xenon.clients.ib_client.time.sleep", lambda *_a: None)
+
+    # explicit: entry fails on every attempt -> wrapped IBConnectionError, no UnboundLocalError
+    fake = FakeIB()
+    fake.errorEvent = _BrokenSubscribeEvent(fail_times=99)
+    with pytest.raises(IBConnectionError, match="subscribe failed") as ei:
+        make_client(fake).connect(client_id=9, timeout=1, max_retries=2)
+    assert not isinstance(ei.value, ClientIdInUseType())
+    assert fake.attempted == []  # never reached ib.connect
+
+    # explicit: 326 on attempt 1 is not carried into a later attempt's classification
+    # (first attempt busy -> typed error immediately; a fresh client/attempt starts clean)
+    lo, _hi = SUBPROCESS_ID_RANGE
+    monkeypatch.setattr("random.randint", lambda a, b: a)
+    fake = FakeIB(busy_ids={lo})
+    client = make_client(fake)
+    client.connect(client_id="auto", timeout=1)  # rotates past lo
+    fake.busy_ids = set()
+    fake.timeout_ids = {9}
+    with pytest.raises(IBConnectionError) as ei:
+        client.connect(client_id=9, timeout=1, max_retries=2)
+    assert not isinstance(ei.value, ClientIdInUseType())
+    assert fake.attempted[-2:] == [9, 9]
+
+    # auto: entry fails on the first id, works afterwards; failure is non-conflict -> original error
+    fake = FakeIB()
+    fake.errorEvent = _BrokenSubscribeEvent(fail_times=1)
+    with pytest.raises(IBConnectionError, match="subscribe failed"):
+        make_client(fake).connect(client_id="auto", timeout=1)
+    assert fake.attempted == []
+
+
+def ClientIdInUseType():
+    from xenon.clients.ib_client import ClientIdInUse
+
+    return ClientIdInUse
