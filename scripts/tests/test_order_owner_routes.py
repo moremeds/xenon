@@ -7,6 +7,7 @@ Gate 4 + Postgres; only the broker boundary is faked."""
 
 from __future__ import annotations
 
+import json
 import threading
 from types import SimpleNamespace
 
@@ -388,6 +389,125 @@ def test_place_deadline_after_start_is_unknown_and_worker_finishes(
         time.sleep(0.05)
     row = _attempt("t4-late")
     assert (row["state"], row["perm_id"], row["placing_client_id"]) == ("WORKING", "610001", OWNER_ID)
+
+
+# -- T4-fix: worker settlement after the request deadline (Astra T4 1-2) ------
+
+
+def _wait_state(attempt, until, tries=60):
+    import time
+
+    for _ in range(tries):
+        if _attempt(attempt)["state"] in until:
+            break
+        time.sleep(0.05)
+    return _attempt(attempt)
+
+
+def _late_uncertain_core(monkeypatch, release, ids, on_late=None):
+    """Sends, outlives the request deadline, then reports an uncertain
+    result carrying the ids it learned (stand-in clientId 26)."""
+
+    def core(orders_client, params):
+        orders_client.place_order(None, None)
+        release.wait(5)
+        if on_late is not None:
+            on_late(params["submission_id"])
+        return {"status": "uncertain", "outcome": "uncertain", "message": "ack lost", "clientId": 26, **ids}
+
+    install_cores(monkeypatch, place=core)
+    monkeypatch.setattr(server_mod, "_PLACE_TIMEOUT_S", 0.3)
+
+
+def test_place_late_refusal_after_deadline_is_failed_and_released(
+    client, fresh_quote, no_spawn_no_connect, _order_owner, monkeypatch
+):
+    """Deadline (row UNKNOWN), then the started worker refuses before any
+    send: one settlement, zero sends, final FAILED (reservation released)."""
+    release = threading.Event()
+
+    def held_probe():
+        release.wait(5)
+        _order_owner.client.readiness = "unknown"
+
+    _order_owner.client.on_probe = held_probe
+    settles = []
+    real_finish = server_mod._finish_place
+    monkeypatch.setattr(server_mod, "_finish_place", lambda sid, reply: settles.append(reply) or real_finish(sid, reply))
+    monkeypatch.setattr(server_mod, "_PLACE_TIMEOUT_S", 0.3)
+    resp = _bag(client, "t4f-refuse")
+    assert (resp.status_code, resp.json()["reason_code"]) == (502, "PLACE_OUTCOME_UNKNOWN"), resp.text
+    assert _attempt("t4f-refuse")["state"] == "UNKNOWN"
+    release.set()
+    row = _wait_state("t4f-refuse", {"FAILED"})
+    assert (row["state"], row["reason_code"]) == ("FAILED", "IB_BROKER_DISCONNECTED")
+    assert _order_owner.client.sent == []
+    assert len(settles) == 1 and settles[0]["amend_outcome"] == "not_sent"
+
+
+def test_place_late_uncertain_after_deadline_keeps_ids_and_owner_id(
+    client, fresh_quote, no_spawn_no_connect, _order_owner, monkeypatch
+):
+    """Deadline writes an empty UNKNOWN; the worker's uncertain result then
+    enriches it with orderId / permId / the owner clientId and its audit row."""
+    release = threading.Event()
+    _late_uncertain_core(monkeypatch, release, {"orderId": 62, "permId": 620001})
+    resp = _bag(client, "t4f-ids")
+    assert (resp.status_code, resp.json()["reason_code"]) == (502, "PLACE_OUTCOME_UNKNOWN"), resp.text
+    assert _attempt("t4f-ids")["perm_id"] is None
+    release.set()
+    for _ in range(60):
+        row = _attempt("t4f-ids")
+        if row["perm_id"]:
+            break
+        release.wait(0.05)
+    assert (row["state"], row["ib_order_id"], row["perm_id"], row["placing_client_id"]) == (
+        "UNKNOWN",
+        "62",
+        "620001",
+        OWNER_ID,
+    )
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        kinds = conn.execute(
+            text("SELECT kind FROM xenon.order_events WHERE submission_id = :s"), {"s": row["submission_id"]}
+        ).scalars().all()
+    engine.dispose()
+    assert "IB_NOTICE" in kinds
+
+
+def test_place_late_uncertain_never_overrides_the_poller(
+    client, fresh_quote, no_spawn_no_connect, _order_owner, monkeypatch
+):
+    """Deadline, then the poller binds and fills the row from broker
+    evidence, then the worker's uncertain result lands: FILLED and the
+    poller's ids / fill data stay."""
+    from scripts.tests.test_gate4_route import _bind_and_fill_like_poller
+
+    release, done = threading.Event(), threading.Event()
+
+    def poller_first(sid):
+        _bind_and_fill_like_poller(["", json.dumps({"submission_id": sid})])
+
+    _late_uncertain_core(monkeypatch, release, {"orderId": 63, "permId": 630001}, on_late=poller_first)
+    real_finish = server_mod._finish_place
+    monkeypatch.setattr(server_mod, "_finish_place", lambda sid, reply: (real_finish(sid, reply), done.set())[0])
+    resp = _bag(client, "t4f-poller")
+    assert (resp.status_code, resp.json()["reason_code"]) == (502, "PLACE_OUTCOME_UNKNOWN"), resp.text
+    release.set()
+    assert done.wait(5)
+    row = _attempt("t4f-poller")
+    assert (row["state"], row["filled_qty"], row["perm_id"], row["ib_order_id"]) == ("FILLED", 1, "777100", "4300")
+
+
+def test_proven_unsent_never_reports_failed_when_the_row_moved_on(monkeypatch):
+    """0 rows updated (stronger evidence owns the row): no terminal 503."""
+    calls = []
+    monkeypatch.setattr(server_mod.orders_store, "mark_terminal", lambda **kw: calls.append(kw) or 0)
+    resp = server_mod._finish_place("sub-moved", server_mod._owner_unavailable_reply())
+    assert calls[0]["expected_states"] == ("PENDING", "UNKNOWN")
+    assert resp.status_code == 502
+    assert json.loads(resp.body)["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
 
 
 def test_place_abandoned_while_queued_is_failed_with_zero_sends(

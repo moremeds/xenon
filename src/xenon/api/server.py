@@ -2726,10 +2726,10 @@ def _finish_place(submission_id: str, reply: dict) -> Any:
     orders worker for a started job, so it never depends on the request.
 
     - owner refusal / abandoned before start (``amend_outcome: not_sent``)
-      → FAILED, 503 with IB_CONNECTION / IB_BROKER_DISCONNECTED /
-      ORDERS_HALTED: nothing was sent;
+      → FAILED (from PENDING or UNKNOWN), 503 with IB_CONNECTION /
+      IB_BROKER_DISCONNECTED / ORDERS_HALTED: nothing was sent;
     - possibly sent, not confirmed (``amend_outcome: unconfirmed``) →
-      UNKNOWN (PENDING only), uncertain 502;
+      UNKNOWN with the ids the core learned (PENDING or UNKNOWN), 502;
     - otherwise the core's result through the verdict. Final writes accept
       PENDING or UNKNOWN (the request may have marked UNKNOWN at its
       deadline) and never overwrite a state the poller set from broker
@@ -2739,27 +2739,43 @@ def _finish_place(submission_id: str, reply: dict) -> Any:
     outcome = reply.get("amend_outcome")
     if outcome == "not_sent" and reply.get("classification") in _PLACE_NOT_SENT_REASONS:
         reason = _PLACE_NOT_SENT_REASONS[reply["classification"]].value
-        orders_store.mark_terminal(
+        # PENDING or UNKNOWN: the request may have marked UNKNOWN at its
+        # deadline before the worker proved nothing was sent. Never a state
+        # the poller set from broker evidence.
+        applied = orders_store.mark_terminal(
             submission_id=submission_id,
             state="FAILED",
             reason_code=reason,
             filled_qty=0,
             avg_fill_price=None,
-            expected_states=("PENDING",),
+            expected_states=_PLACE_FINAL_FROM,
         )
+        if not applied:
+            # Stronger evidence won the row: do not claim FAILED.
+            logger.warning(
+                "place: proven unsent (%s) but submission %s is no longer PENDING/UNKNOWN; row left as is",
+                reason,
+                submission_id,
+            )
+            return JSONResponse(status_code=502, content={**_PLACE_UNKNOWN_BODY, "submission_id": submission_id})
         return JSONResponse(status_code=503, content={"detail": reply.get("message"), "reason_code": reason})
     if outcome == "unconfirmed":
         logger.warning("place: possibly sent, unconfirmed: submission=%s (%s)", submission_id, reply.get("message"))
-        return _place_outcome_unknown(submission_id, {**reply, "clientId": owner_id})
+        return _place_outcome_unknown(submission_id, {**reply, "clientId": owner_id}, from_states=_PLACE_FINAL_FROM)
     return _place_result(submission_id, reply, owner_id)
+
+
+# States a worker's final place write may leave: PENDING, or UNKNOWN set by
+# the request at its deadline. Never a broker-observed or terminal state.
+_PLACE_FINAL_FROM = ("PENDING", "UNKNOWN")
 
 
 def _place_result(submission_id: str, data: dict, owner_id: int) -> Any:
     """Verdict + persistence for a place-core result."""
-    final_states = ("PENDING", "UNKNOWN")
+    final_states = _PLACE_FINAL_FROM
     verdict = _place_verdict(data)
     if verdict == "unknown":
-        return _place_outcome_unknown(submission_id, {**data, "clientId": owner_id})
+        return _place_outcome_unknown(submission_id, {**data, "clientId": owner_id}, from_states=final_states)
     if verdict == "rejected":
         # B6 — write a reason_code the UI toast map can resolve. Most IB
         # rejections collapse to IB_REJECT, but tick-rule rejections
@@ -2876,7 +2892,9 @@ _PLACE_UNKNOWN_BODY = {
 }
 
 
-def _place_outcome_unknown(submission_id: str, data: dict) -> JSONResponse:
+def _place_outcome_unknown(
+    submission_id: str, data: dict, from_states: tuple[str, ...] = ("PENDING",)
+) -> JSONResponse:
     """IB may or may not hold the order. Never leave the row PENDING (it
     would age into a rehydrate decision) and never call it rejected. UNKNOWN
     is the uncertain state /health counts; it keeps the Gate-4 reservation.
@@ -2884,7 +2902,12 @@ def _place_outcome_unknown(submission_id: str, data: dict) -> JSONResponse:
     (PENDING → UNKNOWN only: a row the poller already bound or filled from
     broker evidence is left as is). The activity poller resolves the row by
     orderRef "xo:<submission_id>". A DB failure still returns the uncertain
-    502 (the row then stays PENDING, which keeps the reservation too)."""
+    502 (the row then stays PENDING, which keeps the reservation too).
+
+    The request's deadline write is PENDING-only and carries no ids. The
+    worker's late uncertain write passes ``from_states`` PENDING/UNKNOWN: it
+    enriches the row with the ids it learned and the owner id (non-empty
+    values only, so neither write ever clears the other's evidence)."""
     try:
         applied = orders_store.mark_place_unknown(
             submission_id=submission_id,
@@ -2892,7 +2915,7 @@ def _place_outcome_unknown(submission_id: str, data: dict) -> JSONResponse:
             perm_id=str(data.get("permId") or "") or None,
             placing_client_id=int(data["clientId"]) if data.get("clientId") is not None else None,
             reason_code=ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
-            expected_states=("PENDING",),
+            expected_states=from_states,
         )
         if applied and (data.get("orderId") or data.get("permId") or data.get("code")):
             _record_place_event(

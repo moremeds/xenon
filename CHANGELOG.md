@@ -21,6 +21,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 ### Fixed
 
 - PR-10 review fixes (Astra T1–T3). The broker round trip no longer runs inside the pre-send hook: ib_async's `openOrder` handler rewrote the cached `trade.order` (price / quantity) after modify had changed it, and the blocking round trip could push a modify past its `send_by`. `IBClient.confirm_broker_ready` no longer returns a stale READY after a timed-out or failed round trip. A cancel that was sent but never acknowledged is now uncertain (`amend_outcome: unconfirmed`; a replacement marks its row UNKNOWN and places nothing) instead of an IB reject; only an explicit IB reject code keeps a sent action terminal. The clientId base ↔ database startup check refuses a `DATABASE_URL` whose query can re-route the connection (asyncpg `?database=`, libpq `?dbname=`, `host`, ...), an unparseable URL or one without a database.
+- PR-10 review fixes (Astra T4). A place job that started before the request deadline and finished after it now completes the row: a proven pre-send refusal moves the request's UNKNOWN row to FAILED (releasing the Gate 4 reservation), and an uncertain result stores the orderId / permId / owner clientId it learned on the UNKNOWN row. Neither write touches a row the poller already moved from broker evidence (WORKING / FILLED / ...), and a FAILED write that finds the row moved on is not reported as FAILED.
 
 ### Removed
 
