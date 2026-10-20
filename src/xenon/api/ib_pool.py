@@ -88,7 +88,9 @@ def check_client_id_base_mapping(database_url: Optional[str], *, test_session: b
     try:
         dbname = _database_name(database_url)
     except ValueError as exc:
-        raise RuntimeError(f"{exc}: cannot map XENON_IB_CLIENT_ID_BASE={base} to a database — refusing to start") from exc
+        raise RuntimeError(
+            f"{exc}: cannot map XENON_IB_CLIENT_ID_BASE={base} to a database — refusing to start"
+        ) from exc
     if dbname in PROD_DATABASE_NAMES:
         if base != 0:
             raise RuntimeError(
@@ -243,9 +245,7 @@ class IBPool:
                     # Pin connect to the role's executor so the event loop
                     # ib_async creates lands on the worker that every later
                     # run_sync call will reuse.
-                    await loop.run_in_executor(
-                        self._role_executors[role], self._connect_owned, role, client_id, 10
-                    )
+                    await loop.run_in_executor(self._role_executors[role], self._connect_owned, role, client_id, 10)
                     status[role] = True
                     self.connect_errors.pop(role, None)
                     logger.info("IB pool: %s connected (client_id=%d)", role, client_id)
@@ -280,9 +280,7 @@ class IBPool:
             logger.warning("IB pool: %s late connect close failed: %s", role, exc)
         raise ConnectionError(f"IB pool: {role} connected during shutdown; closed it")
 
-    async def disconnect_all(
-        self, roles: Optional[Iterable[str]] = None, timeout: Optional[float] = None
-    ) -> None:
+    async def disconnect_all(self, roles: Optional[Iterable[str]] = None, timeout: Optional[float] = None) -> None:
         """Disconnect pool connections (default: all). Never raises.
 
         Each disconnect is queued on the role's own worker; roles run in
@@ -309,7 +307,11 @@ class IBPool:
         # _connect_owned), then wait for that connect to leave the lifecycle
         # lock — bounded by ``timeout``; past it, close anyway: the mark
         # stays set, so a late connect still closes itself.
+        # One deadline covers the lock wait AND the disconnect wait, so the
+        # shutdown budget (server._SHUTDOWN_IB_DISCONNECT_S) holds.
         self._closing = True
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + timeout
         locked = False
         try:
             await asyncio.wait_for(self._lifecycle_lock.acquire(), timeout)
@@ -320,7 +322,8 @@ class IBPool:
             with self._close_lock:
                 self._closing = True
                 targets = list(self._clients.items())
-            await self._disconnect_targets(targets, timeout)
+            remaining = None if deadline is None else max(0.0, deadline - loop.time())
+            await self._disconnect_targets(targets, remaining)
             for executor in self._role_executors.values():
                 executor.shutdown(wait=False)  # queued disconnects still run
         finally:
