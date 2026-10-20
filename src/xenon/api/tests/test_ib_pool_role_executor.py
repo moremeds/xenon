@@ -256,8 +256,13 @@ def test_acquire_callers_dispatch_via_run_sync_not_to_thread():
         (historical_mod.qualify_contracts, "data"),
         (historical_mod.head_timestamp, "data"),
         (historical_mod.historical_bars, "data"),
-        (wizard_mod.wizard_protect, "orders"),
     ]
+    # PR-10: wizard protect runs on the orders worker through the order
+    # owner (owner.run → pool.run_sync("orders")), never pool.acquire —
+    # acquire could reconnect orders from a request path.
+    protect_src = inspect.getsource(wizard_mod.wizard_protect)
+    assert "owner.run(" in protect_src
+    assert ".acquire(" not in protect_src
     for fn, role in targets:
         source = inspect.getsource(fn)
         assert "run_sync" in source, (

@@ -131,7 +131,7 @@ def test_api_restart_amend_expires_only_after_cli_bound():
     from xenon.api import server
     from xenon.execution import ib_order_manage
 
-    assert server._MODIFY_SUBPROCESS_TIMEOUT_S < ib_order_manage.MODIFY_WALL_CLOCK_S
+    assert server._ORDER_ACTION_TIMEOUT_S < ib_order_manage.MODIFY_WALL_CLOCK_S
     _seed_snapshot(_snapshot_payload([_stock("SPY", 300)]))
     sub_id = _working_with_legs("r4-restart", qty=1)
     _set_perm(sub_id, "990203")

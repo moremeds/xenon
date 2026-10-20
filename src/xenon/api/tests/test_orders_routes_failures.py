@@ -25,6 +25,7 @@ from sqlalchemy import create_engine, text
 
 from xenon.api import server as server_mod  # noqa: E402
 from xenon.api.subprocess import ScriptResult  # noqa: E402
+from xenon.clients.ib_client import pool_client_id  # noqa: E402
 from xenon.execution import orders_store  # noqa: E402
 
 
@@ -33,6 +34,16 @@ def _force_test_mode_off(monkeypatch):
     # Env-var based — _is_test_mode() re-reads on every call.
     monkeypatch.setenv("XENON_API_TEST_MODE", "0")
     yield
+
+
+@pytest.fixture(autouse=True)
+def _order_owner(monkeypatch):
+    # PR-10: cancel/modify run through the order owner; its cores answer via
+    # the patched runner (scripts/tests/order_owner_fakes.py). Nothing spawns.
+    from scripts.tests.order_owner_fakes import install_runner_cores
+
+    owner, pool = install_runner_cores(monkeypatch)
+    return pool
 
 
 @pytest.fixture
@@ -94,8 +105,10 @@ def test_cancel_returns_409_on_ownership(client, tmp_db, monkeypatch):
     resp = client.post("/orders/cancel", json={"orderId": 42, "permId": 0})
     assert resp.status_code == 409
     body = resp.json()["detail"]
-    assert body["reason_code"] == "OWNERSHIP"
+    # PR-10: the owner's fresh snapshot found another clientId's order.
+    assert resp.json()["reason_code"] == body["reason_code"] == "ORDER_NOT_OWNED"
     assert body["classification"] == "ownership"
+    assert "TWS / IBKR Mobile" in body["message"]
 
 
 def test_cancel_returns_4xx_on_ib_reject_preserves_upstream(client, tmp_db, monkeypatch):
@@ -617,9 +630,10 @@ def _seed_permid_submission_with_client_id(perm_id: str = "42", placing_client_i
 
 
 def test_cancel_forwards_identity_args_to_subprocess(client, tmp_db, monkeypatch):
-    """The subprocess gets the asserted identity tuple: --account from the
-    resolved scope, --client-id from the row's placing_client_id."""
-    _seed_permid_submission_with_client_id(perm_id="42", placing_client_id=26)
+    """The owner core gets the asserted identity tuple: account from the
+    resolved scope, client_id from the row's placing_client_id (the orders
+    connection's id — PR-10 positive routing)."""
+    _seed_permid_submission_with_client_id(perm_id="42", placing_client_id=pool_client_id("orders"))
     captured = {}
 
     async def fake_runner(entry, args, timeout=30):
@@ -635,11 +649,11 @@ def test_cancel_forwards_identity_args_to_subprocess(client, tmp_db, monkeypatch
     assert "--account" in args
     assert args[args.index("--account") + 1] == "DU0000000"
     assert "--client-id" in args
-    assert args[args.index("--client-id") + 1] == "26"
+    assert args[args.index("--client-id") + 1] == str(pool_client_id("orders"))
 
 
 def test_modify_forwards_identity_args_to_subprocess(client, tmp_db, monkeypatch):
-    _seed_permid_submission_with_client_id(perm_id="42", placing_client_id=26)
+    _seed_permid_submission_with_client_id(perm_id="42", placing_client_id=pool_client_id("orders"))
     captured = {}
 
     async def fake_runner(entry, args, timeout=30):
@@ -656,7 +670,7 @@ def test_modify_forwards_identity_args_to_subprocess(client, tmp_db, monkeypatch
 
     args = captured["args"]
     assert args[args.index("--account") + 1] == "DU0000000"
-    assert args[args.index("--client-id") + 1] == "26"
+    assert args[args.index("--client-id") + 1] == str(pool_client_id("orders"))
 
 
 def test_cancel_omits_client_id_when_no_submission_row(client, tmp_db, monkeypatch):
@@ -751,7 +765,7 @@ def _seed_dual_client_submissions(ib_order_id: str = "10") -> None:
         with engine.begin() as con:
             for sid, perm, cid in (
                 ("sub-dual-a", "42", 26),
-                ("sub-dual-b", "43", 27),
+                ("sub-dual-b", "43", pool_client_id("orders")),
             ):
                 con.execute(
                     text(
@@ -779,7 +793,8 @@ def _seed_dual_client_submissions(ib_order_id: str = "10") -> None:
 
 def test_cancel_permid_resolves_its_own_owner_with_duplicate_order_ids(client, tmp_db, monkeypatch):
     """Two scoped rows share ib_order_id=10 — a permId request must resolve
-    ITS row (permId 43 → client 27), never the LIMIT-1 orderId match."""
+    ITS row (permId 43 → the orders connection), never the LIMIT-1 orderId
+    match (client 26, which would be ORDER_NOT_OWNED)."""
     _seed_dual_client_submissions()
     captured = {}
 
@@ -793,7 +808,7 @@ def test_cancel_permid_resolves_its_own_owner_with_duplicate_order_ids(client, t
     assert resp.status_code == 200
     args = captured["args"]
     assert "--client-id" in args
-    assert args[args.index("--client-id") + 1] == "27"
+    assert args[args.index("--client-id") + 1] == str(pool_client_id("orders"))
 
 
 def test_cancel_orderid_only_duplicate_rows_is_refused_before_the_cli(client, tmp_db, monkeypatch):
@@ -834,7 +849,7 @@ def test_cancel_permid_row_with_mismatched_order_id_sends_no_client_id(client, t
 
 
 def test_modify_permid_resolves_its_own_owner_with_duplicate_order_ids(client, tmp_db, monkeypatch):
-    """Same rule on modify: permId 43 resolves row sub-dual-b (client 27)
+    """Same rule on modify: permId 43 resolves row sub-dual-b (orders client)
     past the sequence gate, and that owner — not the orderId match — is
     forwarded."""
     _seed_dual_client_submissions()
@@ -852,7 +867,7 @@ def test_modify_permid_resolves_its_own_owner_with_duplicate_order_ids(client, t
     )
     assert resp.status_code == 200
     args = captured["args"]
-    assert args[args.index("--client-id") + 1] == "27"
+    assert args[args.index("--client-id") + 1] == str(pool_client_id("orders"))
 
 
 def test_dev_probe_not_in_auth_exempt_paths():

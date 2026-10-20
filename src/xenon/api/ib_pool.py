@@ -4,6 +4,9 @@ Maintains long-lived IBClient connections keyed by role (sync, orders, data).
 Each role maps to ``XENON_IB_CLIENT_ID_BASE`` + its ``POOL_ROLES`` offset; only
 this module opens those ids (``IBClient.connect(pool_role=...)``).
 asyncio.Lock per role ensures serialized access (IB socket is not concurrent-safe).
+
+The ``orders`` role is never reconnected from a request path: only the
+order owner's supervisor (``xenon.api.order_owner``) replaces it (A2).
 """
 
 from __future__ import annotations
@@ -12,10 +15,8 @@ import asyncio
 import functools
 import logging
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
-from typing import Any, Callable, Dict, Iterator, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
 
 logger = logging.getLogger("xenon.ib_pool")
 
@@ -29,57 +30,8 @@ from xenon.clients.ib_client import (
     pool_client_id,
 )
 
-# ---------------------------------------------------------------------------
-# Owner-clientId registry (F5)
-#
-# Serializes short-lived IB connections that share a clientId slot — notably the
-# naked-short audit (clientId 25) and cancel subprocess (20-49 range). Two
-# concurrent connects on the same clientId would collide at the IB Gateway.
-# This registry lets a caller claim a clientId slot in-process before
-# attempting a connect, and blocks other callers from racing the same slot.
-# ---------------------------------------------------------------------------
-
-_busy_owners: set[int] = set()
-_busy_owners_lock = threading.RLock()
-
-
-class ClientIdBusy(Exception):
-    """Raised when acquire_owner cannot claim the requested clientId before the deadline."""
-
-    def __init__(self, client_id: int, message: Optional[str] = None) -> None:
-        self.client_id = client_id
-        super().__init__(message or f"clientId {client_id} is busy")
-
-
-@contextmanager
-def acquire_owner(client_id: int, timeout_ms: int = 2000) -> Iterator[None]:
-    """Claim `client_id` for the duration of the `with` block.
-
-    Polls the module-level registry every 50ms until either:
-      - the slot is free (claimed, yield)
-      - the deadline expires (raise ClientIdBusy)
-
-    Thread-safe via an RLock; nested claims on *different* ids from the same
-    thread are allowed. Nested claims on the *same* id will deadlock-then-raise
-    because the slot is already held.
-    """
-    deadline = time.monotonic() + (timeout_ms / 1000.0)
-    poll_interval = 0.05  # 50ms
-    while True:
-        with _busy_owners_lock:
-            if client_id not in _busy_owners:
-                _busy_owners.add(client_id)
-                break
-        if time.monotonic() >= deadline:
-            raise ClientIdBusy(client_id)
-        time.sleep(poll_interval)
-
-    try:
-        yield
-    finally:
-        with _busy_owners_lock:
-            _busy_owners.discard(client_id)
-
+# The role that owns every order action (PR-10).
+ORDERS_ROLE = "orders"
 
 # Database names that identify the production stack. Base 0 (the prod clientId
 # block) belongs to the prod DB only; every other DB must use another base.
@@ -227,8 +179,8 @@ class IBPool:
                     thread_name_prefix=f"ib_pool_{role}",
                 )
 
-    async def connect_all(self) -> Dict[str, bool]:
-        """Connect all pool roles. Returns status per role.
+    async def connect_all(self, roles: Optional[Iterable[str]] = None) -> Dict[str, bool]:
+        """Connect pool roles (default: all). Returns status per role.
 
         Non-blocking: if IB Gateway is down, roles start disconnected.
         IB-dependent endpoints will return 503; UW-only endpoints still work.
@@ -239,7 +191,7 @@ class IBPool:
 
         status = {}
         loop = asyncio.get_running_loop()
-        for i, role in enumerate(POOL_ROLES):
+        for i, role in enumerate(roles or POOL_ROLES):
             client_id = pool_client_id(role)
             # IB Gateway rate-limits rapid successive connections — stagger by 1s
             if i > 0:
@@ -274,10 +226,18 @@ class IBPool:
 
         return status
 
-    async def disconnect_all(self) -> None:
-        """Disconnect all pool connections + shut down role executors."""
+    async def disconnect_all(self, roles: Optional[Iterable[str]] = None) -> None:
+        """Disconnect pool connections (default: all).
+
+        With every role, the role executors shut down too (queued work is
+        cancelled). With a subset — the gateway-restart path, which leaves
+        ``orders`` to the order owner's supervisor — the executors stay up.
+        """
         loop = asyncio.get_running_loop()
+        only = set(roles) if roles is not None else None
         for role, client in list(self._clients.items()):
+            if only is not None and role not in only:
+                continue
             try:
                 await loop.run_in_executor(
                     self._role_executors[role], client.disconnect
@@ -286,7 +246,9 @@ class IBPool:
             except Exception as e:
                 logger.warning("IB pool: %s disconnect error: %s", role, e)
             self._connected[role] = False
-        self._clients.clear()
+            self._clients.pop(role, None)
+        if only is not None:
+            return
         for role, executor in self._role_executors.items():
             executor.shutdown(wait=False, cancel_futures=True)
 
@@ -324,6 +286,8 @@ class IBPool:
         """
         if role not in POOL_ROLES:
             raise ValueError(f"Unknown pool role: {role}. Valid: {list(POOL_ROLES.keys())}")
+        if role == ORDERS_ROLE:
+            raise ValueError("the orders role is reconnected only by the order owner's supervisor")
 
         if self.is_connected(role):
             return self._clients[role]
@@ -354,22 +318,37 @@ class IBPool:
         """
         return _PoolContext(self, role)
 
-    async def _reconnect(self, role: str) -> bool:
-        """Attempt to reconnect a disconnected role on its pinned worker."""
+    async def reconnect_role(self, role: str) -> None:
+        """Replace a role's connection on its pinned worker; raise on failure.
+
+        The old client (if any) is disconnected first on the same worker so
+        its socket and readiness state never outlive the replacement.
+        """
         client_id = pool_client_id(role)
         loop = asyncio.get_running_loop()
+        old = self._clients.pop(role, None)
+        self._connected[role] = False
+        if old is not None:
+            try:
+                await loop.run_in_executor(self._role_executors[role], old.disconnect)
+            except Exception as exc:  # noqa: BLE001 — a dead socket may refuse a clean close
+                logger.debug("IB pool: %s old client disconnect failed: %s", role, exc)
+        client = await loop.run_in_executor(
+            self._role_executors[role],
+            _connect_in_thread,
+            self._host,
+            self._port,
+            client_id,
+            5,
+        )
+        self._clients[role] = client
+        self._connected[role] = True
+        logger.info("IB pool: %s reconnected (client_id=%d)", role, client_id)
+
+    async def _reconnect(self, role: str) -> bool:
+        """Attempt to reconnect a disconnected role on its pinned worker."""
         try:
-            client = await loop.run_in_executor(
-                self._role_executors[role],
-                _connect_in_thread,
-                self._host,
-                self._port,
-                client_id,
-                5,
-            )
-            self._clients[role] = client
-            self._connected[role] = True
-            logger.info("IB pool: %s reconnected (client_id=%d)", role, client_id)
+            await self.reconnect_role(role)
             return True
         except Exception as e:
             self._connected[role] = False
@@ -432,8 +411,12 @@ class _PoolContext:
     async def __aenter__(self) -> IBClient:
         await self._pool._locks[self._role].acquire()
 
-        # Auto-reconnect if connection dropped
+        # Auto-reconnect if connection dropped — never for ``orders``: only
+        # the order owner's supervisor replaces that connection (A2).
         if not self._pool.is_connected(self._role):
+            if self._role == ORDERS_ROLE:
+                self._pool._locks[self._role].release()
+                raise ConnectionError(f"IB pool: {self._role} is not connected")
             reconnected = await self._pool._reconnect(self._role)
             if not reconnected:
                 self._pool._locks[self._role].release()

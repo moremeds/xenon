@@ -173,6 +173,11 @@ async def wizard_abort(session_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
+# Wizard protect waits this long for the order owner; a started protect keeps
+# running on the worker after the request answers "unconfirmed".
+_PROTECT_TIMEOUT_S = 30
+
+
 @router.post("/wizard/sessions/{session_id}/protect", dependencies=[Depends(require_writable)])
 async def wizard_protect(session_id: str, request: Request, body: ProtectRequest) -> dict[str, Any]:
     denial = ensure_order_allowed("wizard protect", request.app.state)
@@ -203,8 +208,9 @@ async def wizard_protect(session_id: str, request: Request, body: ProtectRequest
     from xenon.execution.combo_wizard.ib_adapter import ComboWizardIbAdapter
     from xenon.execution.combo_wizard.protect import attach_protection
 
-    if server_mod.ib_pool is None or not server_mod.ib_pool.is_connected("orders"):
-        raise HTTPException(status_code=503, detail="IB orders pool is not connected")
+    owner = server_mod.order_owner
+    if owner is None:
+        return server_mod._owner_unavailable()
 
     from xenon.execution.account_scope import resolve_from_app_state
 
@@ -213,12 +219,13 @@ async def wizard_protect(session_id: str, request: Request, body: ProtectRequest
     except ValueError:
         scope_account = ""  # IBClient.place_order fails closed on an empty account
 
-    async with server_mod.ib_pool.acquire("orders") as ib_client:
+    def protect(ib_client) -> dict:
+        # Runs on the orders worker. ib_client is the owner's guarded client:
+        # its place_order re-checks halt + broker readiness right before the
+        # send (A4). No request-path reconnect (A2).
         adapter = ComboWizardIbAdapter(ib_client, account=scope_account)
         try:
-            return await server_mod.ib_pool.run_sync(
-                "orders",
-                attach_protection,
+            result = attach_protection(
                 session_id,
                 ib=adapter,
                 tp_target_price=body.tp_target_price,
@@ -226,4 +233,13 @@ async def wizard_protect(session_id: str, request: Request, body: ProtectRequest
                 polarity=body.polarity,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return {"status": "error", "classification": "wizard_conflict", "message": str(exc)}
+        return {"status": "ok", "result": result}
+
+    reply = await owner.run(protect, timeout=_PROTECT_TIMEOUT_S)
+    if reply.get("status") == "ok":
+        return reply["result"]
+    if reply.get("classification") == "wizard_conflict":
+        raise HTTPException(status_code=409, detail=reply.get("message"))
+    status, reason_code, detail = server_mod._owner_error_detail(reply)
+    return server_mod.order_error(status, reason_code, detail)

@@ -152,11 +152,11 @@ describe("/api/orders/* — upstream status + detail passthrough", () => {
     expect(body.detail.applied).toBe(5);
   });
 
-  test("preserves 409 OWNERSHIP identity rejection on cancel (PR-05)", async () => {
+  test("preserves 409 ORDER_NOT_OWNED rejection on cancel (PR-05)", async () => {
     const upstreamBody = {
-      reason_code: "OWNERSHIP",
+      reason_code: "ORDER_NOT_OWNED",
       detail: {
-        reason_code: "OWNERSHIP",
+        reason_code: "ORDER_NOT_OWNED",
         classification: "ownership",
         message:
           "Order identity mismatch — refusing to act: 2 open orders share orderId=10",
@@ -164,13 +164,13 @@ describe("/api/orders/* — upstream status + detail passthrough", () => {
       },
     };
     mockFetch.mockRejectedValueOnce(
-      new XenonApiError(409, "OWNERSHIP", upstreamBody),
+      new XenonApiError(409, "ORDER_NOT_OWNED", upstreamBody),
     );
     const res = await cancelPost(cancelReq());
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body).toEqual(upstreamBody);
-    expect(body.reason_code).toBe("OWNERSHIP");
+    expect(body.reason_code).toBe("ORDER_NOT_OWNED");
   });
 
   test("local cancel validation carries ORDER_IDENTIFIER_REQUIRED", async () => {

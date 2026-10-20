@@ -1,7 +1,7 @@
 """Wizard order-mutating routes return 503 when trading mode is unverified.
 
 `/wizard/sessions/{id}/submit` and `/protect` reach IB via in-process calls
-(submit_combo → server._orders_place_from_body; protect → ib_pool.acquire +
+(submit_combo → server._orders_place_from_body; protect → order_owner.run +
 ib_adapter.place_combo_tp), which bypasses any guards on the four `/orders/*`
 routes. Both wizard routes must apply require_mode_verified directly.
 """

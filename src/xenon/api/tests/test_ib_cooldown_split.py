@@ -23,15 +23,17 @@ class _ConnectedPool:
 
     def __init__(self) -> None:
         self.reconnects = 0
+        self.roles: list = []
 
     def is_connected(self, _role: str) -> bool:
         return True
 
-    async def disconnect_all(self) -> None:
+    async def disconnect_all(self, roles=None) -> None:
         self.reconnects += 1
+        self.roles.append(roles)
 
-    async def connect_all(self) -> None:
-        pass
+    async def connect_all(self, roles=None) -> None:
+        self.roles.append(roles)
 
 
 class _RunnerProbe:
@@ -170,10 +172,12 @@ async def test_order_entry_never_retried_after_gateway_restart(monkeypatch, entr
 
     result = await server_mod._run_ib_script_with_recovery(entry, ["--json", "{}"], timeout=5)
 
-    # run_entry_point called exactly once; pool still reconnected after restart.
+    # run_entry_point called exactly once; pool still reconnected after restart
+    # — sync/data only: the orders role belongs to the order owner (A2).
     assert calls == [entry]
     assert restarts["n"] == 1
     assert pool.reconnects == 1
+    assert pool.roles == [("sync", "data"), ("sync", "data")]
     assert not result.ok
     assert result.error == (
         "IB Gateway restarted; order request NOT resent — check open orders before retrying"
