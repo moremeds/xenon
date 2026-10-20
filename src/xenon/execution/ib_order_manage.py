@@ -24,6 +24,7 @@ from xenon.clients.ib_client import (
     CLIENT_IDS,
     DEFAULT_GATEWAY_PORT,
     DEFAULT_HOST,
+    ClientIdInUse,
     ClientIdNotAllowed,
     IBClient,
     IBConnectionError,
@@ -83,7 +84,14 @@ _CLIENTID_IN_USE_RE = re.compile(r"\b326\b")
 
 
 def _is_clientid_in_use(exc: BaseException) -> bool:
-    """True iff *exc* looks like IB Error 326 (clientId already in use)."""
+    """True iff *exc* is IB Error 326 (clientId already in use).
+
+    The typed ``ClientIdInUse`` (raised by ``IBClient.connect`` from the
+    ``errorEvent`` code) wins; ib_async's own timeout carries no text, so the
+    text match is only a fallback.
+    """
+    if isinstance(exc, ClientIdInUse):
+        return True
     msg = str(exc).lower()
     if "client id is already in use" in msg:
         return True
@@ -439,9 +447,7 @@ def cancel_order(
     original_client_id = frozen["client_id"]
     if client.ib.client.clientId != original_client_id:
         _reconnect_as_owner(client, host, port, original_client_id)
-        trade = find_frozen_trade(
-            client, frozen["order_id"], frozen["perm_id"], frozen["client_id"], account=account
-        )
+        trade = find_frozen_trade(client, frozen["order_id"], frozen["perm_id"], frozen["client_id"], account=account)
         if trade is None:
             output(
                 "error",
@@ -469,9 +475,7 @@ def cancel_order(
         output(status_text, message, **extra)
 
     # Wait for refreshed open-order state to acknowledge the cancel.
-    for latest_trade, refreshed_trade in _await_order_state(
-        client, frozen, account=account, initial_trade=trade
-    ):
+    for latest_trade, refreshed_trade in _await_order_state(client, frozen, account=account, initial_trade=trade):
         if refreshed_trade is None:
             finish(
                 "ok",
@@ -605,9 +609,7 @@ def modify_order(
     original_client_id = frozen["client_id"]
     if client.ib.client.clientId != original_client_id:
         _reconnect_as_owner(client, host, port, original_client_id)
-        trade = find_frozen_trade(
-            client, frozen["order_id"], frozen["perm_id"], frozen["client_id"], account=account
-        )
+        trade = find_frozen_trade(client, frozen["order_id"], frozen["perm_id"], frozen["client_id"], account=account)
         if trade is None:
             output(
                 "error",
@@ -676,9 +678,7 @@ def modify_order(
     # Wait for refreshed IB state to reflect the requested modify.
     confirmed_trade = None
     latest_trade = trade
-    for latest_trade, refreshed_trade in _await_order_state(
-        client, frozen, account=account, initial_trade=trade
-    ):
+    for latest_trade, refreshed_trade in _await_order_state(client, frozen, account=account, initial_trade=trade):
         if modify_is_confirmed(refreshed_trade, new_price, new_quantity, outside_rth):
             confirmed_trade = refreshed_trade
             break
