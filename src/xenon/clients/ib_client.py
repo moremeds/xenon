@@ -25,8 +25,9 @@ from __future__ import annotations
 import logging
 import os
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any, Dict, Iterator, List, Optional, Set, Union
 
 from dotenv import load_dotenv
 from ib_async import IB, FlexReport
@@ -49,6 +50,27 @@ class IBError(Exception):
 
 class IBConnectionError(IBError):
     """Raised when an IB connection cannot be established or is lost."""
+
+
+# IB error code: connect refused because the clientId is already in use.
+CLIENT_ID_IN_USE_CODE = 326
+
+
+class ClientIdInUse(IBConnectionError):
+    """IB refused the connect because *client_id* is already in use (IB 326).
+
+    ib_async 2.1.0 reports 326 only through ``errorEvent`` and then raises a
+    ``TimeoutError()`` with an empty message, so the code is captured during
+    the connect attempt (``IBClient._capture_error_codes``) and surfaced here.
+    The message keeps the canonical "client id is already in use" text so
+    text-based fallbacks still match.
+    """
+
+    def __init__(self, client_id: int, detail: str = "") -> None:
+        self.client_id = client_id
+        self.code = CLIENT_ID_IN_USE_CODE
+        msg = f"IB error {CLIENT_ID_IN_USE_CODE}: client id is already in use (clientId={client_id})"
+        super().__init__(f"{msg}: {detail}" if detail else msg)
 
 
 class IBOrderError(IBError):
@@ -234,6 +256,32 @@ class IBClient:
 
     # -- connection lifecycle -----------------------------------------------
 
+    @contextmanager
+    def _capture_error_codes(self) -> Iterator[List[int]]:
+        """Collect IB ``errorEvent`` codes seen while the block runs.
+
+        The handler is removed in ``finally`` so attempts never leak
+        subscribers onto the long-lived ``IB`` object.
+        """
+        seen: List[int] = []
+
+        def _record(reqId: Any, errorCode: Any, errorString: str = "", contract: Any = None) -> None:
+            try:
+                seen.append(int(errorCode))
+            except (TypeError, ValueError):
+                pass
+
+        self._ib.errorEvent += _record
+        try:
+            yield seen
+        finally:
+            self._ib.errorEvent -= _record
+
+    @staticmethod
+    def _is_client_id_conflict(codes: List[int], exc: BaseException) -> bool:
+        """326 seen on errorEvent, or the legacy "client id is already in use" text."""
+        return CLIENT_ID_IN_USE_CODE in codes or "client id is already in use" in str(exc).lower()
+
     def connect(
         self,
         host: str = DEFAULT_HOST,
@@ -294,8 +342,10 @@ class IBClient:
         last_exc: Optional[Exception] = None
         while attempt < max_retries:
             attempt += 1
+            codes: List[int] = []
             try:
-                self._ib.connect(host, port, clientId=client_id, timeout=timeout)
+                with self._capture_error_codes() as codes:
+                    self._ib.connect(host, port, clientId=client_id, timeout=timeout)
                 self.logger.info(
                     "Connected to IB on %s:%s (clientId=%s)",
                     host,
@@ -304,6 +354,10 @@ class IBClient:
                 )
                 return
             except Exception as exc:
+                if CLIENT_ID_IN_USE_CODE in codes:
+                    # Retrying the same id cannot succeed while the incumbent
+                    # holds it; callers (ib_order_manage) own their retry loop.
+                    raise ClientIdInUse(client_id, str(exc)) from exc
                 last_exc = exc
                 self.logger.warning(
                     "Connection attempt %d/%d failed: %s",
@@ -324,7 +378,8 @@ class IBClient:
     ) -> None:
         """Try each ID in SUBPROCESS_ID_RANGE starting from a random offset.
 
-        On 'client id is already in use' errors, rotates to the next ID.
+        On IB 326 (seen via ``errorEvent``) or the legacy 'client id is already in
+        use' text, rotates to the next ID.
         Non-conflict errors abort immediately.
         """
         import random
@@ -335,8 +390,10 @@ class IBClient:
 
         for i in range(range_size):
             cid = lo + (start - lo + i) % range_size
+            codes: List[int] = []
             try:
-                self._ib.connect(host, port, clientId=cid, timeout=timeout)
+                with self._capture_error_codes() as codes:
+                    self._ib.connect(host, port, clientId=cid, timeout=timeout)
                 self._last_host = host
                 self._last_port = port
                 self._last_client_id = cid
@@ -349,7 +406,7 @@ class IBClient:
                 )
                 return
             except Exception as exc:
-                if "client id is already in use" in str(exc).lower():
+                if self._is_client_id_conflict(codes, exc):
                     self.logger.debug(
                         "Client ID %d in use, trying next",
                         cid,
