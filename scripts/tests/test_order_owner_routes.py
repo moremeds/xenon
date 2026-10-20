@@ -450,17 +450,17 @@ def test_place_late_uncertain_after_deadline_keeps_ids_and_owner_id(
 ):
     """Deadline writes an empty UNKNOWN; the worker's uncertain result then
     enriches it with orderId / permId / the owner clientId and its audit row."""
-    release = threading.Event()
+    release, done = threading.Event(), threading.Event()
     _late_uncertain_core(monkeypatch, release, {"orderId": 62, "permId": 620001})
+    real_finish = server_mod._finish_place
+    # Settlement done = the UNKNOWN write AND its IB_NOTICE event row.
+    monkeypatch.setattr(server_mod, "_finish_place", lambda sid, reply: (real_finish(sid, reply), done.set())[0])
     resp = _bag(client, "t4f-ids")
     assert (resp.status_code, resp.json()["reason_code"]) == (502, "PLACE_OUTCOME_UNKNOWN"), resp.text
     assert _attempt("t4f-ids")["perm_id"] is None
     release.set()
-    for _ in range(60):
-        row = _attempt("t4f-ids")
-        if row["perm_id"]:
-            break
-        release.wait(0.05)
+    assert done.wait(5)
+    row = _attempt("t4f-ids")
     assert (row["state"], row["ib_order_id"], row["perm_id"], row["placing_client_id"]) == (
         "UNKNOWN",
         "62",
