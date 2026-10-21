@@ -1630,8 +1630,9 @@ def main(argv=None):
         print("✓ Disconnected from IB")
 
     if audit_summary is not None:
-        # Must be the LAST stdout output: run_entry_point parses from the
-        # first "{" to the end. Unparseable output → no audit → no cancel.
+        # Must be the LAST stdout line, one JSON object: run_entry_point
+        # parses from the first "{" and, when earlier noise holds a "{",
+        # falls back to the last line. Unparseable → no audit → no cancel.
         print(json.dumps({"naked_short_audit": audit_summary}, default=str), flush=True)
 
 
