@@ -104,7 +104,7 @@ describe("GET /api/ticker/ratings", () => {
     expect(body.ratings).toBeUndefined();
   });
 
-  it("returns 502 with reason_code when FastAPI reports an upstream failure", async () => {
+  it("maps a FastAPI upstream failure to 502 with a stable body", async () => {
     const { GET, XenonApiError } = await loadRoute();
     mockXenonFetch.mockRejectedValue(
       new XenonApiError(502, "Unusual Whales analyst ratings unavailable", {
@@ -114,8 +114,23 @@ describe("GET /api/ticker/ratings", () => {
     const res = await GET(req("?ticker=MSFT"));
     expect(res.status).toBe(502);
     expect(await res.json()).toEqual({
-      error: "Unusual Whales analyst ratings unavailable",
+      error: "Ratings unavailable",
       reason_code: "UW_UPSTREAM_ERROR",
+    });
+  });
+
+  it("maps a FastAPI deadline (504 UW_TIMEOUT) to 504 RATINGS_TIMEOUT", async () => {
+    const { GET, XenonApiError } = await loadRoute();
+    mockXenonFetch.mockRejectedValue(
+      new XenonApiError(504, "Unusual Whales analyst ratings timed out", {
+        reason_code: "UW_TIMEOUT",
+      }),
+    );
+    const res = await GET(req("?ticker=MSFT"));
+    expect(res.status).toBe(504);
+    expect(await res.json()).toEqual({
+      error: "Ratings request timed out",
+      reason_code: "RATINGS_TIMEOUT",
     });
   });
 
@@ -128,14 +143,62 @@ describe("GET /api/ticker/ratings", () => {
     );
     const res = await GET(req("?ticker=bad%20one"));
     expect(res.status).toBe(400);
-    expect((await res.json()).reason_code).toBe("INVALID_TICKER");
+    expect(await res.json()).toEqual({
+      error: "Invalid ticker",
+      reason_code: "INVALID_TICKER",
+    });
   });
 
-  it("returns 502 when FastAPI is unreachable", async () => {
+  it.each([
+    ["TimeoutError"],
+    ["AbortError"],
+  ])("proxy abort (%s) returns 504 RATINGS_TIMEOUT with no exception text", async (name) => {
     const { GET } = await loadRoute();
-    mockXenonFetch.mockRejectedValue(new Error("fetch failed"));
+    mockXenonFetch.mockRejectedValue(
+      new DOMException("The operation was aborted due to timeout", name),
+    );
+    const res = await GET(req("?ticker=MSFT"));
+    expect(res.status).toBe(504);
+    const body = await res.json();
+    expect(body).toEqual({
+      error: "Ratings request timed out",
+      reason_code: "RATINGS_TIMEOUT",
+    });
+  });
+
+  it("uses a proxy timeout above the FastAPI 12 s deadline", async () => {
+    const { GET } = await loadRoute();
+    mockXenonFetch.mockResolvedValue({
+      ticker: "MSFT",
+      source: "unusual_whales",
+      as_of: "2026-10-21T12:00:00Z",
+      ratings: [],
+    });
+    await GET(req("?ticker=MSFT"));
+    expect(mockXenonFetch.mock.calls[0][1].timeout).toBe(20_000);
+  });
+
+  it.each([
+    ["unreachable", new Error("fetch failed: ECONNREFUSED 127.0.0.1:8321")],
+    ["non-Error rejection", "boom"],
+  ])("%s returns 502 RATINGS_UNAVAILABLE without raw exception text", async (_n, err) => {
+    const { GET } = await loadRoute();
+    mockXenonFetch.mockRejectedValue(err);
     const res = await GET(req("?ticker=MSFT"));
     expect(res.status).toBe(502);
-    expect((await res.json()).error).toBe("fetch failed");
+    const text = await res.text();
+    expect(JSON.parse(text)).toEqual({
+      error: "Ratings unavailable",
+      reason_code: "RATINGS_UNAVAILABLE",
+    });
+    expect(text).not.toContain("ECONNREFUSED");
+  });
+
+  it("malformed FastAPI body returns 502 RATINGS_UNAVAILABLE", async () => {
+    const { GET } = await loadRoute();
+    mockXenonFetch.mockResolvedValue({ ticker: "MSFT", ratings: [null] });
+    const res = await GET(req("?ticker=MSFT"));
+    expect(res.status).toBe(502);
+    expect((await res.json()).reason_code).toBe("RATINGS_UNAVAILABLE");
   });
 });

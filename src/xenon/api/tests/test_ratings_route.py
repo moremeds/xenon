@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from xenon.api.routes import ratings
-from xenon.clients.uw_client import UWAPIError, UWAuthError
+from xenon.clients.uw_client import UWAPIError, UWAuthError, UWClient
 
 FIXTURE = Path(__file__).parent / "fixtures" / "uw_analysts_msft_2026-10-21.json"
 
@@ -156,3 +156,114 @@ def test_router_registered_in_server():
 
     paths = {getattr(r, "path", None) for r in server.app.routes}
     assert "/ticker/ratings" in paths
+
+
+@pytest.mark.parametrize(
+    "bad_rows",
+    [
+        [None],
+        ["MSFT"],
+        [{"timestamp": 1760982494, "firm": "BMO Capital"}],
+        [{"timestamp": "2026-10-20T17:48:14Z", "firm": {"name": "BMO"}}],
+        [{"firm": "BMO", "action": ["maintained"]}],
+        [{"firm": "BMO", "recommendation": 5}],
+        [{"firm": "BMO", "analyst_name": 7}],
+        [{"firm": "BMO", "target": "abc"}],
+        [{"firm": "BMO", "target": True}],
+        [{"firm": "BMO", "target": float("nan")}],
+        [{"firm": "BMO", "target": {"v": 1}}],
+    ],
+)
+def test_malformed_rows_are_502_and_not_cached(client, uw_payload, bad_rows):
+    FakeUW.payload = {"data": [*uw_payload["data"][:1], *bad_rows]}
+    res = client.get("/ticker/ratings", params={"ticker": "MSFT"})
+    assert res.status_code == 502
+    assert res.json()["reason_code"] == "UW_UPSTREAM_ERROR"
+    FakeUW.payload = uw_payload
+    res = client.get("/ticker/ratings", params={"ticker": "MSFT"})
+    assert res.status_code == 200
+    assert len(FakeUW.calls) == 2  # the bad response was not cached
+    assert res.json()["ratings"] == uw_payload["data"]
+
+
+def test_nullable_and_numeric_fields_are_accepted(client):
+    FakeUW.payload = {
+        "data": [
+            {"firm": None, "timestamp": None, "target": None},
+            {"firm": "X", "target": "575.0000"},
+            {"firm": "Y", "target": 12},
+            {"firm": "Z", "target": 12.5},
+            {"firm": "W", "target": ""},
+        ]
+    }
+    assert client.get("/ticker/ratings", params={"ticker": "MSFT"}).status_code == 200
+
+
+class _Resp:
+    status_code = 429
+    reason = "Too Many Requests"
+    headers = {"Retry-After": "120"}
+
+    def json(self):
+        return {}
+
+
+class _Session:
+    def __init__(self):
+        self.gets = 0
+
+    def get(self, *a, **kw):
+        self.gets += 1
+        return _Resp()
+
+    def close(self):
+        pass
+
+
+def test_rate_limited_upstream_is_one_attempt_and_never_sleeps(client, monkeypatch):
+    """Real UWClient, fake session: 429 + Retry-After 120 must not be waited out."""
+    session = _Session()
+    clients: list[UWClient] = []
+
+    def factory(**kwargs):
+        c = UWClient(token="test-token", **kwargs)
+        c._session = session
+        clients.append(c)
+        return c
+
+    def no_sleep(_s):
+        raise AssertionError("route must not sleep on upstream retry delays")
+
+    monkeypatch.setattr(ratings, "UWClient", factory)
+    monkeypatch.setattr("xenon.clients.uw_client.time.sleep", no_sleep)
+    res = client.get("/ticker/ratings", params={"ticker": "MSFT"})
+    assert res.status_code == 502
+    assert res.json()["reason_code"] == "UW_UPSTREAM_ERROR"
+    assert session.gets == 1
+    assert clients[0]._max_retries == 0
+
+
+def test_client_budget_is_below_the_overall_deadline_and_the_web_proxy_timeout():
+    # worst case for the blocking call: connect + read, one attempt, no retries
+    assert ratings.UW_MAX_RETRIES == 0
+    assert 2 * ratings.UW_TIMEOUT_S < 20  # web proxy xenonFetch timeout is 20 s
+    assert ratings.REQUEST_DEADLINE_S < 20
+
+
+def test_overall_deadline_returns_504_and_is_not_cached(client, monkeypatch):
+    import time
+
+    monkeypatch.setattr(ratings, "REQUEST_DEADLINE_S", 0.05)
+    orig = FakeUW.get_analyst_ratings_by_ticker
+
+    def slow(self, ticker, **kw):
+        time.sleep(0.3)
+        return orig(self, ticker, **kw)
+
+    monkeypatch.setattr(FakeUW, "get_analyst_ratings_by_ticker", slow)
+    res = client.get("/ticker/ratings", params={"ticker": "MSFT"})
+    assert res.status_code == 504
+    assert res.json()["reason_code"] == "UW_TIMEOUT"
+    monkeypatch.setattr(FakeUW, "get_analyst_ratings_by_ticker", orig)
+    monkeypatch.setattr(ratings, "REQUEST_DEADLINE_S", 5)
+    assert client.get("/ticker/ratings", params={"ticker": "MSFT"}).status_code == 200

@@ -26,13 +26,58 @@ function toTarget(value: UwAnalystRow["target"]): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+const TIMEOUT_BODY = {
+  error: "Ratings request timed out",
+  reason_code: "RATINGS_TIMEOUT",
+} as const;
+
+function isAbort(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.name === "TimeoutError" || error.name === "AbortError")
+  );
+}
+
+/**
+ * Stable, generic error bodies with a top-level reason_code. Raw exception
+ * text (connection errors, upstream detail) is never returned to the browser.
+ */
+function failure(error: unknown): Response {
+  if (isAbort(error)) {
+    return NextResponse.json(TIMEOUT_BODY, { status: 504 });
+  }
+  if (error instanceof XenonApiError) {
+    const code = error.body?.reason_code;
+    if (error.status === 400 && code === "INVALID_TICKER") {
+      return NextResponse.json(
+        { error: "Invalid ticker", reason_code: "INVALID_TICKER" },
+        { status: 400 },
+      );
+    }
+    if (error.status === 504 || code === "UW_TIMEOUT") {
+      return NextResponse.json(TIMEOUT_BODY, { status: 504 });
+    }
+    return NextResponse.json(
+      {
+        error: "Ratings unavailable",
+        reason_code: code === "UW_UPSTREAM_ERROR" ? code : "RATINGS_UNAVAILABLE",
+      },
+      { status: 502 },
+    );
+  }
+  return NextResponse.json(
+    { error: "Ratings unavailable", reason_code: "RATINGS_UNAVAILABLE" },
+    { status: 502 },
+  );
+}
+
 export async function GET(request: Request): Promise<Response> {
   const { searchParams } = new URL(request.url);
   const ticker = searchParams.get("ticker")?.trim().toUpperCase();
 
   if (!ticker) {
     return NextResponse.json(
-      { error: "ticker parameter required" },
+      { error: "ticker parameter required", reason_code: "INVALID_TICKER" },
       { status: 400 },
     );
   }
@@ -58,18 +103,6 @@ export async function GET(request: Request): Promise<Response> {
       })),
     });
   } catch (error) {
-    if (error instanceof XenonApiError) {
-      const reasonCode = error.body?.reason_code;
-      return NextResponse.json(
-        {
-          error: error.detail || "Failed to fetch ratings",
-          ...(reasonCode ? { reason_code: reasonCode } : {}),
-        },
-        { status: error.status === 400 ? 400 : 502 },
-      );
-    }
-    const message =
-      error instanceof Error ? error.message : "Failed to fetch ratings";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return failure(error);
   }
 }
