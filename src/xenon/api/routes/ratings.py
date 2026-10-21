@@ -83,7 +83,7 @@ def _validate_rows(rows: list) -> None:
             raise ValueError("analyst row target is not numeric")
         try:
             ok = math.isfinite(float(target))
-        except ValueError:
+        except (ValueError, OverflowError, TypeError):  # e.g. a 400-digit int
             ok = False
         if not ok:
             raise ValueError("analyst row target is not numeric")
@@ -104,16 +104,9 @@ def _release_slot() -> None:
         _in_flight -= 1
 
 
-def _run_in_slot(ticker: str) -> list[dict]:
-    """Worker body: the slot is held until the blocking fetch really returns."""
-    try:
-        return _fetch_rows(ticker)
-    finally:
-        _release_slot()
-
-
 def _fetch_rows(ticker: str) -> list[dict]:
-    """Blocking UW call — runs on the private `_executor`."""
+    """Blocking UW call — runs on the private `_executor`. The admission slot
+    is owned by the caller (released by a done-callback on the executor future)."""
     client = UWClient(timeout=UW_TIMEOUT_S, max_retries=UW_MAX_RETRIES)
     try:
         payload = client.get_analyst_ratings_by_ticker(ticker, limit=_ROW_LIMIT)
@@ -146,13 +139,17 @@ async def ticker_ratings(ticker: str | None = None):
     if not _acquire_slot():
         logger.warning("UW analyst ratings: all %d workers busy, refusing %s", MAX_IN_FLIGHT, symbol)
         return _error(503, "RATINGS_BUSY", "Analyst ratings fetch is busy; retry shortly")
+    # The slot is released exactly once when the executor future finishes OR is
+    # cancelled (cancelled while still queued, the job never runs). A job that is
+    # already running keeps its slot until the blocking fetch returns.
     try:
-        fut = asyncio.get_running_loop().run_in_executor(_executor, _run_in_slot, symbol)
+        cfut = _executor.submit(_fetch_rows, symbol)
     except BaseException:
         _release_slot()
         raise
+    cfut.add_done_callback(lambda _f: _release_slot())
     try:
-        rows = await asyncio.wait_for(fut, timeout=REQUEST_DEADLINE_S)
+        rows = await asyncio.wait_for(asyncio.wrap_future(cfut), timeout=REQUEST_DEADLINE_S)
     except asyncio.TimeoutError:
         logger.warning("UW analyst ratings fetch for %s exceeded %ss", symbol, REQUEST_DEADLINE_S)
         return _error(504, "UW_TIMEOUT", "Unusual Whales analyst ratings timed out")

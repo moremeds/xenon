@@ -180,6 +180,9 @@ def test_router_registered_in_server():
         [{"firm": "BMO", "target": True}],
         [{"firm": "BMO", "target": float("nan")}],
         [{"firm": "BMO", "target": {"v": 1}}],
+        [{"firm": "BMO", "target": 10**400}],
+        [{"firm": "BMO", "target": "9" * 400}],
+        [{"firm": "BMO", "target": float("inf")}],
     ],
 )
 def test_malformed_rows_are_502_and_not_cached(client, uw_payload, bad_rows):
@@ -285,14 +288,24 @@ class _OkResp:
         return self._payload
 
 
-def test_rejected_payload_does_not_survive_in_the_shared_uw_cache(client, monkeypatch, uw_payload):
+@pytest.mark.parametrize(
+    "bad_payload",
+    [
+        {"data": [None]},
+        {"data": [{"firm": "BMO", "target": 10**400}]},  # OverflowError in float()
+        {"data": [{"firm": "BMO", "target": "9" * 400}]},  # float() -> inf
+        {"data": [{"firm": "BMO", "target": float("inf")}]},
+    ],
+    ids=["null-row", "oversized-int", "oversized-numeric-string", "inf"],
+)
+def test_rejected_payload_does_not_survive_in_the_shared_uw_cache(client, monkeypatch, uw_payload, bad_payload):
     """Real UWClient + real uw_cache; only requests.Session.get is patched."""
     import requests
 
     from xenon.utils import uw_cache
 
     uw_cache.clear_cache()
-    responses = [_OkResp({"data": [None]}), _OkResp(uw_payload)]
+    responses = [_OkResp(bad_payload), _OkResp(uw_payload)]
     calls: list[tuple] = []
 
     def fake_get(self, url, params=None, timeout=None):
@@ -361,4 +374,34 @@ def test_stuck_fetches_hold_a_bounded_private_pool(client, monkeypatch):
     assert ratings._in_flight == 0
     monkeypatch.setattr(ratings, "UWClient", FakeUW)
     monkeypatch.setattr(ratings, "REQUEST_DEADLINE_S", 5)
+    assert client.get("/ticker/ratings", params={"ticker": "AAA"}).status_code == 200
+
+
+def test_cancel_before_start_returns_the_slot(client, monkeypatch):
+    """A request cancelled while its job is still queued must not leak its slot."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    startup = threading.Event()
+    gated = ThreadPoolExecutor(max_workers=2, thread_name_prefix="uw_ratings_test", initializer=startup.wait)
+    monkeypatch.setattr(ratings, "_executor", gated)
+
+    async def scenario():
+        tasks = [asyncio.create_task(ratings.ticker_ratings(t)) for t in ("AAA", "BBB")]
+        for _ in range(100):  # let both tasks take a slot and submit (workers cannot start yet)
+            await asyncio.sleep(0.01)
+            if ratings._in_flight == 2:
+                break
+        assert ratings._in_flight == 2
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        startup.set()
+        gated.shutdown(wait=True)
+    assert FakeUW.calls == []  # the cancelled jobs never ran
+    assert ratings._in_flight == 0
+    monkeypatch.setattr(ratings, "_executor", ThreadPoolExecutor(max_workers=2, thread_name_prefix="uw_ratings_test2"))
     assert client.get("/ticker/ratings", params={"ticker": "AAA"}).status_code == 200
