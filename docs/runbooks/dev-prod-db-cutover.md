@@ -154,8 +154,10 @@ DML succeeds on the right DB and fails on the other.)
 
 ## Step 5 — Update the macmini's `.env`
 
-Edit `~/projects/xenon/.env` on the macmini and replace the
-`DATABASE_URL` line:
+The production stack reads `/opt/xenon/.env` and, for the api, also `/opt/xenon/web.env`
+(`deploy/compose.prod.yml`; `web.env` overrides `.env` for the api). The macmini has no
+source checkout. Edit `/opt/xenon/.env` and replace the `DATABASE_URL` line, and make sure
+`/opt/xenon/web.env` does not set `DATABASE_URL`:
 
 ```diff
 - DATABASE_URL=postgresql+asyncpg://xenon_app:xenon_dev@<lan-host>:5432/core_dev
@@ -177,13 +179,16 @@ lsof -nP -iTCP:4001 -sTCP:ESTABLISHED 2>/dev/null | grep -c limactl   # must pri
 docker-compose --profile migrate run --rm --pull never migrator      # alembic upgrade against core_dev
 docker-compose up -d --pull never api web realtime
 curl -s http://localhost:8321/health | jq '.ib_gateway, .ib_pool, .trading_mode'
-docker-compose up -d --pull never watchtower                          # only when no release is in flight
 ```
 
-The migrator container needs `xenon_migrator` credentials, NOT
-`xenon_prod`. Add a `DATABASE_URL_MIGRATOR` to `.env` if your compose
-file doesn't already split this — see
-[`docker-compose.yml`](../../docker-compose.yml).
+Before the restart, read the effective settings inside the container as in `deploy/README.md`
+§ Operator rollout checklist, section E (names and booleans only). Resume Watchtower only
+through `docs/runbooks/remote-deploy.md` § Standard release flow, step 10 (registry `:latest`
+must be the running release); on a mismatch or `RESTORE FAILED`, keep it stopped.
+
+The migrator reads `DATABASE_URL` from the same `/opt/xenon/.env` (`migrator.env_file` in
+`deploy/compose.prod.yml`); no code reads a separate migrator URL. The role in that URL needs
+DDL rights on `core_dev` for a release that carries a migration.
 
 ## Step 6 — Install the nightly refresh LaunchAgent
 
