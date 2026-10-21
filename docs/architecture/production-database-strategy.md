@@ -149,7 +149,7 @@ DELETE and DDL on `core_dev` are permission denied for it.
 | Database    | Host                    | Writers (role)                                   | Readers (role)           | Purpose                                                                                                 |
 | ----------- | ----------------------- | ------------------------------------------------ | ------------------------ | ------------------------------------------------------------------------------------------------------- |
 | `core_dev`  | macmini (LAN/Tailscale) | `xenon_app`                                      | `xenon_app`, `xenon_dev` | Production. Written by the macmini Docker stack.                                                        |
-| `core_test` | macmini (LAN/Tailscale) | `xenon_app` now; `xenon_dev` after runbook step 3 | same                     | Dev mirror. Written by `scripts/infra/dev.sh` sessions and pytest. Nightly refresh job not installed yet. |
+| `core_test` | macmini (LAN/Tailscale) | `xenon_app` now; `xenon_dev` after runbook step 3 | same                     | Dev mirror. Written by `scripts/infra/dev.sh` sessions. Nightly refresh job not installed yet. pytest uses a separate LOCAL `*_test` DB (local OS user, CREATEDB for xdist clones). |
 
 Pending (runbook step 3, drops data, needs confirmation): `xenon_dev` becomes
 owner of `core_test`. Until then laptops still connect to `core_test` as
