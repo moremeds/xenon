@@ -3,7 +3,7 @@
 Real IB contracts (2026-06-22): AAPL (SMART/USD), 5016 (TSEJ/JPY).
 """
 
-from xenon.api.server import _contract_from_order_body
+from xenon.api.services.order_entry import _contract_from_order_body
 
 
 def test_contract_from_body_stock_defaults_smart_usd():

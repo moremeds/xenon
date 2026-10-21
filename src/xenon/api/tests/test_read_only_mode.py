@@ -21,6 +21,8 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+from xenon.api.services import order_entry
+from xenon.api.routes import portfolio as portfolio_routes
 
 
 @pytest.fixture
@@ -324,17 +326,16 @@ def test_wizard_post_routes_return_403_in_read_only(read_only_client, monkeypatc
 
 
 def test_in_process_order_helpers_blocked_in_read_only(read_only_client):
-    """_orders_{place,cancel,modify}_from_body self-guard.
+    """order_entry.{place,cancel,modify} self-guard.
 
     The wizard submit path reaches these without going through the
     /orders/* routes, so the read-only denial must live inside them.
     """
-    import xenon.api.server as server
 
     for helper in (
-        server._orders_place_from_body,
-        server._orders_cancel_from_body,
-        server._orders_modify_from_body,
+        order_entry.place,
+        order_entry.cancel,
+        order_entry.modify,
     ):
         result = asyncio.run(helper({}))
         assert result.status_code == 403, f"{helper.__name__} did not deny in read-only"
@@ -358,7 +359,7 @@ def test_orders_refresh_serves_pg_view_without_sync_in_read_only(read_only_clien
 
     monkeypatch.setattr(server, "_run_ib_script_with_recovery", _no_spawn)
     pg_view = {"open_orders": [], "executed_orders": [], "open_count": 0, "executed_count": 0}
-    monkeypatch.setattr(server, "orders_payload_for_scope", lambda scope: pg_view)
+    monkeypatch.setattr(portfolio_routes, "orders_payload_for_scope", lambda scope: pg_view)
 
     r = read_only_client.post("/orders/refresh")
     assert r.status_code == 200, r.text

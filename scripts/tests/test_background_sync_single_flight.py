@@ -19,6 +19,7 @@ from fastapi import HTTPException
 
 from xenon.api import server as server_mod
 from xenon.api.subprocess import ScriptResult
+from xenon.api.routes import portfolio as portfolio_routes
 
 pytestmark = pytest.mark.asyncio
 
@@ -39,34 +40,34 @@ def runner(monkeypatch):
         return {"positions": [], "last_sync": None}
 
     monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", _fake)
-    monkeypatch.setattr(server_mod, "_read_portfolio_payload", _payload)
-    monkeypatch.setattr(server_mod, "_sync_task", None, raising=False)
+    monkeypatch.setattr(portfolio_routes, "_read_portfolio_payload", _payload)
+    monkeypatch.setattr(portfolio_routes, "_sync_task", None)
     return state
 
 
 async def test_second_background_sync_while_running_is_in_progress(runner):
-    first = await server_mod.portfolio_background_sync()
+    first = await portfolio_routes.portfolio_background_sync()
     await asyncio.sleep(0)  # let the sync task start
-    second = await server_mod.portfolio_background_sync()
+    second = await portfolio_routes.portfolio_background_sync()
 
     assert first == {"status": "accepted"}
     assert second == {"status": "in_progress"}
     assert [c[0] for c in runner["calls"]] == ["xenon-ib-sync"]
 
     runner["release"].set()
-    await server_mod._sync_task
-    third = await server_mod.portfolio_background_sync()
+    await portfolio_routes._sync_task
+    third = await portfolio_routes.portfolio_background_sync()
     assert third == {"status": "accepted"}
-    await server_mod._sync_task
+    await portfolio_routes._sync_task
     assert len(runner["calls"]) == 2
 
 
 async def test_foreground_sync_during_background_sync_joins_it(runner):
     """Fable P2-1: a foreground sync made while a background sync runs waits
     for it and returns its result; it never starts a second pass."""
-    assert await server_mod.portfolio_background_sync() == {"status": "accepted"}
+    assert await portfolio_routes.portfolio_background_sync() == {"status": "accepted"}
     await asyncio.sleep(0)
-    fg = asyncio.create_task(server_mod.portfolio_sync(scope=SCOPE))
+    fg = asyncio.create_task(portfolio_routes.portfolio_sync(scope=SCOPE))
     await asyncio.sleep(0)
     assert not fg.done()  # waiting on the running sync
     assert len(runner["calls"]) == 1
@@ -77,10 +78,10 @@ async def test_foreground_sync_during_background_sync_joins_it(runner):
 
 
 async def test_background_sync_during_foreground_sync_is_in_progress(runner):
-    fg = asyncio.create_task(server_mod.portfolio_sync(scope=SCOPE))
+    fg = asyncio.create_task(portfolio_routes.portfolio_sync(scope=SCOPE))
     await asyncio.sleep(0)
     await asyncio.sleep(0)
-    assert await server_mod.portfolio_background_sync() == {"status": "in_progress"}
+    assert await portfolio_routes.portfolio_background_sync() == {"status": "in_progress"}
     runner["release"].set()
     await fg
     assert len(runner["calls"]) == 1
@@ -88,9 +89,9 @@ async def test_background_sync_during_foreground_sync_is_in_progress(runner):
 
 async def test_foreground_join_reports_the_shared_failure(runner):
     runner["result"] = ScriptResult(ok=False, error="gateway down")
-    await server_mod.portfolio_background_sync()
+    await portfolio_routes.portfolio_background_sync()
     await asyncio.sleep(0)
-    fg = asyncio.create_task(server_mod.portfolio_sync(scope=SCOPE))
+    fg = asyncio.create_task(portfolio_routes.portfolio_sync(scope=SCOPE))
     await asyncio.sleep(0)
     runner["release"].set()
     with pytest.raises(HTTPException) as exc:
@@ -100,15 +101,15 @@ async def test_foreground_join_reports_the_shared_failure(runner):
 
 
 async def test_cancelled_foreground_request_does_not_cancel_the_shared_sync(runner):
-    fg = asyncio.create_task(server_mod.portfolio_sync(scope=SCOPE))
+    fg = asyncio.create_task(portfolio_routes.portfolio_sync(scope=SCOPE))
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     fg.cancel()
     with pytest.raises(asyncio.CancelledError):
         await fg
-    assert not server_mod._sync_task.done()
+    assert not portfolio_routes._sync_task.done()
     runner["release"].set()
-    result = await server_mod._sync_task
+    result = await portfolio_routes._sync_task
     assert result.ok
 
 
@@ -117,9 +118,9 @@ async def test_failed_background_sync_frees_the_slot(monkeypatch):
         raise RuntimeError("spawn failed")
 
     monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", _boom)
-    monkeypatch.setattr(server_mod, "_sync_task", None, raising=False)
-    assert await server_mod.portfolio_background_sync() == {"status": "accepted"}
-    result = await server_mod._sync_task  # logged, never raised out of the task
+    monkeypatch.setattr(portfolio_routes, "_sync_task", None)
+    assert await portfolio_routes.portfolio_background_sync() == {"status": "accepted"}
+    result = await portfolio_routes._sync_task  # logged, never raised out of the task
     assert result.ok is False
-    assert await server_mod.portfolio_background_sync() == {"status": "accepted"}
-    await server_mod._sync_task
+    assert await portfolio_routes.portfolio_background_sync() == {"status": "accepted"}
+    await portfolio_routes._sync_task

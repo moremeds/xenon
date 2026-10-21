@@ -64,13 +64,13 @@ async def wizard_alerts(request: Request) -> dict[str, Any]:
     """
     from sqlalchemy import select
 
-    from xenon.api import server as server_mod
+    from xenon.api.services import order_entry
     from xenon.api.services.wizard_risk_alert import EVENT_KIND
     from xenon.db.engine import get_sync_engine
     from xenon.db.schema import wizard_events, wizard_sessions
 
     monitor = getattr(request.app.state, "wizard_risk_alert", None)
-    scope = server_mod._resolve_scope_kwargs()
+    scope = order_entry._resolve_scope_kwargs()
     stmt = (
         select(
             wizard_events.c.session_id,
@@ -205,12 +205,13 @@ async def wizard_protect(session_id: str, request: Request, body: ProtectRequest
         )
 
     from xenon.api import server as server_mod
+    from xenon.api.services import order_entry
     from xenon.execution.combo_wizard.ib_adapter import ComboWizardIbAdapter
     from xenon.execution.combo_wizard.protect import attach_protection
 
     owner = server_mod.order_owner
     if owner is None:
-        return server_mod._owner_unavailable()
+        return order_entry._owner_unavailable()
 
     from xenon.execution.account_scope import resolve_from_app_state
 
@@ -241,5 +242,5 @@ async def wizard_protect(session_id: str, request: Request, body: ProtectRequest
         return reply["result"]
     if reply.get("classification") == "wizard_conflict":
         raise HTTPException(status_code=409, detail=reply.get("message"))
-    status, reason_code, detail = server_mod._owner_error_detail(reply)
-    return server_mod.order_error(status, reason_code, detail)
+    status, reason_code, detail = order_entry._owner_error_detail(reply)
+    return order_entry.order_error(status, reason_code, detail)

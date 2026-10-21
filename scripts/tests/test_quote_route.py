@@ -2,6 +2,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+from xenon.api.services import order_entry
 
 
 @pytest.fixture(autouse=True)
@@ -19,7 +20,6 @@ def client():
 
 
 def test_quote_route_returns_signed_token(client, monkeypatch):
-    from xenon.api import server
 
     async def fake_fetch(ticker: str, con_id: int):
         return {
@@ -29,7 +29,7 @@ def test_quote_route_returns_signed_token(client, monkeypatch):
             "ask_size": 120,
         }
 
-    monkeypatch.setattr(server, "_fetch_quote_snapshot", fake_fetch)
+    monkeypatch.setattr(order_entry, "_fetch_quote_snapshot", fake_fetch)
 
     resp = client.get("/orders/quote", params={"ticker": "SPY", "con_id": 756733})
     assert resp.status_code == 200

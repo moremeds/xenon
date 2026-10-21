@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from xenon.api.ib_pool import POOL_ROLES, IBPool
+from xenon.api.services import order_entry
 
 
 def _make_fake_client(connected: bool = True) -> MagicMock:
@@ -230,15 +231,14 @@ def test_acquire_callers_dispatch_via_run_sync_not_to_thread():
     """
     import inspect
 
-    from xenon.api import server as server_mod
     from xenon.api.routes import historical as historical_mod
     from xenon.api.routes import wizard as wizard_mod
 
     # Each entry: (callable, expected role for run_sync dispatch)
     targets = [
-        (server_mod._fetch_quote_snapshot, "data"),
-        (server_mod._fetch_order_quote_snapshot, "data"),
-        (server_mod._qualify_order_con_id, "data"),
+        (order_entry._fetch_quote_snapshot, "data"),
+        (order_entry._fetch_order_quote_snapshot, "data"),
+        (order_entry._qualify_order_con_id, "data"),
         (historical_mod.qualify_contracts, "data"),
         (historical_mod.head_timestamp, "data"),
         (historical_mod.historical_bars, "data"),

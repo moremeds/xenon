@@ -27,6 +27,7 @@ from xenon.api import server as server_mod
 from xenon.api.subprocess import ScriptResult
 from xenon.clients.ib_client import pool_client_id
 from xenon.db.schema import order_submissions
+from xenon.api.services import order_entry
 
 SCOPE = {"broker": "IB", "account_env": "paper", "broker_account": "DU0000000"}
 # PR-10: Xenon's own orders are placed by the pool orders connection
@@ -245,12 +246,12 @@ def broker_calls(monkeypatch):
 def fresh_quote(monkeypatch):
     # Non-combo orders pass the F3 quote gate: market hours + a live quote.
     _midday = datetime(2026, 4, 22, 13, 0, tzinfo=ZoneInfo("America/New_York"))
-    monkeypatch.setattr(server_mod, "_now", lambda: _midday, raising=False)
+    monkeypatch.setattr(order_entry, "_now", lambda: _midday)
 
     async def _q(ticker: str, con_id: int):
         return {"bid": 4.90, "ask": 5.10, "bid_size": 100, "ask_size": 100}
 
-    monkeypatch.setattr(server_mod, "_fetch_quote_snapshot", _q)
+    monkeypatch.setattr(order_entry, "_fetch_quote_snapshot", _q)
 
 
 @pytest.fixture
@@ -995,7 +996,7 @@ def test_identical_replay_of_recovered_stock_attempt_is_idempotent(monkeypatch, 
         # Stub quote (no con_id in a stock body → the route qualifies first).
         return 756733, {"bid": 4.90, "ask": 5.10, "bid_size": 100, "ask_size": 100}
 
-    monkeypatch.setattr(server_mod, "_fetch_order_quote_snapshot", stock_quote)
+    monkeypatch.setattr(order_entry, "_fetch_order_quote_snapshot", stock_quote)
     monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", killed)
     first = client.post("/orders/place", json=_stock_body("rt-rec-1"))
     assert first.status_code == 502 and first.json()["reason_code"] == "PLACE_OUTCOME_UNKNOWN", first.text
@@ -1601,16 +1602,16 @@ def test_replace_in_process_path_runs_every_guard(monkeypatch, client, broker):
     target = _original(client, broker)
     # Gate 4 (claim): a naked replacement is refused with nothing cancelled.
     naked = _replace_body(target, "rep-naked", legs=((510.0, "SELL", 1), (520.0, "SELL", 1)))
-    resp = asyncio.run(server_mod._orders_replace_from_body(naked))
+    resp = asyncio.run(order_entry.replace(naked))
     assert resp.status_code == 400 and json.loads(resp.body)["reason_code"].endswith("UNCOVERED")
     # Read-only and non-IB broker: refused in-process and over HTTP.
     monkeypatch.setenv("XENON_READ_ONLY", "1")
-    resp = asyncio.run(server_mod._orders_replace_from_body(_replace_body(target, "rep-ro")))
+    resp = asyncio.run(order_entry.replace(_replace_body(target, "rep-ro")))
     assert json.loads(resp.body)["reason_code"] == "READ_ONLY_MODE"
     assert client.post("/orders/replace", json=_replace_body(target, "rep-ro")).status_code == 403
     monkeypatch.delenv("XENON_READ_ONLY")
     monkeypatch.setattr(server_mod.app.state, "broker", "FUTU", raising=False)
-    resp = asyncio.run(server_mod._orders_replace_from_body(_replace_body(target, "rep-futu")))
+    resp = asyncio.run(order_entry.replace(_replace_body(target, "rep-futu")))
     assert json.loads(resp.body)["reason_code"] == "READ_ONLY_BROKER"
     assert broker.calls == []
     assert {r.client_attempt_id for r in _submission_rows()} == {"orig-1"}

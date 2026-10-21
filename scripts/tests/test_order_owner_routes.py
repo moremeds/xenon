@@ -29,6 +29,8 @@ from scripts.tests.test_gate4_route import (  # noqa: F401 — fixtures
     ib_data,
 )
 from xenon.api import server as server_mod
+from xenon.api.services import order_entry
+from xenon.api.routes import system as system_routes
 
 pytestmark = pytest.mark.committed_db
 
@@ -153,7 +155,7 @@ def test_timeout_while_started_worker_settles_and_late_price_confirmation_frees_
     confirmation settles it with the captured amend id; the next modify is
     then accepted."""
     _placed(client)
-    monkeypatch.setattr(server_mod, "_ORDER_ACTION_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(order_entry, "_ORDER_ACTION_TIMEOUT_S", 0.2)
     go = threading.Event()
 
     def slow_modify(c, order_id, perm_id, new_price, **kw):
@@ -189,7 +191,7 @@ def test_queued_modify_abandoned_at_deadline_releases_the_amend(
     import asyncio
 
     _placed(client)
-    monkeypatch.setattr(server_mod, "_ORDER_ACTION_TIMEOUT_S", 0.1)
+    monkeypatch.setattr(order_entry, "_ORDER_ACTION_TIMEOUT_S", 0.1)
     release = threading.Event()
     busy = threading.Thread(target=lambda: asyncio.run(_order_owner.run_sync("orders", lambda: release.wait(5))))
     busy.start()
@@ -210,7 +212,7 @@ def test_halted_owner_refuses_cancel_with_orders_halted(client, broker_calls, fr
     async def _gw():
         return {"port_listening": True}
 
-    monkeypatch.setattr(server_mod, "check_ib_gateway", _gw)
+    monkeypatch.setattr(system_routes, "check_ib_gateway", _gw)
     _placed(client)
     broker_calls.clear()
     server_mod.order_owner._latch_halt("test")
@@ -248,7 +250,7 @@ def _real_cancel_core_without_ack(monkeypatch, pool, order_id, perm_id):
     orders_client.readiness = orders_client.broker_readiness = "ready"
     orders_client.readiness_generation = 0
     orders_client.confirm_broker_ready.return_value = "ready"
-    monkeypatch.setattr(server_mod, "ib_order_manage", ib_order_manage)
+    monkeypatch.setattr(order_entry, "ib_order_manage", ib_order_manage)
     pool.client = orders_client
     return orders_client
 
@@ -306,7 +308,7 @@ def _real_place_core(monkeypatch, steps):
 
     _WrapperClient.steps = list(steps)
     orders_client = _OrdersWrapperClient()
-    monkeypatch.setattr(server_mod, "ib_place_order", ib_place_order)
+    monkeypatch.setattr(order_entry, "ib_place_order", ib_place_order)
     server_mod.order_owner._pool.client = orders_client
     return orders_client
 
@@ -378,7 +380,7 @@ def test_place_deadline_after_start_is_unknown_and_worker_finishes(
         return {"status": "ok", "outcome": "accepted", "orderId": 61, "permId": 610001, "clientId": 26}
 
     install_cores(monkeypatch, place=slow_core)
-    monkeypatch.setattr(server_mod, "_PLACE_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(order_entry, "_PLACE_TIMEOUT_S", 0.3)
     resp = _bag(client, "t4-late")
     assert (resp.status_code, resp.json()["reason_code"]) == (502, "PLACE_OUTCOME_UNKNOWN"), resp.text
     assert _attempt("t4-late")["state"] == "UNKNOWN"
@@ -416,7 +418,7 @@ def _late_uncertain_core(monkeypatch, release, ids, on_late=None):
         return {"status": "uncertain", "outcome": "uncertain", "message": "ack lost", "clientId": 26, **ids}
 
     install_cores(monkeypatch, place=core)
-    monkeypatch.setattr(server_mod, "_PLACE_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(order_entry, "_PLACE_TIMEOUT_S", 0.3)
 
 
 def test_place_late_refusal_after_deadline_is_failed_and_released(
@@ -432,9 +434,9 @@ def test_place_late_refusal_after_deadline_is_failed_and_released(
 
     _order_owner.client.on_probe = held_probe
     settles = []
-    real_finish = server_mod._finish_place
-    monkeypatch.setattr(server_mod, "_finish_place", lambda sid, reply: settles.append(reply) or real_finish(sid, reply))
-    monkeypatch.setattr(server_mod, "_PLACE_TIMEOUT_S", 0.3)
+    real_finish = order_entry._finish_place
+    monkeypatch.setattr(order_entry, "_finish_place", lambda sid, reply: settles.append(reply) or real_finish(sid, reply))
+    monkeypatch.setattr(order_entry, "_PLACE_TIMEOUT_S", 0.3)
     resp = _bag(client, "t4f-refuse")
     assert (resp.status_code, resp.json()["reason_code"]) == (502, "PLACE_OUTCOME_UNKNOWN"), resp.text
     assert _attempt("t4f-refuse")["state"] == "UNKNOWN"
@@ -452,9 +454,9 @@ def test_place_late_uncertain_after_deadline_keeps_ids_and_owner_id(
     enriches it with orderId / permId / the owner clientId and its audit row."""
     release, done = threading.Event(), threading.Event()
     _late_uncertain_core(monkeypatch, release, {"orderId": 62, "permId": 620001})
-    real_finish = server_mod._finish_place
+    real_finish = order_entry._finish_place
     # Settlement done = the UNKNOWN write AND its IB_NOTICE event row.
-    monkeypatch.setattr(server_mod, "_finish_place", lambda sid, reply: (real_finish(sid, reply), done.set())[0])
+    monkeypatch.setattr(order_entry, "_finish_place", lambda sid, reply: (real_finish(sid, reply), done.set())[0])
     resp = _bag(client, "t4f-ids")
     assert (resp.status_code, resp.json()["reason_code"]) == (502, "PLACE_OUTCOME_UNKNOWN"), resp.text
     assert _attempt("t4f-ids")["perm_id"] is None
@@ -490,8 +492,8 @@ def test_place_late_uncertain_never_overrides_the_poller(
         _bind_and_fill_like_poller(["", json.dumps({"submission_id": sid})])
 
     _late_uncertain_core(monkeypatch, release, {"orderId": 63, "permId": 630001}, on_late=poller_first)
-    real_finish = server_mod._finish_place
-    monkeypatch.setattr(server_mod, "_finish_place", lambda sid, reply: (real_finish(sid, reply), done.set())[0])
+    real_finish = order_entry._finish_place
+    monkeypatch.setattr(order_entry, "_finish_place", lambda sid, reply: (real_finish(sid, reply), done.set())[0])
     resp = _bag(client, "t4f-poller")
     assert (resp.status_code, resp.json()["reason_code"]) == (502, "PLACE_OUTCOME_UNKNOWN"), resp.text
     release.set()
@@ -504,7 +506,7 @@ def test_proven_unsent_never_reports_failed_when_the_row_moved_on(monkeypatch):
     """0 rows updated (stronger evidence owns the row): no terminal 503."""
     calls = []
     monkeypatch.setattr(server_mod.orders_store, "mark_terminal", lambda **kw: calls.append(kw) or 0)
-    resp = server_mod._finish_place("sub-moved", server_mod._owner_unavailable_reply())
+    resp = order_entry._finish_place("sub-moved", order_entry._owner_unavailable_reply())
     assert calls[0]["expected_states"] == ("PENDING", "UNKNOWN")
     assert resp.status_code == 502
     assert json.loads(resp.body)["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
@@ -515,7 +517,7 @@ def test_place_abandoned_while_queued_is_failed_with_zero_sends(
 ):
     release = threading.Event()
     _order_owner._executor.submit(release.wait, 5)  # another order action holds the worker
-    monkeypatch.setattr(server_mod, "_PLACE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(order_entry, "_PLACE_TIMEOUT_S", 0.2)
     try:
         resp = _bag(client, "t4-queued")
     finally:

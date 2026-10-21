@@ -19,7 +19,7 @@ class _FakeRequest:
 
 def _patch_futu_client(monkeypatch, client):
     # Patch the real function on the real server module (importing it is fast).
-    monkeypatch.setattr("xenon.api.server._get_futu_client", lambda: client, raising=True)
+    monkeypatch.setattr("xenon.api.routes.futu._get_futu_client", lambda: client, raising=True)
 
 
 def test_default_broker_resolves_ib_from_app_state(monkeypatch):

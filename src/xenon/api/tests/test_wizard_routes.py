@@ -12,6 +12,7 @@ from starlette.responses import JSONResponse
 
 from xenon.api import server as server_mod
 from xenon.db.queries import combo_wizard as cwq
+from xenon.api.services import order_entry
 
 # --------------------------------------------------------------------------
 # Postgres helpers
@@ -116,16 +117,15 @@ def _setup_pg(monkeypatch):
 @pytest.fixture(autouse=True)
 def _force_test_mode_on(monkeypatch):
     monkeypatch.setenv("XENON_API_TEST_MODE", "1")
-    from xenon.api import server
 
     async def _ib_qualified(body):
         # Stand-in for reqContractDetails (standard SPY options).
         return [
             {"con_id": 7000 + i, "tc": "SPY", "mult": 100, "und_sec": "STK"}
-            for i, _ in enumerate(server._gate4_leg_specs(body))
+            for i, _ in enumerate(order_entry._gate4_leg_specs(body))
         ]
 
-    monkeypatch.setattr(server, "_resolve_gate4_leg_meta", _ib_qualified)
+    monkeypatch.setattr(order_entry, "_resolve_gate4_leg_meta", _ib_qualified)
     yield
 
 
@@ -346,7 +346,7 @@ def test_submit_endpoint_claims_session_before_live_order(monkeypatch, client):
             "submission_id": "sub-claim",
         }
 
-    monkeypatch.setattr(server_mod, "_orders_place_from_body", fake_place)
+    monkeypatch.setattr(order_entry, "place", fake_place)
 
     resp = client.post(
         "/wizard/sessions/wiz-submit-claim/submit",
@@ -431,7 +431,7 @@ def test_submit_endpoint_preserves_order_helper_error_and_releases_claim(monkeyp
             content={"detail": "Preflight blocked", "reason_code": "NAKED_SHORT"},
         )
 
-    monkeypatch.setattr(server_mod, "_orders_place_from_body", fake_place)
+    monkeypatch.setattr(order_entry, "place", fake_place)
 
     resp = client.post(
         "/wizard/sessions/wiz-submit-blocked/submit",
@@ -475,7 +475,7 @@ def test_abort_endpoint_cancels_working_combo_before_marking_aborted(monkeypatch
         assert state == "working"
         return {"status": "ok", "message": "Cancelled", "echo": body}
 
-    monkeypatch.setattr(server_mod, "_orders_cancel_from_body", fake_cancel, raising=False)
+    monkeypatch.setattr(order_entry, "cancel", fake_cancel)
 
     abort_resp = client.post("/wizard/sessions/wiz-abort-working/abort", json={})
 
@@ -503,7 +503,7 @@ def test_abort_endpoint_preserves_cancel_error_and_keeps_working(monkeypatch, cl
             content={"detail": {"reason_code": "IB_CONNECTION", "message": "offline"}},
         )
 
-    monkeypatch.setattr(server_mod, "_orders_cancel_from_body", fake_cancel, raising=False)
+    monkeypatch.setattr(order_entry, "cancel", fake_cancel)
 
     abort_resp = client.post("/wizard/sessions/wiz-abort-cancel-error/abort", json={})
 

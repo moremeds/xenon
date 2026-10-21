@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from xenon.api.services import wizard_risk_alert as wra
+from xenon.api.services import order_entry
 
 NOW = datetime(2026, 10, 20, 15, 0, tzinfo=timezone.utc)
 
@@ -256,11 +257,10 @@ def _client(monkeypatch, alerts):
 
 
 def test_get_wizard_alerts_returns_live_states_and_persisted_events(monkeypatch):
-    from xenon.api import server
     from xenon.db.engine import get_sync_engine
     from xenon.db.queries import combo_wizard as cwq
 
-    scope = server._resolve_scope_kwargs()
+    scope = order_entry._resolve_scope_kwargs()
     engine = get_sync_engine()
     with engine.begin() as conn:
         cwq.create_session(conn, session_id="s-ev", ticker="QQQ", state="PROTECTED", payload={}, **scope)

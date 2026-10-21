@@ -18,6 +18,7 @@ from xenon.execution.combo_wizard import session
 # --------------------------------------------------------------------------
 
 from xenon._test_db import sync_test_db_url as _sync_url  # worker-aware URL resolver
+from xenon.api.services import order_entry
 
 
 def _pg_engine():
@@ -95,16 +96,15 @@ def _setup_pg(monkeypatch):
 @pytest.fixture(autouse=True)
 def _force_test_mode_on(monkeypatch):
     monkeypatch.setenv("XENON_API_TEST_MODE", "1")
-    from xenon.api import server
 
     async def _ib_qualified(body):
         # Stand-in for reqContractDetails (standard SPY options).
         return [
             {"con_id": 7000 + i, "tc": "SPY", "mult": 100, "und_sec": "STK"}
-            for i, _ in enumerate(server._gate4_leg_specs(body))
+            for i, _ in enumerate(order_entry._gate4_leg_specs(body))
         ]
 
-    monkeypatch.setattr(server, "_resolve_gate4_leg_meta", _ib_qualified)
+    monkeypatch.setattr(order_entry, "_resolve_gate4_leg_meta", _ib_qualified)
     yield
 
 
@@ -205,12 +205,11 @@ def test_get_session_rejects_explicit_scope_mismatch():
 def _place_returns(monkeypatch, status: int, content: dict):
     from fastapi.responses import JSONResponse
 
-    from xenon.api import server
 
     async def _place(_payload):
         return JSONResponse(status_code=status, content=content)
 
-    monkeypatch.setattr(server, "_orders_place_from_body", _place)
+    monkeypatch.setattr(order_entry, "place", _place)
 
 
 def _session_claim(session_id: str):

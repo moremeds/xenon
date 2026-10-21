@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from xenon.api.server import _lookup_min_tick_via_pool
+from xenon.api.services.order_entry import _lookup_min_tick_via_pool
 
 
 def test_min_tick_stub_returns_one_cent_for_every_contract():

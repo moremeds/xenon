@@ -14,6 +14,7 @@ import xenon.api.server as server_mod
 from xenon.api.guards import get_account_scope
 from xenon.api.subprocess import ScriptResult
 from xenon.execution.account_scope import AccountScope
+from xenon.api.routes import blotter as blotter_routes
 
 SCOPE = AccountScope(broker="IB", account_env="paper", broker_account="DU0000000")
 
@@ -27,13 +28,13 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
             exit_code=1,
         )
 
-    monkeypatch.setattr(server_mod, "run_module", fake_run_module)
+    monkeypatch.setattr(blotter_routes, "run_module", fake_run_module)
     monkeypatch.setattr(
-        server_mod,
+        blotter_routes,
         "fetch_blotter_pg",
         lambda conn, scope, days: {"closed_trades": [], "open_trades": []},
     )
-    monkeypatch.setattr(server_mod, "blotter_has_trades", lambda payload: False)
+    monkeypatch.setattr(blotter_routes, "blotter_has_trades", lambda payload: False)
     server_mod.app.dependency_overrides[get_account_scope] = lambda: SCOPE
     try:
         yield TestClient(server_mod.app)

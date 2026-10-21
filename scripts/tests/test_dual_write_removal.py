@@ -5,8 +5,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _api_source() -> str:
+    """server.py plus the modules split out of it (PR-20); `server.DATA_DIR` normalized to `DATA_DIR`."""
+    api = REPO_ROOT / "src/xenon/api"
+    files = [api / "server.py", *sorted((api / "routes").glob("*.py")), *sorted((api / "services").glob("*.py"))]
+    return "\n".join(f.read_text() for f in files).replace("server.DATA_DIR", "DATA_DIR")
+
+
 def test_fastapi_no_longer_dual_writes_migrated_json_caches():
-    server_py = (REPO_ROOT / "src/xenon/api/server.py").read_text()
+    server_py = _api_source()
     forbidden = [
         '_write_cache(DATA_DIR / "scanner.json"',
         '_write_cache(DATA_DIR / "discover.json"',
@@ -21,7 +28,7 @@ def test_fastapi_no_longer_dual_writes_migrated_json_caches():
 
 
 def test_fastapi_no_longer_reads_orders_json_for_modify_fallback():
-    server_py = (REPO_ROOT / "src/xenon/api/server.py").read_text()
+    server_py = _api_source()
     assert '_read_cache(DATA_DIR / "orders.json")' not in server_py
 
 

@@ -22,6 +22,8 @@ from xenon.api import server as server_mod
 from xenon.api.services import audit_enforce
 from xenon.api.subprocess import ScriptResult
 from xenon.execution import orders_store
+from xenon.api.services import order_entry
+from xenon.api.routes import portfolio as portfolio_routes
 
 ACCT = "DU0000000"
 
@@ -433,9 +435,9 @@ def glue(monkeypatch):
         return state["replies"].pop(0) if state["replies"] else {"status": "ok", "message": "Order cancelled"}
 
     monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", _runner)
-    monkeypatch.setattr(server_mod, "_sync_task", None, raising=False)
+    monkeypatch.setattr(portfolio_routes, "_sync_task", None)
     monkeypatch.setattr(server_mod, "_is_test_mode", lambda: False)
-    monkeypatch.setattr(server_mod, "_record_manage_event", lambda *a, **k: None)
+    monkeypatch.setattr(order_entry, "_record_manage_event", lambda *a, **k: None)
     install_cores(monkeypatch, cancel=_core)
     owner, _pool = install_owner(monkeypatch)
     state["owner"] = owner
@@ -459,7 +461,7 @@ def _sync_result(audit):
 
 def _sync(state, *results):
     state["results"].extend(results)
-    return asyncio.run(server_mod._sync_via_subprocess())
+    return asyncio.run(portfolio_routes._sync_via_subprocess())
 
 
 def test_glue_flag_off_never_cancels(glue, monkeypatch):
@@ -569,10 +571,10 @@ def test_glue_enforcement_runs_inside_the_single_flight_task(glue):
     glue["results"].extend([first, first, _sync_result(_audit())])
 
     async def _go():
-        assert await server_mod.portfolio_background_sync() == {"status": "accepted"}
-        task = server_mod._sync_task
+        assert await portfolio_routes.portfolio_background_sync() == {"status": "accepted"}
+        task = portfolio_routes._sync_task
         await asyncio.sleep(0)
-        assert await server_mod.portfolio_background_sync() == {"status": "in_progress"}
+        assert await portfolio_routes.portfolio_background_sync() == {"status": "in_progress"}
         await task
 
     asyncio.run(_go())

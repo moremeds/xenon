@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from xenon.api.server import _snapshot_age_seconds
+from xenon.api.routes.portfolio import _snapshot_age_seconds
 
 
 def test_fresh_snapshot_age_is_small():
