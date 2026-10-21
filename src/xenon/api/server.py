@@ -66,13 +66,13 @@ from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.api.routes.market import router as market_router
 from xenon.api.services import order_entry
+from xenon.api.routes.order_entry import router as order_entry_router
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, pool_client_id
 from xenon.db.engine import dispose_engine, get_sync_engine, init_engine
 from xenon.db.queries.blotter import blotter_has_trades, fetch_blotter_pg, fetch_futu_blotter, merge_pg_and_flex
 from xenon.db.schema import account_snapshots, order_events, order_submissions
-from xenon.execution import gate4, orders_store, quote_tokens
+from xenon.execution import gate4, orders_store
 from xenon.execution.account_scope import IBAccountSelectionError, select_ib_account
-from xenon.execution.quote_tokens import QuotePayload
 
 # Load .env from project root for Python scripts
 try:
@@ -1741,97 +1741,7 @@ async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
     return orders_payload_for_scope(scope)
 
 
-# ---------------------------------------------------------------------------
-# Phase 3: IB order operations — HTTP handlers (cores: services/order_entry.py)
-# ---------------------------------------------------------------------------
-
-
-@app.get("/orders/quote")
-async def orders_quote(ticker: str, con_id: int):
-    secret = os.environ.get("XENON_QUOTE_TOKEN_SECRET")
-    if not secret:
-        raise HTTPException(status_code=500, detail="quote secret not configured")
-    snap = await order_entry._fetch_quote_snapshot(ticker, con_id)
-    import time as _time
-
-    payload = QuotePayload(
-        con_id=con_id,
-        ticker=ticker.upper(),
-        bid=snap["bid"],
-        ask=snap["ask"],
-        bid_size=snap["bid_size"],
-        ask_size=snap["ask_size"],
-        ts_server_ms=int(_time.time() * 1000),
-    )
-    token = quote_tokens.mint(payload, secret)
-    return {
-        "token": token,
-        "bid": str(payload.bid),
-        "ask": str(payload.ask),
-        "bid_size": payload.bid_size,
-        "ask_size": payload.ask_size,
-        "ts_server_ms": payload.ts_server_ms,
-    }
-
-
-@app.post("/orders/place")
-async def orders_place(request: Request):
-    """Place an order via IB (on-demand connection, client_id=26)."""
-    if is_read_only():
-        return read_only_403()
-    body = await request.json()
-    return await order_entry._orders_place_from_body(body)
-
-
-@app.post("/orders/cancel")
-async def orders_cancel(request: Request):
-    """Cancel an open order through the single order owner (PR-10).
-
-    IB scopes cancelOrder by clientId, so only orders placed by this API's
-    ``orders`` connection are cancelled here; any other placing clientId →
-    409 ORDER_NOT_OWNED (cancel it in TWS / IBKR Mobile). Reply mapping:
-      classification=connection          → 503 IB_CONNECTION
-      classification=broker_disconnected → 503 IB_BROKER_DISCONNECTED
-      classification=orders_halted       → 503 ORDERS_HALTED
-      classification=ownership           → 409 ORDER_NOT_OWNED
-      classification=ib_reject           → 400 (or 404 for 10147/10148) IB_REJECT
-    The full upstream payload (code + message) is preserved in detail.
-    """
-    if is_read_only():
-        return read_only_403()
-    body = await request.json()
-    return await order_entry._orders_cancel_from_body(body)
-
-
-@app.post("/orders/replace")
-async def orders_replace(request: Request):
-    """Combo replacement: claim → cancel the original(s) → place the successor,
-    owned by ONE process (PR-07 fix3, OP-1). IB has no atomic restructure of
-    a BAG's legs, so cancel+place is unavoidable; the claim makes it safe:
-    a second replacement of the same target is refused before any cancel."""
-    if is_read_only():
-        return read_only_403()
-    body = await request.json()
-    return await order_entry._orders_replace_from_body(body)
-
-
-@app.post("/orders/modify")
-async def orders_modify(request: Request):
-    """Modify an open order through the single order owner (PR-10).
-
-    Only orders placed by this API's ``orders`` connection are modified
-    (409 ORDER_NOT_OWNED otherwise). The worker settles the Gate 4 amend.
-
-    F5.4: modifySequence monotonic gate runs BEFORE the owner is called.
-      - missing modifySequence → 400 MODIFY_SEQUENCE_REQUIRED
-      - unknown ib_order_id     → 404 ORDER_NOT_FOUND
-      - stale sequence          → 409 MODIFY_STALE (detail.applied=<current>)
-    Owner replies are classified the same as cancel.
-    """
-    if is_read_only():
-        return read_only_403()
-    body = await request.json()
-    return await order_entry._orders_modify_from_body(body)
+app.include_router(order_entry_router)
 
 
 # ---------------------------------------------------------------------------
