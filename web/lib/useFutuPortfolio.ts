@@ -11,6 +11,15 @@ import {
 
 const BASE_INTERVAL_MS = 30_000;
 const MAX_INTERVAL_MS = 300_000; // 5 min cap on backoff
+const STALE_CACHE_MS = 60_000; // cached snapshot older than this: sync right away
+const STALE_FIRST_SYNC_DELAY_MS = 500;
+
+/** True when a cached snapshot is old enough that waiting a full poll interval would show stale data. */
+function isStaleSnapshot(fetchedAt: string | null | undefined): boolean {
+  if (!fetchedAt) return false;
+  const ts = Date.parse(fetchedAt);
+  return !Number.isFinite(ts) || Date.now() - ts > STALE_CACHE_MS;
+}
 
 /**
  * Result of the initial GET /api/futu/portfolio read (and any later
@@ -35,7 +44,8 @@ export type FutuInitialRead =
  *
  * Design:
  * - Initial load: GET the cached JSON (fast, always succeeds if OpenD has
- *   ever been synced).
+ *   ever been synced). When that snapshot is older than 60s the first
+ *   POST sync runs after 500ms instead of waiting a full interval.
  * - Polling: POST every 30s to trigger a live sync from OpenD (matches
  *   the IB hook's pattern). Exponential backoff on error (30s → 5min).
  * - `syncNow()`: manual trigger that resets backoff and rearms the loop.
@@ -49,16 +59,22 @@ export function useFutuPortfolio(enabled: boolean) {
   const [lastSync, setLastSync] = useState<string | null>(null);
   const [neverSynced, setNeverSynced] = useState(false);
   const [initialRead, setInitialRead] = useState<FutuInitialRead>("pending");
+  // True once the mount-time cache GET has settled (any outcome).
+  const [initialReadDone, setInitialReadDone] = useState(false);
 
   const syncingRef = useRef(false);
   const intervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backoffRef = useRef(BASE_INTERVAL_MS);
-  const didInitialReadRef = useRef(false);
   const initialLoadStartedRef = useRef(false);
-  const syncLoopArmedRef = useRef(false);
+  // `fetched_at` of the newest snapshot we hold; drives the first-sync delay.
+  const latestFetchedAtRef = useRef<string | null>(null);
+  // True only while mounted AND enabled. Read by scheduleNext so an in-flight
+  // POST that settles after disable/unmount cannot rearm the loop.
+  const activeRef = useRef(false);
   const doSyncRef = useRef<() => Promise<void>>(async () => {});
 
   const applyResponse = useCallback((body: FutuPortfolioResponse) => {
+    latestFetchedAtRef.current = isFutuNeverSynced(body) ? null : body.fetched_at;
     if (isFutuNeverSynced(body)) {
       setEnvelope(null);
       setData(null);
@@ -99,19 +115,19 @@ export function useFutuPortfolio(enabled: boolean) {
       setError(err instanceof Error ? err.message : String(err));
       setInitialRead("unavailable");
     } finally {
-      didInitialReadRef.current = true;
+      setInitialReadDone(true);
     }
   }, [applyResponse]);
 
   const scheduleNext = useCallback(
     (delay: number) => {
-      if (!enabled) return;
+      if (!activeRef.current) return;
       if (intervalRef.current) clearTimeout(intervalRef.current);
       intervalRef.current = setTimeout(() => {
         void doSyncRef.current();
       }, delay);
     },
-    [enabled],
+    [],
   );
 
   const doSync = useCallback(async () => {
@@ -149,52 +165,44 @@ export function useFutuPortfolio(enabled: boolean) {
 
   const syncNow = useCallback(() => {
     backoffRef.current = BASE_INTERVAL_MS;
-    syncLoopArmedRef.current = true;
     void doSync();
   }, [doSync]);
 
-  // Initial load: fast GET from cache, then arm the POST sync loop.
+  // Lifecycle gate, declared before the effects that schedule. Cleanup runs on
+  // disable and unmount and drops any pending timer, whether or not the
+  // initial read has finished.
+  useEffect(() => {
+    activeRef.current = enabled;
+    return () => {
+      activeRef.current = false;
+      if (intervalRef.current) {
+        clearTimeout(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+  }, [enabled]);
+
+  // Initial load: one fast GET from cache. Deliberately NOT cancelled when
+  // `enabled` changes (useMarketHours starts CLOSED and flips after its own
+  // effect); the arming effect below decides when syncing starts.
   useEffect(() => {
     if (initialLoadStartedRef.current) return;
     initialLoadStartedRef.current = true;
+    void loadFromCache();
+  }, [loadFromCache]);
 
-    let cancelled = false;
-
-    const init = async () => {
-      await loadFromCache();
-      if (cancelled) return;
-      if (enabled) {
-        syncLoopArmedRef.current = true;
-        scheduleNext(BASE_INTERVAL_MS);
-      }
-    };
-
-    void init();
-
-    return () => {
-      cancelled = true;
-      if (intervalRef.current) {
-        clearTimeout(intervalRef.current);
-        intervalRef.current = null;
-      }
-    };
-  }, [enabled, loadFromCache, scheduleNext]);
-
-  // Start syncing when `enabled` transitions to true after mount.
+  // Single place that starts the POST loop: needs BOTH the initial read done
+  // AND `enabled`, in either order. First sync is quick (500ms) when we hold
+  // no snapshot or it is stale, else one normal interval.
   useEffect(() => {
-    if (!enabled) {
-      if (intervalRef.current) {
-        clearTimeout(intervalRef.current);
-        intervalRef.current = null;
-      }
-      syncLoopArmedRef.current = false;
-      return;
-    }
-
-    if (!didInitialReadRef.current || syncLoopArmedRef.current) return;
-    syncLoopArmedRef.current = true;
-    void doSync();
-  }, [enabled, doSync]);
+    if (!enabled || !initialReadDone) return;
+    const fetchedAt = latestFetchedAtRef.current;
+    scheduleNext(
+      fetchedAt === null || isStaleSnapshot(fetchedAt)
+        ? STALE_FIRST_SYNC_DELAY_MS
+        : BASE_INTERVAL_MS,
+    );
+  }, [enabled, initialReadDone, scheduleNext]);
 
   // Reset backoff & force sync when tab becomes visible again.
   useEffect(() => {
@@ -202,7 +210,6 @@ export function useFutuPortfolio(enabled: boolean) {
       if (document.visibilityState === "visible" && enabled) {
         backoffRef.current = BASE_INTERVAL_MS;
         if (!syncingRef.current) {
-          syncLoopArmedRef.current = true;
           scheduleNext(500);
         }
       }

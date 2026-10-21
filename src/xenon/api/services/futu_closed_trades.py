@@ -21,6 +21,9 @@ from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
+# (futu_code, side, deal_id) of unmatched closes already warned about in this process.
+_UNMATCHED_CLOSE_WARNED: set[tuple[str, str, str]] = set()
+
 # OCC option symbol tail: <YYMMDD><C|P><strike*1000>.
 _OCC_TAIL = re.compile(r"\d{6}[CP]\d+$")
 
@@ -64,8 +67,8 @@ def match_closed_lots(trades: list[dict]) -> list[ClosedLot]:
     `futu_close_id = close_deal_id:open_deal_id` — unique even when one close spans
     multiple open lots, and stable (not a positional index).
 
-    Closes against an empty book (pre-inception position) warn and emit nothing;
-    unknown sides warn and are skipped — preserving the NAV walk's observability.
+    Closes against an empty book emit nothing and warn once per process per deal
+    (later rebuilds log at DEBUG); unknown sides warn and are skipped — preserving the NAV walk's observability.
     """
     trades = sorted(trades, key=lambda t: (t["filled_at"], str(t["futu_deal_id"])))
     longs: dict[str, deque] = defaultdict(deque)  # (qty, price, opened_at, open_deal_id)
@@ -121,7 +124,15 @@ def match_closed_lots(trades: list[dict]) -> list[ClosedLot]:
                     book[0] = (lot_qty - matched, lot_price, lot_when, open_deal_id)
                 remaining -= matched
             if remaining > 0:
-                logger.warning(
+                # Cause unproven: plausibly a pre-inception open (deal history starts
+                # 2024-01-01), an assignment (no deal), or a missed fill; the realized
+                # P&L of the unmatched quantity is omitted in every case. The rebuild
+                # reruns on every sync, so warn once per process per deal, then DEBUG.
+                key = (code, side, deal_id)
+                unseen = key not in _UNMATCHED_CLOSE_WARNED
+                _UNMATCHED_CLOSE_WARNED.add(key)
+                logger.log(
+                    logging.WARNING if unseen else logging.DEBUG,
                     "close with no open lot: side=%s code=%s qty_unmatched=%s deal=%s (pre-inception?)",
                     side,
                     code,

@@ -53,13 +53,20 @@ def test_partial_close_across_two_open_lots_unique_ids():
     assert sum(l.realized_pnl for l in lots) == Decimal("100")  # (110-100)*10
 
 
-def test_close_with_no_open_lot_warns_and_emits_nothing(caplog):
+def test_close_with_no_open_lot_warns_once_per_deal_and_emits_nothing(caplog):
+    """The rebuild reruns on every sync: WARNING the first time, DEBUG after."""
     import logging
 
-    with caplog.at_level(logging.WARNING):
-        lots = match_closed_lots([_t("s1", "SELL", 5, 100, 1)])
-    assert lots == []
-    assert any("no open lot" in r.message for r in caplog.records)
+    from xenon.api.services import futu_closed_trades as mod
+
+    mod._UNMATCHED_CLOSE_WARNED.clear()
+    trades = [_t("s1", "SELL", 5, 100, 1)]
+    with caplog.at_level(logging.DEBUG, logger="xenon.api.services.futu_closed_trades"):
+        assert match_closed_lots(trades) == []
+        assert match_closed_lots(trades) == []
+        assert match_closed_lots([_t("s2", "SELL", 5, 100, 2)]) == []
+    levels = [r.levelno for r in caplog.records if "no open lot" in r.getMessage()]
+    assert levels == [logging.WARNING, logging.DEBUG, logging.WARNING]
 
 
 def test_unknown_side_skipped(caplog):
@@ -119,3 +126,4 @@ def test_multi_leg_close_shares_one_close_order_id():
     )
     assert {l.close_order_id for l in lots} == {"O-CLOSE"}
     assert {l.ticker for l in lots} == {"AAOI270115C200000", "AAOI270115C190000"}
+

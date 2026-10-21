@@ -226,6 +226,38 @@ class TestExistingErrorHandling:
         assert len(client.failed_contracts) == 0
         assert len(client._pacing_retries) == 0
 
+    @pytest.mark.parametrize("code", [2104, 2106, 2107, 2108, 2119, 2158])
+    @patch("xenon.clients.ib_client.IB")
+    def test_farm_status_codes_log_info_not_error(self, MockIB, code, caplog):
+        """Farm connect/status chatter logs at INFO and is not a "last error"."""
+        import logging
+
+        MockIB.return_value.isConnected.return_value = True
+        client = IBClient()
+        client.connect(client_id=91)
+
+        with caplog.at_level(logging.DEBUG):
+            client._on_error(-1, code, "Market data farm connecting")
+
+        records = [r for r in caplog.records if str(code) in r.getMessage()]
+        assert records and all(r.levelno == logging.INFO for r in records)
+        assert client._last_error is None
+
+    @pytest.mark.parametrize("code", [1100, 2110, 326])
+    @patch("xenon.clients.ib_client.IB")
+    def test_real_errors_not_downgraded_to_info(self, MockIB, code, caplog):
+        import logging
+
+        MockIB.return_value.isConnected.return_value = True
+        client = IBClient()
+        client.connect(client_id=91)
+
+        with caplog.at_level(logging.DEBUG):
+            client._on_error(-1, code, "real problem")
+
+        records = [r for r in caplog.records if str(code) in r.getMessage()]
+        assert records and all(r.levelno >= logging.WARNING for r in records)
+
     @patch("xenon.clients.ib_client.IB")
     def test_connectivity_codes_still_handled(self, MockIB):
         """Connectivity codes (1100, 1101, 1102) should still be handled."""
