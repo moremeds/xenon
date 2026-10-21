@@ -17,6 +17,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from decimal import Decimal
@@ -145,7 +146,7 @@ def place(monkeypatch):
     async def fake(body: dict):
         calls.append(dict(body))
         reply = replies.pop(0)
-        if isinstance(reply, Exception):
+        if isinstance(reply, BaseException):
             raise reply
         return reply
 
@@ -217,7 +218,7 @@ async def test_protection_success_places_gtc_sell_bag_and_transitions_protected(
     assert result["tp_attached"] is True
     assert result["alert_armed"] is True
     assert result["tp_order_id"] == "7001"
-    assert result["submission_id"] == "sub-1"
+    assert result["client_attempt_id"].startswith(f"wiz:{sid}:tp:")
     assert len(place.calls) == 1
     body = place.calls[0]
     assert (body["type"], body["action"], body["tif"], body["limitPrice"]) == ("combo", "SELL", "GTC", "3.50")
@@ -232,6 +233,49 @@ async def test_protection_success_places_gtc_sell_bag_and_transitions_protected(
     assert Decimal(config["tp_target_price"]) == Decimal("3.50")
     assert config["alert_enabled"] is True
     assert "PROTECTION_TP_ATTACHED" in _event_kinds(sid)
+
+
+@pytest.mark.asyncio
+async def test_tp_body_is_guaranteed_gtc_sell_bag_with_only_closing_fields(place):
+    """The TP is always a GUARANTEED BAG (nonGuaranteed=0), whatever the
+    entry payload held: a non-guaranteed close can leg out and leave the
+    short call naked. Entry-only / stale keys never ride on the TP."""
+    payload = {
+        "symbol": "AAPL",
+        "type": "combo",
+        "action": "BUY",
+        "quantity": 2,
+        "limitPrice": "2.50",
+        "tif": "DAY",
+        "nonGuaranteed": 1,
+        "orderRef": "leg_wizard:stale",
+        "outsideRth": True,
+        "account": "U9999999",
+        "acknowledge_limit_override": True,
+        "replaces": {"submission_id": "old"},
+        "client_attempt_id": "wiz:old:combo:x",
+        "legs": [
+            {"symbol": "AAPL", "expiry": "20261218", "strike": 200.0, "right": "C", "action": "BUY", "ratio": 1,
+             "conId": 1001, "limitPrice": 4.6, "exchange": "SMART"},
+            {"symbol": "AAPL", "expiry": "20261218", "strike": 210.0, "right": "C", "action": "SELL", "ratio": 1,
+             "conId": 1002, "limitPrice": 2.1, "exchange": "SMART"},
+        ],
+    }
+    sid = _init_session(state="FILLED", payload=payload)
+
+    await _protect(sid, target="-0.10", polarity="CREDIT")
+
+    body = place.calls[0]
+    assert set(body) == {"type", "symbol", "action", "quantity", "limitPrice", "tif", "nonGuaranteed", "legs", "client_attempt_id"}
+    assert (body["type"], body["action"], body["tif"], body["nonGuaranteed"]) == ("combo", "SELL", "GTC", 0)
+    assert body["limitPrice"] == "-0.10"  # signed, no abs()
+    assert (body["symbol"], body["quantity"]) == ("AAPL", 2)
+    assert body["client_attempt_id"].startswith(f"wiz:{sid}:tp:")
+    # Stored per-leg actions, NOT flipped (the SELL envelope reverses them at IB).
+    assert body["legs"] == [
+        {"symbol": "AAPL", "expiry": "20261218", "strike": 200.0, "right": "C", "action": "BUY", "ratio": 1, "conId": 1001},
+        {"symbol": "AAPL", "expiry": "20261218", "strike": 210.0, "right": "C", "action": "SELL", "ratio": 1, "conId": 1002},
+    ]
 
 
 @pytest.mark.asyncio
@@ -250,6 +294,26 @@ async def test_refused_place_returns_response_and_session_back_to_filled(place):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status, reason_code, state",
+    [
+        (502, "IB_REJECT", "FILLED"),  # explicit IB reject: row REJECTED, nothing at IB
+        (503, "ORDERS_HALTED", "FILLED"),  # owner proved nothing was sent
+        (502, "SOMETHING_NEW", "PROTECTION_PENDING"),  # unknown 5xx: may be at IB
+        (200, None, "PROTECTION_PENDING"),  # duplicate-of reply: an order exists
+    ],
+)
+async def test_only_proven_not_sent_responses_release_the_claim(place, status, reason_code, state):
+    sid = _init_session(state="FILLED")
+    place.replies[:] = [JSONResponse(status_code=status, content={"reason_code": reason_code})]
+
+    result = await _protect(sid)
+
+    assert result.status_code == status
+    assert _state(sid) == state
+
+
+@pytest.mark.asyncio
 async def test_place_outcome_unknown_keeps_session_protection_pending(place):
     sid = _init_session(state="FILLED")
     place.replies[:] = [JSONResponse(status_code=502, content={"reason_code": "PLACE_OUTCOME_UNKNOWN"})]
@@ -264,14 +328,20 @@ async def test_place_outcome_unknown_keeps_session_protection_pending(place):
 
 
 @pytest.mark.asyncio
-async def test_place_exception_releases_claim(place):
+@pytest.mark.parametrize("exc", [RuntimeError("db down"), asyncio.CancelledError()], ids=["error", "cancelled"])
+async def test_place_exception_keeps_claim_fail_safe(place, exc):
+    """order_entry.place raising says nothing about whether the owner job
+    already started (a cancelled request after the start re-raises from
+    OrderOwner.run while the worker may send). Fail safe: keep
+    PROTECTION_PENDING so a second protect cannot place a second TP."""
     sid = _init_session(state="FILLED")
-    place.replies[:] = [RuntimeError("db down")]
+    place.replies[:] = [exc]
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(type(exc)):
         await _protect(sid)
 
-    assert _state(sid) == "FILLED"
+    assert _state(sid) == "PROTECTION_PENDING"
+    assert "PROTECTION_PENDING" in _event_kinds(sid)
 
 
 @pytest.mark.asyncio

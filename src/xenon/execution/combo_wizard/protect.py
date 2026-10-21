@@ -132,25 +132,63 @@ def _register_risk_alert(session_id: str, *, threshold: Decimal, polarity: str) 
     return virtual_id
 
 
+# Leg fields the TP keeps from the stored entry legs. Anything else (per-leg
+# limitPrice, exchange, client extras) is entry-only and dropped.
+_TP_LEG_KEYS = ("symbol", "expiry", "strike", "right", "action", "ratio", "conId", "con_id")
+
+
 def _tp_place_body(session_id: str, session: dict, tp_target_price: Decimal) -> dict[str, Any]:
     """The take-profit as an /orders/place body, built from the session's
-    stored payload the same way submit_combo builds the entry.
+    stored payload (the entry body submit_combo placed).
+
+    Allowlist, not a copy: only symbol, quantity and the legs' contract
+    fields come from the entry. Entry-only or stale keys (orderRef, tif,
+    outsideRth, account, replaces, acknowledge_limit_override, the entry's
+    client_attempt_id / limitPrice / nonGuaranteed, per-leg limitPrice) never
+    ride on the TP.
 
     SELL envelope closes the BUY-opened combo: IB reverses the legs, so the
     per-leg actions stay the stored structure (never flipped a second time —
     a double reverse is IB error 201). LMT at the SIGNED target (no abs()),
     GTC. The order owner places it on the reserved scope account."""
-    body = dict(session.get("payload") or {})
-    body.update(
-        {
-            "type": "combo",
-            "action": "SELL",
-            "limitPrice": str(tp_target_price),
-            "tif": "GTC",
-            "client_attempt_id": f"wiz:{session_id}:tp:{uuid.uuid4().hex}",
-        }
-    )
-    return body
+    payload = session.get("payload") or {}
+    return {
+        "type": "combo",
+        "symbol": payload.get("symbol"),
+        "action": "SELL",
+        "quantity": payload.get("quantity"),
+        "limitPrice": str(tp_target_price),
+        "tif": "GTC",
+        # Always a GUARANTEED combo (IB NonGuaranteed=0), whatever the entry
+        # used. A non-guaranteed BAG may leg: IB can fill "SELL the long
+        # call" before "BUY back the short call", leaving the short call
+        # naked meanwhile. The pre-Gate-4 TP sent no NonGuaranteed tag (IB
+        # default: guaranteed); the place path defaults to 1, so set it here.
+        "nonGuaranteed": 0,
+        "legs": [{k: leg[k] for k in _TP_LEG_KEYS if k in leg} for leg in payload.get("legs") or []],
+        "client_attempt_id": f"wiz:{session_id}:tp:{uuid.uuid4().hex}",
+    }
+
+
+def _proves_tp_not_at_ib(status_code: int, reason_code: str | None) -> bool:
+    """True only for place responses that prove IB holds no TP: a refusal
+    before the send (4xx: Gate 4, preflight, read-only, attempt-id
+    conflicts), an owner refusal that proves nothing was sent (503:
+    ORDERS_HALTED / IB_BROKER_DISCONNECTED / IB_CONNECTION), or an explicit
+    IB reject (502 IB_REJECT / LIMIT_OFF_TICK / account codes, row
+    REJECTED). Everything else (PLACE_OUTCOME_UNKNOWN, a 200 duplicate,
+    an unknown code) keeps the session claimed."""
+    if reason_code == "PLACE_OUTCOME_UNKNOWN":
+        return False
+    if 400 <= status_code < 500 or status_code == 503:
+        return True
+    return status_code == 502 and reason_code in _IB_REJECT_CODES
+
+
+# 502 codes `_place_result` writes for an explicit IB reject (row REJECTED).
+_IB_REJECT_CODES = frozenset(
+    {"IB_REJECT", "LIMIT_OFF_TICK", "ACCOUNT_UNRESOLVED", "ACCOUNT_NOT_MANAGED", "INVALID_ORDER_BODY"}
+)
 
 
 def _response_reason_code(response: Response) -> str | None:
@@ -190,13 +228,14 @@ async def attach_protection(
     Returns:
         - dict with ``state`` (PROTECTED / PROTECTION_PENDING), ``attempts``,
           ``tp_attached``, ``alert_armed``, ``tp_order_id``,
-          ``alert_virtual_id``, ``submission_id`` when the TP was placed;
+          ``alert_virtual_id``, ``client_attempt_id`` (the TP's
+          order_submissions key) when the TP was placed;
           ``noop`` when the session was already PROTECTED.
         - the ``order_entry.place`` Response (top-level ``reason_code``)
           when the TP was not placed. A refusal (Gate 4, halt, broker down,
           IB reject) returns the session to FILLED; PLACE_OUTCOME_UNKNOWN
           keeps it PROTECTION_PENDING (IB may hold the TP — a second protect
-          must not place a duplicate).
+          must not place a duplicate). So does an exception from the place.
 
     Raises:
         ValueError: unknown session, scope mismatch, or a state other than
@@ -219,31 +258,42 @@ async def attach_protection(
     body = _tp_place_body(session_id, session, tp_target_price)
     try:
         result = await order_entry.place(body)
-    except Exception:
-        _transition(session_id, "PROTECTION_PENDING", "FILLED")
+    except BaseException as exc:
+        # Fail safe: a raise does not prove nothing was sent (a request
+        # cancelled after the owner job started re-raises from
+        # OrderOwner.run while the worker may still send). Keep the claim so
+        # a second protect cannot place a second TP; the reservation row
+        # (client_attempt_id below) shows what reached IB.
+        try:
+            _record_event(
+                session_id,
+                "PROTECTION_PENDING",
+                {"reason": "PLACE_RAISED", "error": repr(exc), "client_attempt_id": body["client_attempt_id"]},
+            )
+        except Exception:  # noqa: BLE001 — never mask the original error
+            logger.exception("protect: could not record PLACE_RAISED for %s", session_id)
         raise
 
     if isinstance(result, Response):
         reason_code = _response_reason_code(result)
         detail = {"reason_code": reason_code, "status": result.status_code, "client_attempt_id": body["client_attempt_id"]}
-        if reason_code == "PLACE_OUTCOME_UNKNOWN":
+        if not _proves_tp_not_at_ib(result.status_code, reason_code):
+            # PLACE_OUTCOME_UNKNOWN or anything unexpected: IB may hold the TP.
             _record_event(session_id, "PROTECTION_PENDING", detail)
             return result
         _transition(session_id, "PROTECTION_PENDING", "FILLED")
         _record_event(session_id, "PROTECTION_TP_REFUSED", detail)
         return result
     if not isinstance(result, dict):
-        _transition(session_id, "PROTECTION_PENDING", "FILLED")
+        _record_event(session_id, "PROTECTION_PENDING", {"reason": "PLACE_INVALID_RESPONSE"})
         raise ValueError("Order placement returned an invalid response")
 
     tp_order_id = str(result.get("permId") or result.get("orderId") or "")
-    submission_id = result.get("submission_id")
     _record_event(
         session_id,
         "PROTECTION_TP_ATTACHED",
         {
             "tp_order_id": tp_order_id,
-            "submission_id": submission_id,
             "client_attempt_id": body["client_attempt_id"],
             "target_price": str(tp_target_price),  # signed
         },
@@ -290,5 +340,5 @@ async def attach_protection(
         "alert_armed": alert_armed,
         "tp_order_id": tp_order_id,
         "alert_virtual_id": alert_virtual_id,
-        "submission_id": submission_id,
+        "client_attempt_id": body["client_attempt_id"],
     }

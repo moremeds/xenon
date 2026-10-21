@@ -761,6 +761,7 @@ def _real_place_path(monkeypatch) -> None:
 def test_protect_reserves_tp_through_gate4_and_places_once_on_the_owner(
     monkeypatch, client, filled_session, protect_owner
 ):
+    monkeypatch.delenv("XENON_GATE4_NETTING", raising=False)
     _real_place_path(monkeypatch)
 
     resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
@@ -778,6 +779,7 @@ def test_protect_reserves_tp_through_gate4_and_places_once_on_the_owner(
     # SELL envelope closes the BUY-opened combo; per-leg actions are the
     # session's stored structure (never flipped a second time); signed LMT.
     assert params["type"] == "combo" and params["action"] == "SELL" and params["tif"] == "GTC"
+    assert params["nonGuaranteed"] == 0
     assert [(leg["action"], leg["strike"], leg["right"]) for leg in params["legs"]] == [
         ("BUY", 200.0, "C"),
         ("SELL", 210.0, "C"),
@@ -795,15 +797,112 @@ def test_protect_reserves_tp_through_gate4_and_places_once_on_the_owner(
     assert _session_state(filled_session) == "PROTECTED"
 
 
-def test_protect_gate4_refusal_sends_nothing_and_keeps_session_filled(
-    monkeypatch, client, filled_session, protect_owner
-):
-    """Another working order already consumes the only cover (100 SPY
-    shares): leg by leg the TP's SELL 200C is uncovered → Gate-4 refusal, no
-    IB call, no reservation, top-level reason_code, session stays FILLED.
-    The BAG nets to a covered vertical, so Gate 4 answers with its
-    leg-out code (COMBO_SPLIT_REQUIRED), the same as for any such order on
-    /orders/place."""
+def _replace_snapshot(positions: list[dict]) -> None:
+    """Latest scoped snapshot = exactly `positions` (shape ib_sync writes)."""
+    import json as _json
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    payload = {
+        "positions": positions,
+        "available_funds": 0,
+        "observation": {
+            "as_of": now.isoformat(),
+            "complete": True,
+            "account": "DU0000000",
+            "reads": {"positions": True, "open_orders": True, "executions": True},
+            **committed_pass_stamp(),
+        },
+    }
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        conn.execute(text("TRUNCATE xenon.account_snapshots CASCADE"))
+        conn.execute(
+            text(
+                """
+                INSERT INTO xenon.account_snapshots
+                  (account, bankroll, payload, snapshot_at, broker, account_env, broker_account)
+                VALUES ('DU0000000', 0, CAST(:p AS jsonb), :at, 'IB', 'paper', 'DU0000000')
+                """
+            ),
+            {"p": _json.dumps(payload), "at": now},
+        )
+    engine.dispose()
+
+
+def _spy_call(qty: int, strike: float) -> dict:
+    """The filled vertical's legs as ib_sync records them (expiry of _plan_payload)."""
+    return {
+        "ticker": "SPY",
+        "expiry": "2026-04-17",
+        "legs": [
+            {
+                "direction": "LONG" if qty >= 0 else "SHORT",
+                "type": "Call",
+                "contracts": abs(qty),
+                "strike": strike,
+                "account": "DU0000000",
+                "tc": "SPY",
+                "mult": 100,
+                "und_sec": "STK",
+            }
+        ],
+    }
+
+
+def test_protect_guaranteed_tp_closes_vertical_under_gate4_netting(monkeypatch, client, filled_session, protect_owner):
+    """Real Gate-4 evaluation: the account holds only the filled call debit
+    vertical (long 200C, short 210C) and nothing else works. The TP is a
+    GUARANTEED BAG, so with netting on its legs net per key → no new demand:
+    accepted, one reservation row recording guaranteed=True, one owner send
+    with NonGuaranteed=0."""
+    _replace_snapshot([_spy_call(1, 200.0), _spy_call(-1, 210.0)])
+    monkeypatch.setenv("XENON_GATE4_NETTING", "1")
+    _real_place_path(monkeypatch)
+
+    resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["state"] == "PROTECTED"
+    assert len(protect_owner.calls) == 1
+    assert protect_owner.calls[0]["nonGuaranteed"] == 0
+    rows = _tp_rows(filled_session)
+    assert len(rows) == 1
+    assert rows[0]["legs"]["guaranteed"] is True
+    assert [leg["action"] for leg in rows[0]["legs"]["legs"]] == ["BUY", "SELL"]
+
+
+def test_protect_guaranteed_tp_without_netting_is_refused_before_ib(monkeypatch, client, filled_session, protect_owner):
+    """Same holdings, netting off (the default: XENON_GATE4_NETTING unset).
+    Leg by leg the SELL 200C would leave the held short 210C uncovered, so
+    Gate 4 refuses with its leg-out code: no IB call, no reservation,
+    top-level reason_code, session back to FILLED."""
+    _replace_snapshot([_spy_call(1, 200.0), _spy_call(-1, 210.0)])
+    monkeypatch.delenv("XENON_GATE4_NETTING", raising=False)
+    _real_place_path(monkeypatch)
+
+    resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["reason_code"] == "COMBO_SPLIT_REQUIRED"
+    assert protect_owner.calls == [] and protect_owner.pool.client.sent == []
+    assert _tp_rows(filled_session) == []
+    assert _session_state(filled_session) == "FILLED"
+
+
+def test_protect_refused_when_another_working_order_uses_the_cover(monkeypatch, client, filled_session, protect_owner):
+    """A working reservation changes the TP decision. The only cover is 100
+    SPY shares (autouse snapshot, no option holdings). Alone, the TP passes
+    leg by leg (its SELL 200C is covered by the shares — see the owner test
+    above). Once another working order uses those shares, the SELL 200C leg
+    is uncovered → refused before IB, no reservation, session back to FILLED.
+
+    The code is COMBO_SPLIT_REQUIRED, not ETF_CALL_UNCOVERED: a guaranteed
+    same-key vertical close nets to zero call demand (coverage.py: netting
+    per Key, Key has no strike), so it can never *increase* uncovered calls
+    under netting and gate4 reports the leg-out code (gate4.py split_required
+    = not netting_enabled() and _accepted_with_netting)."""
+    monkeypatch.delenv("XENON_GATE4_NETTING", raising=False)
     _seed_session("wiz-protect-other", _plan_payload()["order_payload"])
     # Test mode: the other order reserves through Gate 4 and goes WORKING
     # without the owner.
