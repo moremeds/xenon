@@ -780,21 +780,13 @@ async def auth_middleware(request: Request, call_next):
     )
 
 
+# Route groups split out of this file (PR-20). Inclusion order = app.routes order;
+# keep it — it reproduces the pre-split route list exactly.
 app.include_router(system_router)
-
-
 app.include_router(portfolio_router)
-
-
 app.include_router(order_entry_router)
-
-
 app.include_router(futu_router)
-
-
 app.include_router(blotter_router)
-
-
 app.include_router(market_router)
 
 

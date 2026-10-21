@@ -33,6 +33,9 @@ matched=0
 case "$file_path" in
   */src/xenon/execution/*) matched=1 ;;
   */src/xenon/api/server.py) matched=1 ;;
+  */src/xenon/api/services/order_entry.py) matched=1 ;;
+  */src/xenon/api/routes/order_entry.py) matched=1 ;;
+  */src/xenon/api/routes/portfolio.py) matched=1 ;;
   */src/xenon/api/routes/orders*) matched=1 ;;
   */web/app/api/orders/*) matched=1 ;;
   */web/lib/order/*) matched=1 ;;
@@ -53,9 +56,10 @@ shipped silent regressions here. Keep these invariants:
    of truth for portfolio, orders, NAV, vcg. Use scoped queries via
    AccountScope; legacy JSON is backfill input only.
 2. Every order entrypoint must route through _run_preflight() in
-   src/xenon/api/server.py. Do not call ib_place_order directly from
-   anywhere except server.py, the module itself, and tests (the CI
-   caller allowlist) — in-process bypass has caused regressions twice.
+   src/xenon/api/services/order_entry.py. Do not call ib_place_order
+   directly from anywhere except services/order_entry.py, the module
+   itself, and tests (the CI caller allowlist) — in-process bypass has
+   caused regressions twice.
 3. client_attempt_id is required, not optional, on every order body.
    Missing it must return INVALID_ORDER_BODY (400) — never accept and
    forward.

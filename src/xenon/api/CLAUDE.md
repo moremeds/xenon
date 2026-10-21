@@ -10,15 +10,22 @@ Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xeno
 
 ## Module Layout
 
-- `server.py` — endpoint dispatch, IB pool lifecycle, portfolio + orders + Futu inline routes
-- `routes/` — per-topic FastAPI routers, included from `server.py`:
-  - `orders.py` — `/orders/*` (list, refresh, dependencies)
+- `server.py` — app assembly: lifespan (IB pool, order owner, boot reconcile, background tasks, shutdown budget), auth + read-only middleware, router includes, process-wide state (`app`, `ib_pool`, `order_owner`, `uw_available`, test mode) and the IB script runner (`_run_ib_script_with_recovery`). Route and service modules read this state as `server.<name>` through an in-function `from xenon.api import server` (never a top-level import: `server` imports every router). No re-exports of moved names — patch the module that defines the name.
+- `routes/` — per-topic FastAPI routers, included from `server.py` (inclusion order = `app.routes` order):
+  - `system.py` — `/health`, `/admin/operator`, `/dev/rehydrate/synthetic`, `/ws-ticket*`
+  - `portfolio.py` — `/attribution`, `/portfolio*`, `/orders/refresh`; owns the single-flight `_sync_task` and the PR-11 audit enforce hook
+  - `order_entry.py` — `/orders/{quote,place,cancel,replace,modify}` (thin handlers over `services/order_entry.py`)
+  - `futu.py` — `/futu/sync`, `/futu/portfolio`; owns the Futu singleton
+  - `blotter.py` — `POST/GET /blotter`
+  - `market.py` — `/options/{chain,expirations,greeks}`, `/market-depth`
+  - `orders.py` — `GET /orders` (list) and `orders_payload_for_scope`
   - `historical.py` — historical bars / fills
   - `journal.py` — trade journal entries
   - `trades.py` — closed trades
   - `position_rules.py` — position-close rule CRUD
   - `wizard.py` — combo order wizard (plan/submit/reprice/abort/protect)
 - `services/` — business logic (stateful, testable without HTTP):
+  - `order_entry.py` — `place` / `cancel` / `modify` / `replace` cores (each starts with `ensure_order_allowed`), preflight, Gate 4, quote gate, owner-reply mapping (`order_error`). Callers: `routes/order_entry.py`, `combo_wizard/session.py` (submit/reprice/abort), the audit hook (`_cancel_order`). Wizard protect keeps its own guard in `routes/wizard.py`.
   - `advisory_lock.py` — Postgres advisory locks
   - `ib_activity_mirror.py` — IB→PG fills + open-orders mirror
   - `journal_auto_import.py` — PG-event-driven journal auto-import
@@ -63,7 +70,7 @@ Helpers live in `xenon.api.guards`:
 
 Surfaces that gate on the flag:
 
-- **FastAPI write routes** — return 403 early: `POST /orders/place`, `POST /orders/cancel`, `POST /orders/modify` (`server.py`), `POST /journal` (`routes/journal.py`). `GET` siblings stay open.
+- **FastAPI write routes** — return 403 early: `POST /orders/place`, `POST /orders/cancel`, `POST /orders/modify` (`routes/order_entry.py`), `POST /journal` (`routes/journal.py`). `GET` siblings stay open.
 - **Lifespan tasks** — `_run_rehydrate_on_boot`, `_run_fills_replay_on_boot`, and `_maybe_start_activity_poller` are skipped with a warning log when the flag is set. The Wizard Risk Alert still evaluates but records no event. The poller task handle on `app.state.ib_activity_poller_task` is `None` in that case; shutdown logic already tolerates `None`.
 - **Writer modules** — `xenon.execution.ib_sync._save_portfolio_to_postgres` and `_append_nav_snapshot` are no-ops. Any new persistence helper called from this package or from a subprocess CLI invoked by the lifespan must short-circuit on the flag, not silently write.
 - **Writer CLIs** — `xenon-nav-flex-refresh`, `xenon-futu-statement-sync` and `flex_divergence_check --apply` exit 3 with a `READ_ONLY:` message before any DB or broker work.
@@ -74,7 +81,7 @@ Tests: `src/xenon/api/tests/test_read_only_mode.py` (routes), `scripts/tests/tes
 
 Runbook: `docs/runbooks/pr10-order-owner-cutover.md`. Incident rows 37–40.
 
-1. **One owner.** Place, cancel, modify and wizard protect run in-process on the pool `orders` connection (clientId `base + 4`) through `OrderOwner.run(core, timeout, settle)` on its pinned worker. No subprocess, no second IB connection, no reconnect as another clientId. The cores are `ib_place_order.place_order_on_client` and `ib_order_manage.cancel_order_on_client` / `modify_order_on_client`; only `server.py` may import them (`scripts/checks/order_path_caller_allowlist.py`).
+1. **One owner.** Place, cancel, modify and wizard protect run in-process on the pool `orders` connection (clientId `base + 4`) through `OrderOwner.run(core, timeout, settle)` on its pinned worker. No subprocess, no second IB connection, no reconnect as another clientId. The cores are `ib_place_order.place_order_on_client` and `ib_order_manage.cancel_order_on_client` / `modify_order_on_client`; only `services/order_entry.py` may import them (`scripts/checks/order_path_caller_allowlist.py`).
    - IB scopes `cancelOrder` and `placeOrder` (modify) by clientId: another client sees the order through `reqAllOpenOrders()` but cannot change it (Error 10147 cancel, Error 103 modify). So every Xenon order is placed by the owner, and `placing_client_id` stores the owner id.
    - **Positive routing:** an order whose recorded `placing_client_id` is not this environment's `orders` id (TWS / mobile / clientId 0, the old subprocess range, relay or pool ids, another environment) gets 409 `ORDER_NOT_OWNED` with no broker work. A row without a recorded id goes to the owner; its fresh scoped open-order snapshot refuses a foreign or ambiguous owner before any send.
 2. **Invocation lifecycle:** queued → started → sent → done / abandoned. `settle` runs exactly once: on the worker for a started job (even after the request is gone), else on the request side.
