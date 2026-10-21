@@ -5,6 +5,15 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-10-21
+
+Summary: the Futu tab syncs again after page load; the naked-short audit gains an enforce mode that stays off unless `XENON_AUDIT_CANCEL=1`.
+
+- **Futu positions sync on page load again.** The sync loop never started until the browser tab changed visibility: the market-hours state flips from CLOSED after mount, and that flip cancelled the first scheduling. The loop now starts once the cached read is done and the market is active, in either order. When the cached snapshot is older than 60 s (or missing), the first sync runs after 0.5 s instead of 30 s. Disabling or unmounting stops the loop, including a sync already in flight.
+- **Flex token banner reads FastAPI.** `/api/flex-token` uses `GET /health` `flex_token` through `xenonFetch` instead of reading `data/flex_token_config.json`; the banner no longer shows the masked token.
+- IB farm-status codes 2107 and 2119 are logged at INFO, not ERROR (1100 / 2110 / 326 unchanged).
+- Futu closed-trade rebuild: a close with no matching open lot warns once per deal per process (repeats at DEBUG) instead of on every sync. Its realized P&L is still omitted; the cause is not yet verified.
+- Release workflow: the dead `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` build arg is removed.
 - **Naked-short audit enforce mode (PR-11), default off.** With `XENON_AUDIT_CANCEL=1` the API cancels audit violations after each sync: one order at a time, newest first, each confirmed by a fresh sync pass before the cancel, then a re-sync before the next, at most 5 per sync. It cancels only orders this environment's order owner placed, by permId (no orderId fallback), through the `POST /orders/cancel` core; a confirmed cancel marks the order `CANCELLED` with reason `NAKED_SHORT_AUDIT`. It never acts under `XENON_READ_ONLY`, with a halted owner, or on a skipped / stale / incomplete audit; an unconfirmed cancel stops it with a `service_health` error. Orders placed in TWS / IBKR Mobile are reported, not cancelled. `xenon-ib-sync --sync` now prints the audit summary as its last stdout line.
 
 ## [0.11.0] — 2026-10-20
