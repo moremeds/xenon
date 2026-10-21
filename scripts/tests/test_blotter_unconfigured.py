@@ -12,6 +12,7 @@ from sqlalchemy import insert
 
 from xenon.db.engine import get_sync_engine
 from xenon.db.schema import trades
+from xenon.api.routes import blotter as blotter_routes
 
 BROKER_SCOPE = {
     "broker": "IB",
@@ -31,7 +32,7 @@ def unconfigured_client(monkeypatch):
     async def flex_not_configured(*args, **kwargs):
         return ScriptResult(ok=False, error="FLEX_NOT_CONFIGURED", exit_code=2)
 
-    monkeypatch.setattr(server, "run_module", flex_not_configured)
+    monkeypatch.setattr(blotter_routes, "run_module", flex_not_configured)
 
     return TestClient(server.app)
 
@@ -90,7 +91,7 @@ def test_blotter_returns_postgres_rows_when_flex_unconfigured(monkeypatch):
     async def flex_unconfigured(*args, **kwargs):
         return SimpleNamespace(ok=False, exit_code=2, error="FLEX_NOT_CONFIGURED", data=None)
 
-    monkeypatch.setattr(server, "run_module", flex_unconfigured)
+    monkeypatch.setattr(blotter_routes, "run_module", flex_unconfigured)
 
     # Anchor relative to now so fetch_blotter_pg's days=30 filter always
     # includes us — a hardcoded date silently fell out of the window after
@@ -153,7 +154,7 @@ def test_blotter_get_returns_postgres_rows_without_flex(monkeypatch):
     async def fail_if_flex_called(*args, **kwargs):  # pragma: no cover - assertion guard
         raise AssertionError("GET /blotter should not run Flex")
 
-    monkeypatch.setattr(server, "run_module", fail_if_flex_called)
+    monkeypatch.setattr(blotter_routes, "run_module", fail_if_flex_called)
 
     opened_at = datetime.now(timezone.utc) - timedelta(days=2)
     engine = get_sync_engine()
