@@ -52,7 +52,9 @@ def _audit(*violations, status=None, account=ACCT, reason=None):
 
 
 class Harness:
-    """Records the order of cancel / resync calls."""
+    """Records the order of cancel / resync calls. Every cancel needs a
+    confirming resync first (Fable F1), so scripted `resyncs` alternate
+    confirm pass / post-cancel pass."""
 
     def __init__(self, resyncs=(), kinds=None, blocked=None):
         self.calls: list[tuple] = []
@@ -65,11 +67,17 @@ class Harness:
 
     async def cancel(self, v):
         self.calls.append(("cancel", v["order_id"], v["perm_id"]))
-        return self._kinds.pop(0) if self._kinds else "ok"
+        kind = self._kinds.pop(0) if self._kinds else "ok"
+        if isinstance(kind, BaseException):
+            raise kind
+        return kind
 
     async def resync(self):
         self.calls.append(("resync",))
-        return self._resyncs.pop(0) if self._resyncs else _audit()
+        nxt = self._resyncs.pop(0) if self._resyncs else _audit()
+        if isinstance(nxt, BaseException):
+            raise nxt
+        return nxt
 
     def run(self, audit, **kw):
         return asyncio.run(
@@ -83,6 +91,9 @@ class Harness:
                 **kw,
             )
         )
+
+
+R, C11, C10 = ("resync",), ("cancel", 11, 1002), ("cancel", 10, 1001)
 
 
 # -- gates: nothing is attempted -------------------------------------------
@@ -133,31 +144,98 @@ def test_audit_of_another_account_never_cancels():
     assert h.calls == [] and out.stopped == "audit_account_mismatch"
 
 
+# -- confirmation pass (Fable F1) ---------------------------------------------
+
+
+def test_first_cancel_needs_a_confirming_pass():
+    """One pass can show a just-covered call as naked (positions are read
+    seconds before open orders): a target the fresh pass does not confirm
+    is dropped, never cancelled."""
+    h = Harness(resyncs=[_audit()])
+    out = h.run(_audit(_v(11, 1002)))
+    assert h.calls == [R]
+    assert out.cancelled == [] and out.state == "ok"
+    assert out.skipped[-1]["reason"] == "not_confirmed"
+
+
+def test_unconfirmed_target_dropped_then_next_chosen_from_confirming_audit():
+    first = _audit(_v(10, 1001), _v(11, 1002))
+    only_10 = _audit(_v(10, 1001))
+    h = Harness(resyncs=[only_10, only_10, _audit()])
+    out = h.run(first)
+    assert h.calls == [R, R, C10, R]
+    assert [c["perm_id"] for c in out.cancelled] == [1001]
+    assert {s["perm_id"]: s["reason"] for s in out.skipped} == {1002: "not_confirmed"}
+
+
+@pytest.mark.parametrize(
+    "fresh",
+    [
+        _audit(status="skipped", reason="observation_incomplete"),
+        _audit(status="error", reason="boom"),
+        _audit(_v(11, 1002), account="U9999999"),
+    ],
+)
+def test_confirming_audit_not_usable_never_cancels(fresh):
+    h = Harness(resyncs=[fresh])
+    out = h.run(_audit(_v(11, 1002)))
+    assert h.calls == [R] and out.cancelled == []
+
+
+def test_confirm_target_must_still_be_owned_with_same_identity():
+    """Same orderId but a different permId in the fresh pass is not the
+    same order: dropped, not cancelled."""
+    h = Harness(resyncs=[_audit(_v(11, 9999)), _audit(_v(11, 9999)), _audit()])
+    out = h.run(_audit(_v(11, 1002)))
+    assert h.calls[:2] == [R, R]
+    assert ("cancel", 11, 1002) not in h.calls
+    assert out.skipped[0]["reason"] == "not_confirmed"
+
+
+def test_unconfirmed_drops_are_bounded():
+    """Each confirming pass shows a different order: the loop cannot spin."""
+    flapping = [_audit(_v(100 + i, 5000 + i)) for i in range(20)]
+    h = Harness(resyncs=flapping)
+    out = h.run(_audit(_v(99, 4999)))
+    assert all(c == R for c in h.calls)
+    assert len(h.calls) == audit_enforce.MAX_UNCONFIRMED_PER_TRIGGER
+    assert out.stopped == "confirm_bound" and out.cancelled == []
+
+
+def test_confirm_resync_failure_stops_with_error():
+    h = Harness(resyncs=[None])
+    out = h.run(_audit(_v(11, 1002)))
+    assert h.calls == [R] and out.cancelled == []
+    assert out.state == "error" and out.stopped == "resync_failed"
+
+
 # -- the loop ----------------------------------------------------------------
 
 
 def test_two_violations_cancel_newest_then_resync_then_next():
     first = _audit(_v(10, 1001), _v(11, 1002))
     after_one = _audit(_v(10, 1001))
-    h = Harness(resyncs=[after_one, _audit()])
+    h = Harness(resyncs=[first, after_one, after_one, _audit()])
     out = h.run(first)
-    assert h.calls == [("cancel", 11, 1002), ("resync",), ("cancel", 10, 1001), ("resync",)]
+    assert h.calls == [R, C11, R, R, C10, R]
     assert [c["perm_id"] for c in out.cancelled] == [1002, 1001]
     assert out.state == "ok" and out.stopped is None
 
 
 def test_one_cancel_that_clears_the_audit_stops_after_resync():
     """Violations list every contributor; cancelling one may suffice."""
-    h = Harness(resyncs=[_audit()])
-    out = h.run(_audit(_v(10, 1001), _v(11, 1002)))
-    assert h.calls == [("cancel", 11, 1002), ("resync",)]
+    first = _audit(_v(10, 1001), _v(11, 1002))
+    h = Harness(resyncs=[first, _audit()])
+    out = h.run(first)
+    assert h.calls == [R, C11, R]
     assert len(out.cancelled) == 1 and out.state == "ok"
 
 
 def test_order_of_another_client_is_skipped_not_attempted():
-    h = Harness(resyncs=[_audit(_v(50, 5001, client_id=0))])
-    out = h.run(_audit(_v(50, 5001, client_id=0), _v(10, 1001)))
-    assert h.calls == [("cancel", 10, 1001), ("resync",)]
+    first = _audit(_v(50, 5001, client_id=0), _v(10, 1001))
+    h = Harness(resyncs=[first, _audit(_v(50, 5001, client_id=0))])
+    out = h.run(first)
+    assert h.calls == [R, C10, R]
     assert {"perm_id": 5001, "reason": "not_owned"}.items() <= out.skipped[0].items()
     assert out.state == "violations"  # the foreign order is still live
 
@@ -187,64 +265,144 @@ def test_violation_of_another_account_is_skipped():
 def test_perm_id_not_found_at_cancel_time_skips_and_stops():
     """The core never falls back to orderId; a vanished permId is logged +
     skipped and the trigger ends (state changed; the next sync recomputes)."""
-    h = Harness(kinds=["not_found"])
-    out = h.run(_audit(_v(10, 1001), _v(11, 1002)))
-    assert h.calls == [("cancel", 11, 1002)]
+    first = _audit(_v(10, 1001), _v(11, 1002))
+    h = Harness(resyncs=[first], kinds=["not_found"])
+    out = h.run(first)
+    assert h.calls == [R, C11]
     assert out.cancelled == [] and out.skipped[-1]["reason"] == "perm_id_not_found"
     assert out.state != "error"
 
 
+def test_order_no_longer_working_is_skipped_not_error():
+    """Fable F2: the owner core says 'already Filled/Cancelled'."""
+    first = _audit(_v(11, 1002))
+    h = Harness(resyncs=[first], kinds=["gone"])
+    out = h.run(first)
+    assert h.calls == [R, C11]
+    assert out.cancelled == [] and out.skipped[-1]["reason"] == "order_not_working"
+    assert out.state != "error" and out.stopped == "order_not_working"
+
+
 @pytest.mark.parametrize("kind", ["uncertain", "failed"])
 def test_unconfirmed_or_failed_cancel_stops_loop_with_error(kind):
-    h = Harness(kinds=[kind])
-    out = h.run(_audit(_v(10, 1001), _v(11, 1002)))
-    assert h.calls == [("cancel", 11, 1002)]
+    first = _audit(_v(10, 1001), _v(11, 1002))
+    h = Harness(resyncs=[first], kinds=[kind])
+    out = h.run(first)
+    assert h.calls == [R, C11]
     assert out.cancelled == [] and out.state == "error" and out.stopped == f"cancel_{kind}"
 
 
-def test_gate_rechecked_before_each_cancel():
-    h = Harness(resyncs=[_audit(_v(10, 1001))])
+def test_cancel_that_raises_is_an_error_outcome_keeping_evidence():
+    """Astra 2: a raising callback ends the loop inside `enforce` with an
+    error Outcome; earlier cancels and skips are kept, nothing further runs."""
+    first = _audit(_v(50, 5001, client_id=0), _v(10, 1001), _v(11, 1002))
+    after_one = _audit(_v(50, 5001, client_id=0), _v(10, 1001))
+    h = Harness(resyncs=[first, after_one, after_one], kinds=["ok", RuntimeError("db down")])
+    out = h.run(first)
+    assert h.calls == [R, C11, R, R, C10]
+    assert [c["perm_id"] for c in out.cancelled] == [1002]
+    assert out.skipped[0]["reason"] == "not_owned"
+    assert out.state == "error" and out.stopped == "exception:RuntimeError"
 
-    calls = {"n": 0}
 
-    def _blocked():
-        calls["n"] += 1
-        return None if calls["n"] == 1 else "owner_halted"
+def test_resync_that_raises_is_an_error_outcome():
+    h = Harness(resyncs=[RuntimeError("spawn")])
+    out = h.run(_audit(_v(11, 1002)))
+    assert h.calls == [R] and out.state == "error" and out.stopped == "exception:RuntimeError"
 
-    h.blocked = _blocked
-    out = h.run(_audit(_v(10, 1001), _v(11, 1002)))
-    assert h.calls == [("cancel", 11, 1002), ("resync",)]
+
+def test_gate_rechecked_right_before_each_cancel():
+    """Blocked after the confirming pass: nothing is sent."""
+    first = _audit(_v(11, 1002))
+    h = Harness(resyncs=[first])
+    seq = iter([None, "owner_halted"])
+    h.blocked = lambda: next(seq)
+    out = h.run(first)
+    assert h.calls == [R]
+    assert out.stopped == "owner_halted" and out.cancelled == []
+
+
+def test_gate_rechecked_before_the_next_target():
+    first = _audit(_v(10, 1001), _v(11, 1002))
+    h = Harness(resyncs=[first, _audit(_v(10, 1001))])
+    seq = iter([None, None, "owner_halted"])
+    h.blocked = lambda: next(seq)
+    out = h.run(first)
+    assert h.calls == [R, C11, R]
     assert out.stopped == "owner_halted" and len(out.cancelled) == 1
 
 
-def test_resync_failure_stops_with_error():
-    h = Harness(resyncs=[None])
-    out = h.run(_audit(_v(10, 1001), _v(11, 1002)))
-    assert h.calls == [("cancel", 11, 1002), ("resync",)]
+def test_resync_failure_after_cancel_stops_with_error():
+    first = _audit(_v(10, 1001), _v(11, 1002))
+    h = Harness(resyncs=[first, None])
+    out = h.run(first)
+    assert h.calls == [R, C11, R]
     assert out.state == "error" and out.stopped == "resync_failed"
 
 
+class _LiveBook(Harness):
+    """Every pass shows all not-yet-cancelled orders as violations."""
+
+    def __init__(self, n):
+        super().__init__()
+        self.live = {1000 + i: _v(i, 1000 + i) for i in range(1, n + 1)}
+
+    async def cancel(self, v):
+        self.calls.append(("cancel", v["order_id"], v["perm_id"]))
+        self.live.pop(v["perm_id"])
+        return "ok"
+
+    async def resync(self):
+        self.calls.append(R)
+        return _audit(*self.live.values())
+
+
 def test_loop_bound_respected(caplog):
-    always = [_audit(_v(i, 1000 + i)) for i in range(20, 10, -1)]
-    h = Harness(resyncs=always)
+    h = _LiveBook(10)
     with caplog.at_level("WARNING", logger="xenon.audit_enforce"):
-        out = h.run(_audit(_v(30, 1030)), max_cancels=3)
+        out = h.run(_audit(*h.live.values()), max_cancels=3)
     assert [c[0] for c in h.calls].count("cancel") == 3
+    assert [c[2] for c in h.calls if c[0] == "cancel"] == [1010, 1009, 1008]  # newest first
     assert out.stopped == "max_cancels" and out.state == "violations"
     assert "bound" in caplog.text
 
 
-def test_default_bound_is_five():
+def test_default_bounds():
     assert audit_enforce.MAX_CANCELS_PER_TRIGGER == 5
+    assert audit_enforce.MAX_UNCONFIRMED_PER_TRIGGER == 3
 
 
 def test_health_detail_reports_enforce_mode_and_counts():
-    h = Harness(resyncs=[_audit()])
-    out = h.run(_audit(_v(50, 5001, client_id=0), _v(10, 1001)))
+    first = _audit(_v(50, 5001, client_id=0), _v(10, 1001))
+    h = Harness(resyncs=[first, _audit()])
+    out = h.run(first)
     detail = json.loads(out.health_detail())
     assert detail["mode"] == "enforce"
-    assert detail["cancelled"] == 1 and detail["skipped"] == 1
+    assert detail["cancelled"] == 1 and detail["enforce_skipped"] == 1
     assert detail["orders_cancelled"][0]["perm_id"] == 1001
+    assert detail["enforce_skipped_orders"][0]["reason"] == "not_owned"
+
+
+def test_health_keeps_the_audits_coverage_evidence_over_the_shadow_row():
+    """Astra 1: the enforce row replaces the shadow row; it must keep the
+    latest audit's own skips and held exposure, apart from enforce skips."""
+    from xenon.execution import naked_short_audit as nsa
+
+    shadow = nsa.AuditResult(
+        "ok",
+        skipped=[{"symbol": "XYZ", "reason": "holding_unknown_metadata:multiplier"}],
+        held_uncovered={"AAPL|20261120|500.0|C": 1},
+        held_short_stock={"TSLA": 50},
+    )
+    audit = {**shadow.summary(), "account": ACCT}
+    out = Harness().run(audit)
+    detail = json.loads(out.health_detail())
+    shadow_detail = json.loads(nsa._health_detail(shadow))
+    assert out.state == "ok"
+    for key in ("skipped", "held_uncovered", "held_short_stock"):
+        assert detail[key] == shadow_detail[key], key
+    assert detail["audit_skipped"] == shadow.skipped
+    assert detail["enforce_skipped"] == 0
 
 
 def test_flag_parsing(monkeypatch):
@@ -317,6 +475,7 @@ def test_glue_read_only_never_cancels(glue, monkeypatch):
     _sync(glue, _sync_result(_audit(_v(10, 1001))))
     assert glue["runs"] == ["xenon-ib-sync"]
     assert glue["cancels"] == [] and glue["marks"] == []
+    assert glue["health"] == []  # read-only + flag on writes no enforce row
 
 
 def test_glue_owner_halted_never_cancels(glue):
@@ -346,9 +505,10 @@ def test_glue_audit_not_ok_never_cancels(glue, audit):
 
 
 def test_glue_confirmed_cancel_marks_terminal_and_resyncs(glue):
-    result = _sync(glue, _sync_result(_audit(_v(10, 1001), _v(11, 1002))), _sync_result(_audit()))
+    first = _sync_result(_audit(_v(10, 1001), _v(11, 1002)))
+    result = _sync(glue, first, first, _sync_result(_audit()))
     assert result.ok
-    assert glue["runs"] == ["xenon-ib-sync", "xenon-ib-sync"]
+    assert glue["runs"] == ["xenon-ib-sync"] * 3  # pass, confirming pass, post-cancel pass
     assert glue["cancels"] == [(11, 1002, orders_id())]
     (mark,) = glue["marks"]
     assert mark["submission_id"] == "sub-1002"
@@ -372,10 +532,11 @@ def test_glue_unconfirmed_cancel_stops_marks_nothing_records_error(glue):
             "amend_outcome": "unconfirmed",
         }
     )
-    _sync(glue, _sync_result(_audit(_v(10, 1001), _v(11, 1002))))
+    first = _sync_result(_audit(_v(10, 1001), _v(11, 1002)))
+    _sync(glue, first, first)
     assert glue["cancels"] == [(11, 1002, orders_id())]
     assert glue["marks"] == []
-    assert glue["runs"] == ["xenon-ib-sync"]  # no re-sync after an uncertain cancel
+    assert glue["runs"] == ["xenon-ib-sync"] * 2  # confirming pass only; no re-sync after it
     ((args, kw),) = glue["health"]
     assert args[1] == "error" and kw["error"]
 
@@ -389,11 +550,12 @@ def test_glue_perm_id_not_found_skips_no_fallback(glue):
             "upstream": {"code": 10147, "message": "Order not found (local lookup)"},
         }
     )
-    _sync(glue, _sync_result(_audit(_v(11, 1002))))
+    first = _sync_result(_audit(_v(11, 1002)))
+    _sync(glue, first, first)
     assert glue["cancels"] == [(11, 1002, orders_id())]  # one call, permId pinned
     assert glue["marks"] == []
     ((_args, kw),) = glue["health"]
-    assert json.loads(kw["detail"])["skipped_orders"][0]["reason"] == "perm_id_not_found"
+    assert json.loads(kw["detail"])["enforce_skipped_orders"][0]["reason"] == "perm_id_not_found"
 
 
 def test_glue_foreign_client_never_reaches_core(glue):
@@ -403,7 +565,8 @@ def test_glue_foreign_client_never_reaches_core(glue):
 
 def test_glue_enforcement_runs_inside_the_single_flight_task(glue):
     """A background trigger during enforcement joins the running task."""
-    glue["results"].extend([_sync_result(_audit(_v(11, 1002))), _sync_result(_audit())])
+    first = _sync_result(_audit(_v(11, 1002)))
+    glue["results"].extend([first, first, _sync_result(_audit())])
 
     async def _go():
         assert await server_mod.portfolio_background_sync() == {"status": "accepted"}
@@ -413,5 +576,80 @@ def test_glue_enforcement_runs_inside_the_single_flight_task(glue):
         await task
 
     asyncio.run(_go())
-    assert glue["runs"] == ["xenon-ib-sync", "xenon-ib-sync"]
+    assert glue["runs"] == ["xenon-ib-sync"] * 3
     assert len(glue["cancels"]) == 1
+
+
+def test_glue_raising_submission_lookup_records_enforce_error(glue, monkeypatch):
+    """Astra 2: the lookup inside `_cancel_order` raises → enforce error
+    heartbeat, no send, nothing marked, no further cancels."""
+
+    def _boom(**_kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(orders_store, "load_submission_for_modify", _boom)
+    first = _sync_result(_audit(_v(10, 1001), _v(11, 1002)))
+    result = _sync(glue, first, first)
+    assert result.ok
+    assert glue["cancels"] == [] and glue["marks"] == []
+    ((args, kw),) = glue["health"]
+    assert args[1] == "error" and kw["error"]
+    detail = json.loads(kw["detail"])
+    assert detail["mode"] == "enforce" and detail["stopped"] == "exception:RuntimeError"
+
+
+def test_glue_order_already_filled_is_skipped_not_error(glue):
+    """Fable F2: the core finds the order no longer working."""
+    glue["replies"].append(
+        {"status": "error", "message": "Order already Filled — cannot cancel", "classification": "ib_reject"}
+    )
+    first = _sync_result(_audit(_v(11, 1002)))
+    _sync(glue, first, first)
+    assert glue["cancels"] == [(11, 1002, orders_id())]
+    assert glue["marks"] == []
+    ((args, kw),) = glue["health"]
+    assert args[1] != "error" and kw["error"] is None
+    assert json.loads(kw["detail"])["enforce_skipped_orders"][0]["reason"] == "order_not_working"
+
+
+def test_glue_no_submission_row_cancels_on_owner_and_marks_nothing(glue, monkeypatch):
+    """Fable F8(i): no row → owner path without a recorded clientId (the
+    core's own ownership check applies); no row to mark."""
+    monkeypatch.setattr(orders_store, "load_submission_for_modify", lambda **_kw: None)
+    first = _sync_result(_audit(_v(11, 1002)))
+    _sync(glue, first, first, _sync_result(_audit()))
+    assert glue["cancels"] == [(11, 1002, None)]
+    assert glue["marks"] == []
+
+
+def test_glue_row_with_foreign_placing_client_is_refused_without_send(glue, monkeypatch):
+    """Fable F8(ii): a row recorded with another placing clientId → 409
+    ORDER_NOT_OWNED, nothing sent, nothing marked, enforce error."""
+    monkeypatch.setattr(
+        orders_store,
+        "load_submission_for_modify",
+        lambda **kw: {"submission_id": "sub-x", "placing_client_id": 26},
+    )
+    first = _sync_result(_audit(_v(11, 1002)))
+    _sync(glue, first, first)
+    assert glue["cancels"] == [] and glue["marks"] == []
+    assert glue["owner"]._pool.client.sent == []
+    ((args, kw),) = glue["health"]
+    assert args[1] == "error" and json.loads(kw["detail"])["stopped"] == "cancel_failed"
+
+
+def test_glue_health_keeps_audit_coverage_evidence(glue):
+    """Astra 1 at the glue: coverage skips + held exposure survive the
+    shadow→enforce overwrite."""
+    audit = {
+        **_audit(),
+        "skipped": [{"symbol": "XYZ", "reason": "holding_unknown_metadata:multiplier"}],
+        "held_uncovered": {"AAPL|20261120|500.0|C": 1},
+        "held_short_stock": {},
+    }
+    _sync(glue, _sync_result(audit))
+    ((args, kw),) = glue["health"]
+    detail = json.loads(kw["detail"])
+    assert args[1] == "ok"
+    assert detail["skipped"] == 1 and detail["audit_skipped"][0]["symbol"] == "XYZ"
+    assert detail["held_uncovered"] == {"AAPL|20261120|500.0|C": 1}

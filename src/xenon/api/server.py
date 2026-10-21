@@ -14,6 +14,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import re
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -1634,6 +1635,11 @@ def _audit_cancel_blocked() -> str | None:
     return None
 
 
+# The cancel core's refusal for an order that is no longer working
+# (`ib_order_manage._cancel_body`), sent before any cancelOrder.
+_ALREADY_TERMINAL = re.compile(r"^Order already (Filled|Cancelled|ApiCancelled)\b")
+
+
 async def _audit_cancel(target: dict) -> str:
     """Cancel one audit target by its full identity; permId is always set,
     so the core never falls back to orderId."""
@@ -1648,6 +1654,9 @@ async def _audit_cancel(target: dict) -> str:
     logger.warning("naked short audit cancel %s for %s: %s", kind, target, detail)
     if kind == "failed" and isinstance(upstream, dict) and upstream.get("code") == 10147:
         return audit_enforce.NOT_FOUND  # permId gone: nothing cancelled
+    message = str(detail.get("message") or "") if isinstance(detail, dict) else ""
+    if kind == "failed" and _ALREADY_TERMINAL.match(message):
+        return audit_enforce.GONE  # filled / cancelled before we got there: nothing sent
     return audit_enforce.UNCERTAIN if kind == "uncertain" else audit_enforce.FAILED
 
 
