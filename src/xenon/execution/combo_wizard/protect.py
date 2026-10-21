@@ -2,15 +2,16 @@
 
 For V1 defined-risk spreads, after a combo FILLED we:
 
-1. Attach a broker-side combo TP where the payoff is stable enough.
+1. Place a broker-side combo take-profit (GTC SELL BAG) through
+   ``order_entry.place`` — the same path as every other order, so Gate 4
+   evaluates coverage and reserves an ``order_submissions`` row before the
+   order owner sends it.
 2. Arm a Risk Alert (assisted-exit) row — NOT a stop-loss per spec §9.2.
 
-Retries TP attach with exponential backoff. On terminal failure we leave the
-session in PROTECTION_PENDING and emit a session event; the monitor daemon
-(rehydrate + the Wizard Risk Alert task) will re-drive.
-
-Gate-4 guard: if the proposed TP would short an uncovered leg we refuse the
-TP attach and route to Risk Alert only.
+No retry loop: a refused TP returns the place response (top-level
+``reason_code``) and the session goes back to FILLED, so the operator can
+protect again. An uncertain place (PLACE_OUTCOME_UNKNOWN) keeps the session
+PROTECTION_PENDING; the activity poller resolves the reserved row.
 
 IMPORTANT: signed combo pricing is preserved end-to-end. Do NOT abs() any
 combo price in this module — CREDIT spreads have negative net prices.
@@ -18,10 +19,12 @@ combo price in this module — CREDIT spreads have negative net prices.
 
 from __future__ import annotations
 
+import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any
 
 from starlette.responses import Response
 
@@ -67,6 +70,21 @@ def _set_state(session_id: str, state: str) -> None:
         combo_wizard.update_session(conn, session_id, state=state)
 
 
+def _transition(session_id: str, from_state: str, to_state: str) -> bool:
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        return combo_wizard.transition_session_state(conn, session_id, from_state=from_state, to_state=to_state) == 1
+
+
+_PROTECTED_NOOP: dict[str, Any] = {
+    "state": "PROTECTED",
+    "noop": True,
+    "tp_attached": True,
+    "alert_armed": True,
+    "attempts": 0,
+}
+
+
 def _record_event(session_id: str, kind: str, detail: dict) -> None:
     engine = get_sync_engine()
     with engine.begin() as conn:
@@ -97,32 +115,50 @@ def _upsert_protection(
 
 
 # ---------------------------------------------------------------------------
-# Naked-short guard (Gate 4) — protect-time defensive check.
+# Risk Alert (app-side only — no broker order).
 # ---------------------------------------------------------------------------
 
 
-def _uncovered_short_calls(legs: list[dict]) -> int:
-    """Count uncovered short calls in the combo legs. Matches the leg-level
-    BAG guard from `src/xenon/CLAUDE.md` — SELL calls not covered by BUY
-    calls (any strike, any expiry) at the combo level."""
-    buy_calls = 0
-    sell_calls = 0
-    for leg in legs:
-        right = str(leg.get("right", "")).upper()
-        action = str(leg.get("action", "")).upper()
-        ratio = int(leg.get("ratio", 1))
-        if right != "C":
-            continue
-        if action == "BUY":
-            buy_calls += ratio
-        elif action == "SELL":
-            sell_calls += ratio
-    return max(0, sell_calls - buy_calls)
+def _register_risk_alert(session_id: str, *, threshold: Decimal, polarity: str) -> str:
+    """Persist a ``RISK_ALERT_REGISTERED`` event keyed by a virtual id. The
+    Wizard Risk Alert task (``api/services/wizard_risk_alert``) drives the
+    crossing check. Risk Alert → Assisted Exit, NOT a stop-loss."""
+    virtual_id = f"ra-{uuid.uuid4().hex[:12]}"
+    _record_event(
+        session_id,
+        "RISK_ALERT_REGISTERED",
+        {"virtual_id": virtual_id, "threshold": str(threshold), "polarity": polarity},  # signed
+    )
+    return virtual_id
 
 
-def _tp_would_naked_short(session: dict) -> bool:
-    legs = session.get("payload", {}).get("legs", [])
-    return _uncovered_short_calls(legs) > 0
+def _tp_place_body(session_id: str, session: dict, tp_target_price: Decimal) -> dict[str, Any]:
+    """The take-profit as an /orders/place body, built from the session's
+    stored payload the same way submit_combo builds the entry.
+
+    SELL envelope closes the BUY-opened combo: IB reverses the legs, so the
+    per-leg actions stay the stored structure (never flipped a second time —
+    a double reverse is IB error 201). LMT at the SIGNED target (no abs()),
+    GTC. The order owner places it on the reserved scope account."""
+    body = dict(session.get("payload") or {})
+    body.update(
+        {
+            "type": "combo",
+            "action": "SELL",
+            "limitPrice": str(tp_target_price),
+            "tif": "GTC",
+            "client_attempt_id": f"wiz:{session_id}:tp:{uuid.uuid4().hex}",
+        }
+    )
+    return body
+
+
+def _response_reason_code(response: Response) -> str | None:
+    try:
+        body = json.loads(bytes(response.body or b"{}"))
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return body.get("reason_code") if isinstance(body, dict) else None
 
 
 # ---------------------------------------------------------------------------
@@ -130,169 +166,95 @@ def _tp_would_naked_short(session: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def attach_protection(
+async def attach_protection(
     session_id: str,
     *,
-    ib: Any,
     tp_target_price: Decimal,
     alert_net_mid_threshold: Decimal,
     polarity: str = "DEBIT",
-    max_attempts: int = 3,
-    base_backoff: float = 2.0,
-    sleep: Callable[[float], None] | None = None,
-    db_path: Any = None,  # deprecated, ignored — kept for call-site compat
 ) -> dict[str, Any] | Response:
     """Attach combo TP + Risk Alert after a filled wizard session.
 
+    The TP goes through ``order_entry.place`` like every other order:
+    ``ensure_order_allowed`` → ``gate4.reserve_with_coverage`` (coverage +
+    an ``order_submissions`` reservation in one locked txn) → the order
+    owner. The session is claimed FILLED → PROTECTION_PENDING first, so two
+    concurrent protects cannot place two TPs.
+
     Args:
         session_id: wizard session id.
-        ib: injected IB side — must expose `place_combo_tp(*, session_id, legs,
-            target_price, quantity)` and `register_risk_alert(*, session_id,
-            threshold, polarity)`.
         tp_target_price: SIGNED combo target (negative for CREDIT closes).
         alert_net_mid_threshold: SIGNED net-mid threshold for Risk Alert.
         polarity: "DEBIT" | "CREDIT" | "FLAT".
-        max_attempts: TP retry count (default 3).
-        base_backoff: base seconds for exponential backoff (default 2.0).
-        sleep: injected sleeper for testability.
 
     Returns:
-        dict with keys `state` (PROTECTED / PROTECTION_PENDING), `attempts`,
-        `tp_attached`, `alert_armed`, `tp_order_id`, `alert_virtual_id`,
-        `tp_refused_reason` (if naked-short-guarded), `noop` (if session was
-        already PROTECTED).
+        - dict with ``state`` (PROTECTED / PROTECTION_PENDING), ``attempts``,
+          ``tp_attached``, ``alert_armed``, ``tp_order_id``,
+          ``alert_virtual_id``, ``submission_id`` when the TP was placed;
+          ``noop`` when the session was already PROTECTED.
+        - the ``order_entry.place`` Response (top-level ``reason_code``)
+          when the TP was not placed. A refusal (Gate 4, halt, broker down,
+          IB reject) returns the session to FILLED; PLACE_OUTCOME_UNKNOWN
+          keeps it PROTECTION_PENDING (IB may hold the TP — a second protect
+          must not place a duplicate).
+
+    Raises:
+        ValueError: unknown session, scope mismatch, or a state other than
+            FILLED / PROTECTED.
     """
     if is_read_only():
         return read_only_403()
 
-    if sleep is None:
-        import time as _time
-
-        sleep = _time.sleep  # pragma: no cover (not exercised in tests)
-
     session = _load_session(session_id)
     if session["state"].upper() == "PROTECTED":
-        return {
-            "state": "PROTECTED",
-            "noop": True,
-            "tp_attached": True,
-            "alert_armed": True,
-            "attempts": 0,
-        }
-    if session["state"].upper() != "FILLED":
-        raise ValueError(f"Wizard session {session_id} cannot protect from state {session['state']}")
+        return _PROTECTED_NOOP.copy()
+    if not _transition(session_id, "FILLED", "PROTECTION_PENDING"):
+        current = _load_session(session_id)
+        if current["state"].upper() == "PROTECTED":
+            return _PROTECTED_NOOP.copy()
+        raise ValueError(f"Wizard session {session_id} cannot protect from state {current['state']}")
 
-    legs = session.get("payload", {}).get("legs", [])
-    quantity = int(session.get("payload", {}).get("quantity", 1))
+    from xenon.api.services import order_entry
 
-    # --- Gate-4: naked-short guard ------------------------------------------
-    tp_refused_reason: str | None = None
-    tp_attached = False
-    tp_order_id: str | None = None
-    attempts = 0
+    body = _tp_place_body(session_id, session, tp_target_price)
+    try:
+        result = await order_entry.place(body)
+    except Exception:
+        _transition(session_id, "PROTECTION_PENDING", "FILLED")
+        raise
 
-    if _tp_would_naked_short(session):
-        tp_refused_reason = "NAKED_SHORT_GUARD"
-        _record_event(
-            session_id,
-            "PROTECTION_TP_REFUSED",
-            {"reason": tp_refused_reason, "legs": legs},
-        )
-    else:
-        # Import lazily to avoid a top-level cycle — ib_adapter imports
-        # _uncovered_short_calls from this module.
-        from xenon.execution.combo_wizard.ib_adapter import NakedShortGuardError
+    if isinstance(result, Response):
+        reason_code = _response_reason_code(result)
+        detail = {"reason_code": reason_code, "status": result.status_code, "client_attempt_id": body["client_attempt_id"]}
+        if reason_code == "PLACE_OUTCOME_UNKNOWN":
+            _record_event(session_id, "PROTECTION_PENDING", detail)
+            return result
+        _transition(session_id, "PROTECTION_PENDING", "FILLED")
+        _record_event(session_id, "PROTECTION_TP_REFUSED", detail)
+        return result
+    if not isinstance(result, dict):
+        _transition(session_id, "PROTECTION_PENDING", "FILLED")
+        raise ValueError("Order placement returned an invalid response")
 
-        last_err: Exception | None = None
-        for i in range(max_attempts):
-            attempts = i + 1
-            try:
-                ack = ib.place_combo_tp(
-                    session_id=session_id,
-                    legs=legs,
-                    target_price=tp_target_price,  # signed — no abs()
-                    quantity=quantity,
-                )
-                tp_attached = True
-                tp_order_id = str(ack.get("perm_id") or ack.get("order_id") or "")
-                _record_event(
-                    session_id,
-                    "PROTECTION_TP_ATTACHED",
-                    {
-                        "attempt": attempts,
-                        "tp_order_id": tp_order_id,
-                        "target_price": str(tp_target_price),  # signed
-                    },
-                )
-                break
-            except NakedShortGuardError as exc:
-                # Gate-4 / IB-201 style terminal refusal. Retrying will not
-                # change the outcome — short-circuit the retry loop and route
-                # to the existing "tp refused, arm Risk Alert" path (same
-                # idiom as the pre-check branch above).
-                tp_refused_reason = "NAKED_SHORT_GUARD"
-                _record_event(
-                    session_id,
-                    "PROTECTION_TP_REFUSED",
-                    {
-                        "reason": tp_refused_reason,
-                        "attempt": attempts,
-                        "error": str(exc),
-                        "legs": legs,
-                    },
-                )
-                break
-            except Exception as exc:  # noqa: BLE001 — retry everything
-                last_err = exc
-                _record_event(
-                    session_id,
-                    "PROTECTION_TP_ATTACH_FAILED",
-                    {"attempt": attempts, "error": str(exc)},
-                )
-                if i < max_attempts - 1:
-                    sleep(base_backoff * (2**i))
-        if not tp_attached and tp_refused_reason is None:
-            # Terminal failure — do NOT arm the alert or mark PROTECTED. Leave
-            # the session in PROTECTION_PENDING; the daemon will re-drive.
-            _set_state(session_id, "PROTECTION_PENDING")
-            _record_event(
-                session_id,
-                "PROTECTION_PENDING",
-                {
-                    "reason": "TP_ATTACH_FAILED",
-                    "attempts": attempts,
-                    "last_error": str(last_err) if last_err else None,
-                },
-            )
-            _upsert_protection(
-                session_id=session_id,
-                tp_enabled=False,
-                tp_target_price=tp_target_price,
-                tp_ib_order_id=None,
-                alert_enabled=False,
-                alert_threshold=alert_net_mid_threshold,
-                alert_virtual_id=None,
-            )
-            return {
-                "state": "PROTECTION_PENDING",
-                "attempts": attempts,
-                "tp_attached": False,
-                "alert_armed": False,
-                "tp_order_id": None,
-                "alert_virtual_id": None,
-            }
+    tp_order_id = str(result.get("permId") or result.get("orderId") or "")
+    submission_id = result.get("submission_id")
+    _record_event(
+        session_id,
+        "PROTECTION_TP_ATTACHED",
+        {
+            "tp_order_id": tp_order_id,
+            "submission_id": submission_id,
+            "client_attempt_id": body["client_attempt_id"],
+            "target_price": str(tp_target_price),  # signed
+        },
+    )
 
-    # --- Arm the Risk Alert (always, unless entire protect is aborted) ------
+    # --- Arm the Risk Alert ---------------------------------------------------
     alert_armed = False
     alert_virtual_id: str | None = None
     try:
-        ack = ib.register_risk_alert(
-            session_id=session_id,
-            threshold=alert_net_mid_threshold,  # signed — no abs()
-            polarity=polarity,
-        )
+        alert_virtual_id = _register_risk_alert(session_id, threshold=alert_net_mid_threshold, polarity=polarity)
         alert_armed = True
-        alert_virtual_id = str(ack.get("virtual_id") or "")
         _record_event(
             session_id,
             "PROTECTION_RISK_ALERT_ARMED",
@@ -303,15 +265,11 @@ def attach_protection(
             },
         )
     except Exception as exc:  # noqa: BLE001
-        _record_event(
-            session_id,
-            "PROTECTION_RISK_ALERT_FAILED",
-            {"error": str(exc)},
-        )
+        _record_event(session_id, "PROTECTION_RISK_ALERT_FAILED", {"error": str(exc)})
 
     _upsert_protection(
         session_id=session_id,
-        tp_enabled=tp_attached,
+        tp_enabled=True,
         tp_target_price=tp_target_price,
         tp_ib_order_id=tp_order_id,
         alert_enabled=alert_armed,
@@ -319,27 +277,18 @@ def attach_protection(
         alert_virtual_id=alert_virtual_id,
     )
 
-    # Determine final state.
-    if not alert_armed:
-        final_state = "PROTECTION_PENDING"
-    elif tp_refused_reason == "NAKED_SHORT_GUARD":
-        # TP refused but alert armed → session is "PROTECTED" in the sense that
-        # the operator has the Risk Alert safety net; controller flow labels
-        # this as PROTECTED to close out the workflow, with the refusal
-        # recorded as an event.
-        final_state = "PROTECTED"
-    else:
-        final_state = "PROTECTED"
+    # A TP alone is not the assisted-exit contract: without the alert the
+    # session stays PROTECTION_PENDING (the Risk Alert task polls only
+    # alert_enabled rows).
+    final_state = "PROTECTED" if alert_armed else "PROTECTION_PENDING"
     _set_state(session_id, final_state)
 
-    out: dict[str, Any] = {
+    return {
         "state": final_state,
-        "attempts": attempts,
-        "tp_attached": tp_attached,
+        "attempts": 1,
+        "tp_attached": True,
         "alert_armed": alert_armed,
         "tp_order_id": tp_order_id,
         "alert_virtual_id": alert_virtual_id,
+        "submission_id": submission_id,
     }
-    if tp_refused_reason:
-        out["tp_refused_reason"] = tp_refused_reason
-    return out

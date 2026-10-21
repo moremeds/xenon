@@ -85,6 +85,16 @@ def update_session(conn: Connection, session_id: str, **fields) -> int:
     return result.rowcount
 
 
+def transition_session_state(conn: Connection, session_id: str, *, from_state: str, to_state: str) -> int:
+    """CAS: set state=to_state only if the current state is from_state (case-insensitive)."""
+    result = conn.execute(
+        update(wizard_sessions)
+        .where(wizard_sessions.c.session_id == session_id, wizard_sessions.c.state.ilike(from_state))
+        .values(state=to_state, updated_at=datetime.now(timezone.utc))
+    )
+    return result.rowcount
+
+
 def claim_session_for_submit(conn: Connection, session_id: str, attempt_id: str) -> dict | None:
     """CAS: set state=submitting + current_attempt_id only if state=PLANNED and no current attempt."""
     now = datetime.now(timezone.utc)

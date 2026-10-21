@@ -222,26 +222,3 @@ def test_core_maps_ib_435_to_account_unresolved(cli):
     assert result["code"] == 435
     assert result["reason_code"] == "ACCOUNT_UNRESOLVED"
 
-
-# ---------------------------------------------------------------------------
-# Other new-order callers
-# ---------------------------------------------------------------------------
-
-
-def test_combo_wizard_adapter_stamps_account(monkeypatch):
-    from xenon.execution.combo_wizard import ib_adapter
-
-    monkeypatch.setattr(ib_adapter, "_record_event", lambda *a, **k: None)
-    monkeypatch.setattr(ib_adapter, "_wait_for_perm_id", lambda *_a: 7)
-    ib = MagicMock()
-    ib.qualify_contracts.return_value = [SimpleNamespace(conId=1), SimpleNamespace(conId=2)]
-    adapter = ib_adapter.ComboWizardIbAdapter(ib, account="U2222222")
-    legs = [
-        {"symbol": "SPY", "expiry": "20261120", "strike": "500", "right": "C", "action": "BUY"},
-        {"symbol": "SPY", "expiry": "20261120", "strike": "510", "right": "C", "action": "SELL"},
-    ]
-
-    adapter.place_combo_tp(session_id="s1", legs=legs, target_price=1, quantity=1)
-
-    _, order = ib.place_order.call_args.args
-    assert order.account == "U2222222"
