@@ -190,3 +190,64 @@ describe("useFutuPortfolio", () => {
     expect(result.current.data).not.toBeNull();
   });
 });
+
+describe("useFutuPortfolio first sync scheduling", () => {
+  const NOW = new Date("2026-10-21T14:00:00.000Z");
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function installFetch(cachedFetchedAt: string) {
+    const calls: string[] = [];
+    global.fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      calls.push(method);
+      const fetched_at = method === "POST" ? NOW.toISOString() : cachedFetchedAt;
+      return new Response(JSON.stringify({ ...FIXTURE_ENVELOPE, fetched_at }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof global.fetch;
+    return calls;
+  }
+
+  async function flush(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  it("syncs within 500 ms when the cached snapshot is older than 60 s", async () => {
+    const calls = installFetch(new Date(NOW.getTime() - 61_000).toISOString());
+    renderHook(() => useFutuPortfolio(true));
+    await flush(0);
+    expect(calls).toEqual(["GET"]);
+
+    await flush(600);
+    expect(calls).toEqual(["GET", "POST"]);
+  });
+
+  it("keeps the 30 s cadence when the cached snapshot is fresh", async () => {
+    const calls = installFetch(new Date(NOW.getTime() - 10_000).toISOString());
+    renderHook(() => useFutuPortfolio(true));
+    await flush(0);
+    await flush(5_000);
+    expect(calls).toEqual(["GET"]);
+
+    await flush(26_000);
+    expect(calls).toEqual(["GET", "POST"]);
+  });
+
+  it("does not schedule any sync while disabled", async () => {
+    const calls = installFetch(new Date(NOW.getTime() - 600_000).toISOString());
+    renderHook(() => useFutuPortfolio(false));
+    await flush(0);
+    await flush(60_000);
+    expect(calls).toEqual(["GET"]);
+  });
+});

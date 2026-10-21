@@ -11,6 +11,15 @@ import {
 
 const BASE_INTERVAL_MS = 30_000;
 const MAX_INTERVAL_MS = 300_000; // 5 min cap on backoff
+const STALE_CACHE_MS = 60_000; // cached snapshot older than this: sync right away
+const STALE_FIRST_SYNC_DELAY_MS = 500;
+
+/** True when a cached snapshot is old enough that waiting a full poll interval would show stale data. */
+function isStaleSnapshot(fetchedAt: string | null | undefined): boolean {
+  if (!fetchedAt) return false;
+  const ts = Date.parse(fetchedAt);
+  return !Number.isFinite(ts) || Date.now() - ts > STALE_CACHE_MS;
+}
 
 /**
  * Result of the initial GET /api/futu/portfolio read (and any later
@@ -35,7 +44,8 @@ export type FutuInitialRead =
  *
  * Design:
  * - Initial load: GET the cached JSON (fast, always succeeds if OpenD has
- *   ever been synced).
+ *   ever been synced). When that snapshot is older than 60s the first
+ *   POST sync runs after 500ms instead of waiting a full interval.
  * - Polling: POST every 30s to trigger a live sync from OpenD (matches
  *   the IB hook's pattern). Exponential backoff on error (30s → 5min).
  * - `syncNow()`: manual trigger that resets backoff and rearms the loop.
@@ -76,7 +86,8 @@ export function useFutuPortfolio(enabled: boolean) {
     setError(null);
   }, []);
 
-  const loadFromCache = useCallback(async () => {
+  /** Returns the cached snapshot's `fetched_at`, or null when there is none. */
+  const loadFromCache = useCallback(async (): Promise<string | null> => {
     try {
       const res = await fetch("/api/futu/portfolio", { cache: "no-store" });
       if (res.status === 404) {
@@ -88,16 +99,18 @@ export function useFutuPortfolio(enabled: boolean) {
         setNeverSynced(true);
         setInitialRead("never_synced");
         setError(null);
-        return;
+        return null;
       }
       if (!res.ok) {
         throw new Error(`GET /api/futu/portfolio: ${res.status}`);
       }
       const body: FutuPortfolioResponse = await res.json();
       applyResponse(body);
+      return isFutuNeverSynced(body) ? null : body.fetched_at;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setInitialRead("unavailable");
+      return null;
     } finally {
       didInitialReadRef.current = true;
     }
@@ -161,11 +174,15 @@ export function useFutuPortfolio(enabled: boolean) {
     let cancelled = false;
 
     const init = async () => {
-      await loadFromCache();
+      const cachedFetchedAt = await loadFromCache();
       if (cancelled) return;
       if (enabled) {
         syncLoopArmedRef.current = true;
-        scheduleNext(BASE_INTERVAL_MS);
+        scheduleNext(
+          isStaleSnapshot(cachedFetchedAt)
+            ? STALE_FIRST_SYNC_DELAY_MS
+            : BASE_INTERVAL_MS,
+        );
       }
     };
 
