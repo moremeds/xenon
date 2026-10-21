@@ -24,7 +24,7 @@ Next.js routes call FastAPI (`127.0.0.1:8321` in prod, `8421` under `dev.sh`) vi
   - `trades.py` — closed trades
   - `wizard.py` — combo order wizard (plan/submit/reprice/abort/protect)
 - `services/` — business logic (stateful, testable without HTTP):
-  - `services/order_entry.py` — `place` / `cancel` / `modify` / `replace` cores (each starts with `ensure_order_allowed`), preflight, Gate 4, quote gate, owner-reply mapping (`order_error`). Callers: `routes/order_entry.py`, `combo_wizard/session.py` (submit/reprice/abort), the audit hook (`_cancel_order`). Wizard protect keeps its own guard in `routes/wizard.py`.
+  - `services/order_entry.py` — `place` / `cancel` / `modify` / `replace` cores (each starts with `ensure_order_allowed`), preflight, Gate 4, quote gate, owner-reply mapping (`order_error`). Callers: `routes/order_entry.py`, `combo_wizard/session.py` (submit/reprice/abort), `combo_wizard/protect.py` (the protect take-profit is a `place`: Gate 4 + reservation like any order), the audit hook (`_cancel_order`).
   - `advisory_lock.py` — Postgres advisory locks
   - `ib_activity_mirror.py` — IB→PG fills + open-orders mirror
   - `journal_auto_import.py` — PG-event-driven journal auto-import

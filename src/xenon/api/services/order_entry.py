@@ -1163,6 +1163,8 @@ def _place_result(submission_id: str, data: dict, owner_id: int) -> Any:
             reason_code = ReasonCode.IB_REJECT.value
         # Conditional: a poller that already saw this order at IB wins, and
         # then the core's "rejected" is contradicted by broker evidence.
+        # Ids the core learned are kept: a reject after the send means the
+        # order reached IB (gate4._may_be_at_ib and wizard protect read them).
         if not orders_store.mark_terminal(
             submission_id=submission_id,
             state="REJECTED",
@@ -1170,6 +1172,8 @@ def _place_result(submission_id: str, data: dict, owner_id: int) -> Any:
             filled_qty=0,
             avg_fill_price=None,
             expected_states=final_states,
+            ib_order_id=str(data.get("orderId") or "") or None,
+            perm_id=str(data.get("permId") or "") or None,
         ):
             logger.warning("place: core rejected but row %s already moved on; not rejecting", submission_id)
             return JSONResponse(status_code=502, content={**_PLACE_UNKNOWN_BODY, "submission_id": submission_id})

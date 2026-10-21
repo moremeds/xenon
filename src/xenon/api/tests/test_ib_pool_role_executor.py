@@ -243,12 +243,18 @@ def test_acquire_callers_dispatch_via_run_sync_not_to_thread():
         (historical_mod.head_timestamp, "data"),
         (historical_mod.historical_bars, "data"),
     ]
-    # PR-10: wizard protect runs on the orders worker through the order
-    # owner (owner.run → pool.run_sync("orders")), never pool.acquire —
-    # acquire could reconnect orders from a request path.
+    # Wizard protect places its TP through order_entry.place, which runs it
+    # on the order owner (owner.run → pool.run_sync("orders")). The route
+    # itself never calls the owner (no nested owner jobs) and never
+    # pool.acquire — acquire could reconnect orders from a request path.
     protect_src = inspect.getsource(wizard_mod.wizard_protect)
-    assert "owner.run(" in protect_src
+    assert "owner.run(" not in protect_src and "order_owner" not in protect_src
     assert ".acquire(" not in protect_src
+    from xenon.execution.combo_wizard import protect as protect_mod
+
+    attach_src = inspect.getsource(protect_mod)
+    assert "order_entry.place(" in attach_src
+    assert "owner.run(" not in attach_src
     for fn, role in targets:
         source = inspect.getsource(fn)
         assert "run_sync" in source, (

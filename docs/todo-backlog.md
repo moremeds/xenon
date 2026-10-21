@@ -610,3 +610,4 @@ for ${sym}"`) survives, but the wrapping prefix is gone.
     through the shared Gate-4 reserve so the TP is checked against the live snapshot
     and working-order reservations. Option (b) touches the order path: read
     `docs/reference/order-path-incident-history.md` first and add a route test plus a browser test.
+  - **Status:** option (b) done on branch `fix/wizard-protect-gate4` (incident-history row 41). No browser test: no web component calls the protect proxy route yet.

@@ -165,6 +165,10 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
     severity: "error",
     copy: "Order submitted, status unknown — check working orders. Do not resubmit.",
   },
+  PROTECT_TP_PARTIAL: {
+    severity: "error",
+    copy: "The take-profit reached IB and ended; check its fills and close any rest from the order ticket.",
+  },
 };
 
 const FALLBACK: ReasonToast = {

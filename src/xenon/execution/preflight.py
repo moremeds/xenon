@@ -88,6 +88,10 @@ class ReasonCode(StrEnum):
     # /orders/place subprocess exited OK with no JSON result: IB may hold the
     # order. Row goes UNKNOWN; the user must check working orders first.
     PLACE_OUTCOME_UNKNOWN = "PLACE_OUTCOME_UNKNOWN"
+    # Wizard protect retry: the stored take-profit reached IB and ended
+    # (cancelled, or failed / rejected with broker ids). Its executions cannot
+    # be proven, so it is never re-placed automatically; nothing is sent.
+    PROTECT_TP_PARTIAL = "PROTECT_TP_PARTIAL"
 
 
 class PreflightRequest(BaseModel):

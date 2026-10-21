@@ -503,24 +503,26 @@ def test_combo_session_mutators_refuse_before_state_work(monkeypatch):
 
 def test_attach_protection_refuses_in_read_only(monkeypatch):
     """attach_protection under XENON_READ_ONLY returns the 403 refusal before
-    any session read or injected-broker call."""
+    any session read or order placement."""
     monkeypatch.setenv("XENON_READ_ONLY", "1")
+    from xenon.api.services import order_entry
     from xenon.execution.combo_wizard import protect as combo_protect
 
     def _boom(*args, **kwargs):
         raise AssertionError("_load_session reached under read-only")
 
+    async def _boom_place(*args, **kwargs):
+        raise AssertionError("order_entry.place reached under read-only")
+
     monkeypatch.setattr(combo_protect, "_load_session", _boom)
+    monkeypatch.setattr(order_entry, "place", _boom_place)
 
-    class _BoomIB:
-        def __getattr__(self, name):
-            raise AssertionError(f"ib.{name} reached under read-only")
-
-    resp = combo_protect.attach_protection(
-        "wiz-x",
-        ib=_BoomIB(),
-        tp_target_price=Decimal("1.00"),
-        alert_net_mid_threshold=Decimal("0.50"),
+    resp = asyncio.run(
+        combo_protect.attach_protection(
+            "wiz-x",
+            tp_target_price=Decimal("1.00"),
+            alert_net_mid_threshold=Decimal("0.50"),
+        )
     )
     assert getattr(resp, "status_code", None) == 403, resp
     assert json.loads(resp.body)["reason_code"] == "READ_ONLY_MODE"

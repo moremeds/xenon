@@ -1,10 +1,15 @@
 """Tests for combo_wizard.protect — post-fill protection pipeline.
 
+The TP goes through ``order_entry.place`` (Gate 4 + reservation + order
+owner); here that seam is faked. Route-level tests against the real Gate-4
+path live in ``src/xenon/api/tests/test_wizard_routes.py``.
+
 Covers:
-- Successful TP + Risk Alert attach transitions PROTECTION_PENDING → PROTECTED
-- Retry with backoff on transient failures
-- Terminal failure leaves session in PROTECTION_PENDING (not PROTECTED)
-- Naked-short guard: TP that would short an uncovered leg is refused, Risk Alert still armed
+- TP placed + Risk Alert armed → PROTECTED; TP body is a GTC SELL BAG with
+  the stored per-leg actions and the signed target
+- A refused place returns the response unchanged and the session goes back
+  to FILLED; PLACE_OUTCOME_UNKNOWN keeps it PROTECTION_PENDING
+- Risk Alert failure keeps the session PROTECTION_PENDING
 - "Risk Alert" copy never says "stop-loss"
 - Idempotent: re-running on an already-PROTECTED session is a no-op
 - Signed combo pricing preserved (no abs() applied)
@@ -12,21 +17,25 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
 from decimal import Decimal
 
 import pytest
+from starlette.responses import JSONResponse
 
 # Phase 3: opt out of Phase 2 BoundEngine binding — this file owns its
 # own TRUNCATE-based teardown that needs committed cross-test state.
 pytestmark = pytest.mark.committed_db
 from sqlalchemy import create_engine, text
 
+from xenon.api.services import order_entry
 from xenon.db.queries import combo_wizard as cwq
 from xenon.execution.combo_wizard import protect
 
 # --------------------------------------------------------------------------
-# Postgres helpers (same pattern as test_combo_wizard_ib_adapter.py)
+# Postgres helpers
 # --------------------------------------------------------------------------
 
 from xenon._test_db import sync_test_db_url as _sync_url  # worker-aware URL resolver
@@ -124,34 +133,64 @@ def _init_scoped_session(*, account_env: str, broker_account: str, state: str = 
 
 
 # --------------------------------------------------------------------------
-# IB stubs
+# order_entry.place stub
 # --------------------------------------------------------------------------
 
 
-class _StubIB:
-    """Injectable stub for the IB side of protect. `tp_attach` and `arm_alert`
-    return a dict-shaped ack or raise.
-    """
+@pytest.fixture
+def place(monkeypatch):
+    """Fake order_entry.place: records each body, answers from `replies`."""
+    calls: list[dict] = []
+    replies: list = [{"status": "ok", "orderId": 9001, "permId": 7001, "submission_id": "sub-1"}]
 
-    def __init__(self, *, tp_acks: list, alert_acks: list):
-        self._tp_acks = list(tp_acks)
-        self._alert_acks = list(alert_acks)
-        self.tp_calls: list = []
-        self.alert_calls: list = []
+    async def fake(body: dict):
+        calls.append(dict(body))
+        reply = replies.pop(0)
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
 
-    def place_combo_tp(self, *, session_id, legs, target_price, quantity):
-        self.tp_calls.append({"session_id": session_id, "target_price": target_price})
-        ack = self._tp_acks.pop(0) if self._tp_acks else Exception("no more tp acks")
-        if isinstance(ack, Exception):
-            raise ack
-        return ack
+    monkeypatch.setattr(order_entry, "place", fake)
+    return type("Place", (), {"calls": calls, "replies": replies})
 
-    def register_risk_alert(self, *, session_id, threshold, polarity):
-        self.alert_calls.append({"session_id": session_id, "threshold": threshold, "polarity": polarity})
-        ack = self._alert_acks.pop(0) if self._alert_acks else Exception("no more alert acks")
-        if isinstance(ack, Exception):
-            raise ack
-        return ack
+
+def _state(sid: str) -> str:
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        state = conn.execute(
+            text("SELECT state FROM xenon.wizard_sessions WHERE session_id = :sid"), {"sid": sid}
+        ).scalar_one()
+    engine.dispose()
+    return state
+
+
+def _event_kinds(sid: str) -> list[str]:
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT kind FROM xenon.wizard_events WHERE session_id = :sid"), {"sid": sid}
+        ).fetchall()
+    engine.dispose()
+    return [row[0] for row in rows]
+
+
+def _config(sid: str) -> dict | None:
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT config FROM xenon.wizard_protection WHERE session_id = :sid"), {"sid": sid}
+        ).fetchone()
+    engine.dispose()
+    return row[0] if row else None
+
+
+async def _protect(sid: str, *, target: str = "3.50", threshold: str = "1.25", polarity: str = "DEBIT"):
+    return await protect.attach_protection(
+        sid,
+        tp_target_price=Decimal(target),
+        alert_net_mid_threshold=Decimal(threshold),
+        polarity=polarity,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -159,179 +198,190 @@ class _StubIB:
 # --------------------------------------------------------------------------
 
 
-def test_protection_rejects_explicit_scope_mismatch():
+@pytest.mark.asyncio
+async def test_protection_rejects_explicit_scope_mismatch(place):
     sid = _init_scoped_session(account_env="live", broker_account="U1234567")
-    ib = _StubIB(tp_acks=[{"order_id": "tp-1"}], alert_acks=[{"virtual_id": "alert-1"}])
 
     with pytest.raises(ValueError, match="scope mismatch"):
-        protect.attach_protection(
-            session_id=sid,
-            tp_target_price=Decimal("3.00"),
-            alert_net_mid_threshold=Decimal("1.25"),
-            ib=ib,
-        )
+        await _protect(sid, target="3.00")
 
-    assert ib.tp_calls == []
-    assert ib.alert_calls == []
+    assert place.calls == []
 
 
-def test_protection_success_transitions_protected(monkeypatch):
+@pytest.mark.asyncio
+async def test_protection_success_places_gtc_sell_bag_and_transitions_protected(place):
     sid = _init_session(state="FILLED")
 
-    ib = _StubIB(
-        tp_acks=[{"order_id": 9001, "perm_id": "p-9001"}],
-        alert_acks=[{"virtual_id": "alert-1"}],
-    )
-
-    result = protect.attach_protection(
-        sid,
-        ib=ib,
-        tp_target_price=Decimal("3.50"),
-        alert_net_mid_threshold=Decimal("1.25"),
-        polarity="DEBIT",
-        sleep=lambda _s: None,
-    )
+    result = await _protect(sid)
 
     assert result["state"] == "PROTECTED"
     assert result["tp_attached"] is True
     assert result["alert_armed"] is True
-    assert result["attempts"] == 1
-
-    engine = _pg_engine()
-    with engine.connect() as conn:
-        session = conn.execute(
-            text("SELECT state FROM xenon.wizard_sessions WHERE session_id = :sid"),
-            {"sid": sid},
-        ).fetchone()
-        prot = conn.execute(
-            text("SELECT config FROM xenon.wizard_protection WHERE session_id = :sid"),
-            {"sid": sid},
-        ).fetchone()
-    engine.dispose()
-
-    assert session[0] == "PROTECTED"
-    assert prot is not None
-    config = prot[0]
+    assert result["tp_order_id"] == "7001"
+    assert result["client_attempt_id"].startswith(f"wiz:{sid}:tp:")
+    assert len(place.calls) == 1
+    body = place.calls[0]
+    assert (body["type"], body["action"], body["tif"], body["limitPrice"]) == ("combo", "SELL", "GTC", "3.50")
+    # Per-leg actions are the stored structure; the SELL envelope reverses them.
+    assert [leg["action"] for leg in body["legs"]] == ["BUY", "SELL"]
+    assert body["quantity"] == 1
+    assert body["client_attempt_id"].startswith(f"wiz:{sid}:tp:")
+    assert _state(sid) == "PROTECTED"
+    config = _config(sid)
     assert config["tp_enabled"] is True
+    assert config["tp_ib_order_id"] == "7001"
     assert Decimal(config["tp_target_price"]) == Decimal("3.50")
     assert config["alert_enabled"] is True
+    assert "PROTECTION_TP_ATTACHED" in _event_kinds(sid)
 
 
-def test_protection_pending_retries_then_fails_if_tp_attach_never_acks(monkeypatch):
-    sid = _init_session(state="FILLED")
-
-    ib = _StubIB(
-        tp_acks=[RuntimeError("timeout"), RuntimeError("timeout"), RuntimeError("timeout")],
-        alert_acks=[{"virtual_id": "alert-1"}],  # not reached
-    )
-    sleeps: list[float] = []
-
-    result = protect.attach_protection(
-        sid,
-        ib=ib,
-        tp_target_price=Decimal("3.50"),
-        alert_net_mid_threshold=Decimal("1.25"),
-        polarity="DEBIT",
-        sleep=sleeps.append,
-        max_attempts=3,
-        base_backoff=2.0,
-    )
-
-    assert result["state"] == "PROTECTION_PENDING"
-    assert result["tp_attached"] is False
-    assert result["attempts"] == 3
-    assert sleeps == [2.0, 4.0]
-
-    engine = _pg_engine()
-    with engine.connect() as conn:
-        state = conn.execute(
-            text("SELECT state FROM xenon.wizard_sessions WHERE session_id = :sid"),
-            {"sid": sid},
-        ).fetchone()[0]
-        events = conn.execute(
-            text("SELECT kind FROM xenon.wizard_events WHERE session_id = :sid"),
-            {"sid": sid},
-        ).fetchall()
-    engine.dispose()
-
-    assert state == "PROTECTION_PENDING"
-    kinds = [row[0] for row in events]
-    assert any("PROTECTION" in k for k in kinds)
-
-
-def test_protection_idempotent_on_already_protected(monkeypatch):
-    sid = _init_session(state="PROTECTED")
-
-    ib = _StubIB(tp_acks=[], alert_acks=[])
-
-    result = protect.attach_protection(
-        sid,
-        ib=ib,
-        tp_target_price=Decimal("3.50"),
-        alert_net_mid_threshold=Decimal("1.25"),
-        polarity="DEBIT",
-        sleep=lambda _s: None,
-    )
-
-    assert result["state"] == "PROTECTED"
-    assert result.get("noop") is True
-    assert ib.tp_calls == []
-    assert ib.alert_calls == []
-
-
-def test_protection_rejects_non_filled_session(monkeypatch):
-    sid = _init_session(state="working")
-
-    ib = _StubIB(tp_acks=[{"order_id": 9001}], alert_acks=[{"virtual_id": "alert-1"}])
-
-    with pytest.raises(ValueError, match="cannot protect from state working"):
-        protect.attach_protection(
-            sid,
-            ib=ib,
-            tp_target_price=Decimal("3.50"),
-            alert_net_mid_threshold=Decimal("1.25"),
-            polarity="DEBIT",
-            sleep=lambda _s: None,
-        )
-
-    assert ib.tp_calls == []
-    assert ib.alert_calls == []
-
-
-def test_naked_short_guard_refuses_tp_but_arms_alert(monkeypatch):
-    """If the TP would short an uncovered call leg, we skip the TP and route
-    to Risk Alert only. This keeps Gate-4 intact."""
+@pytest.mark.asyncio
+async def test_tp_body_is_guaranteed_gtc_sell_bag_with_only_closing_fields(place):
+    """The TP is always a GUARANTEED BAG (nonGuaranteed=0), whatever the
+    entry payload held: a non-guaranteed close can leg out and leave the
+    short call naked. Entry-only / stale keys never ride on the TP."""
     payload = {
         "symbol": "AAPL",
         "type": "combo",
         "action": "BUY",
-        "quantity": 1,
-        "limitPrice": "-0.20",
+        "quantity": 2,
+        "limitPrice": "2.50",
+        "tif": "DAY",
+        "nonGuaranteed": 1,
+        "orderRef": "leg_wizard:stale",
+        "outsideRth": True,
+        "account": "U9999999",
+        "acknowledge_limit_override": True,
+        "replaces": {"submission_id": "old"},
+        "client_attempt_id": "wiz:old:combo:x",
         "legs": [
-            {"conId": 2001, "action": "SELL", "ratio": 1, "right": "C", "strike": "200"},
-            {"conId": 2002, "action": "BUY", "ratio": 1, "right": "P", "strike": "180"},
+            {"symbol": "AAPL", "expiry": "20261218", "strike": 200.0, "right": "C", "action": "BUY", "ratio": 1,
+             "conId": 1001, "limitPrice": 4.6, "exchange": "SMART"},
+            {"symbol": "AAPL", "expiry": "20261218", "strike": 210.0, "right": "C", "action": "SELL", "ratio": 1,
+             "conId": 1002, "limitPrice": 2.1, "exchange": "SMART"},
         ],
     }
     sid = _init_session(state="FILLED", payload=payload)
 
-    ib = _StubIB(
-        tp_acks=[{"order_id": 9001, "perm_id": "p"}],
-        alert_acks=[{"virtual_id": "alert-1"}],
-    )
+    await _protect(sid, target="-0.10", polarity="CREDIT")
 
-    result = protect.attach_protection(
-        sid,
-        ib=ib,
-        tp_target_price=Decimal("-0.50"),
-        alert_net_mid_threshold=Decimal("-0.80"),
-        polarity="CREDIT",
-        sleep=lambda _s: None,
-    )
+    body = place.calls[0]
+    assert set(body) == {"type", "symbol", "action", "quantity", "limitPrice", "tif", "nonGuaranteed", "legs", "client_attempt_id"}
+    assert (body["type"], body["action"], body["tif"], body["nonGuaranteed"]) == ("combo", "SELL", "GTC", 0)
+    assert body["limitPrice"] == "-0.10"  # signed, no abs()
+    assert (body["symbol"], body["quantity"]) == ("AAPL", 2)
+    assert body["client_attempt_id"].startswith(f"wiz:{sid}:tp:")
+    # Stored per-leg actions, NOT flipped (the SELL envelope reverses them at IB).
+    assert body["legs"] == [
+        {"symbol": "AAPL", "expiry": "20261218", "strike": 200.0, "right": "C", "action": "BUY", "ratio": 1, "conId": 1001},
+        {"symbol": "AAPL", "expiry": "20261218", "strike": 210.0, "right": "C", "action": "SELL", "ratio": 1, "conId": 1002},
+    ]
 
-    assert result["tp_attached"] is False
-    assert result["tp_refused_reason"] == "NAKED_SHORT_GUARD"
-    assert result["alert_armed"] is True
-    assert ib.tp_calls == []
+
+@pytest.mark.asyncio
+async def test_refused_place_returns_response_and_session_back_to_filled(place):
+    sid = _init_session(state="FILLED")
+    refusal = JSONResponse(status_code=400, content={"detail": "Uncovered short call on AAPL", "reason_code": "ETF_CALL_UNCOVERED"})
+    place.replies[:] = [refusal]
+
+    result = await _protect(sid)
+
+    assert result is refusal
+    assert json.loads(result.body)["reason_code"] == "ETF_CALL_UNCOVERED"
+    assert _state(sid) == "FILLED"
+    assert "PROTECTION_TP_REFUSED" in _event_kinds(sid)
+    # Only the stored intent remains; nothing enabled.
+    config = _config(sid)
+    assert (config["tp_enabled"], config["alert_enabled"]) == (False, False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status, reason_code, state",
+    [
+        (502, "IB_REJECT", "FILLED"),  # explicit IB reject: row REJECTED, nothing at IB
+        (503, "ORDERS_HALTED", "FILLED"),  # owner proved nothing was sent
+        (502, "SOMETHING_NEW", "PROTECTION_PENDING"),  # unknown 5xx: may be at IB
+        (200, None, "PROTECTION_PENDING"),  # duplicate-of reply: an order exists
+    ],
+)
+async def test_only_proven_not_sent_responses_release_the_claim(place, status, reason_code, state):
+    sid = _init_session(state="FILLED")
+    place.replies[:] = [JSONResponse(status_code=status, content={"reason_code": reason_code})]
+
+    result = await _protect(sid)
+
+    assert result.status_code == status
+    assert _state(sid) == state
+
+
+@pytest.mark.asyncio
+async def test_place_outcome_unknown_keeps_session_protection_pending(place, monkeypatch):
+    from types import SimpleNamespace
+
+    from xenon.execution import orders_store
+
+    sid = _init_session(state="FILLED")
+    place.replies[:] = [JSONResponse(status_code=502, content={"reason_code": "PLACE_OUTCOME_UNKNOWN"})]
+
+    result = await _protect(sid)
+
+    assert result.status_code == 502
+    assert _state(sid) == "PROTECTION_PENDING"
+    stored_cid = _config(sid)["tp_client_attempt_id"]
+    assert stored_cid == place.calls[0]["client_attempt_id"]
+    # The stored attempt's row is still UNKNOWN: a retry keeps the claim (409), no send.
+    seen = []
+
+    def _lookup(user_id, cid, **scope):
+        seen.append(cid)
+        return SimpleNamespace(state="UNKNOWN", perm_id=None, ib_order_id=None)
+
+    monkeypatch.setattr(orders_store, "lookup_by_attempt", _lookup)
+    again = await _protect(sid)
+    assert (again.status_code, json.loads(again.body)["reason_code"]) == (409, "PLACE_OUTCOME_UNKNOWN")
+    assert seen == [stored_cid]
+    assert len(place.calls) == 1
+    assert _state(sid) == "PROTECTION_PENDING"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc", [RuntimeError("db down"), asyncio.CancelledError()], ids=["error", "cancelled"])
+async def test_place_exception_keeps_claim_fail_safe(place, exc):
+    """order_entry.place raising says nothing about whether the owner job
+    already started (a cancelled request after the start re-raises from
+    OrderOwner.run while the worker may send). Fail safe: keep
+    PROTECTION_PENDING so a second protect cannot place a second TP."""
+    sid = _init_session(state="FILLED")
+    place.replies[:] = [exc]
+
+    with pytest.raises(type(exc)):
+        await _protect(sid)
+
+    assert _state(sid) == "PROTECTION_PENDING"
+    assert "PROTECTION_PENDING" in _event_kinds(sid)
+
+
+@pytest.mark.asyncio
+async def test_protection_idempotent_on_already_protected(place):
+    sid = _init_session(state="PROTECTED")
+
+    result = await _protect(sid)
+
+    assert result["state"] == "PROTECTED"
+    assert result.get("noop") is True
+    assert place.calls == []
+
+
+@pytest.mark.asyncio
+async def test_protection_rejects_non_filled_session(place):
+    sid = _init_session(state="working")
+
+    with pytest.raises(ValueError, match="cannot protect from state working"):
+        await _protect(sid)
+
+    assert place.calls == []
+    assert _state(sid) == "working"
 
 
 def test_risk_alert_copy_never_says_stop_loss():
@@ -344,132 +394,141 @@ def test_risk_alert_copy_never_says_stop_loss():
     assert "stop loss" not in low
 
 
-def test_naked_short_guard_error_short_circuits_retry_loop(monkeypatch):
-    """If the adapter raises NakedShortGuardError (e.g., IB-201 terminal
-    broker reject), the retry loop must NOT re-invoke the adapter 3x --
-    retrying a terminal Gate-4 refusal wastes 14+ seconds."""
-    from xenon.execution.combo_wizard.ib_adapter import NakedShortGuardError
-
-    sid = _init_session(state="FILLED")
-
-    calls: list[dict] = []
-
-    class _RaisingIB:
-        def place_combo_tp(self, **kwargs):
-            calls.append(kwargs)
-            raise NakedShortGuardError("IB error 201: terminal reject")
-
-        def register_risk_alert(self, **kwargs):
-            return {"virtual_id": "alert-1"}
-
-    sleeps: list[float] = []
-    result = protect.attach_protection(
-        sid,
-        ib=_RaisingIB(),
-        tp_target_price=Decimal("3.50"),
-        alert_net_mid_threshold=Decimal("1.25"),
-        polarity="DEBIT",
-        sleep=sleeps.append,
-        max_attempts=3,
-        base_backoff=2.0,
-    )
-
-    assert len(calls) == 1
-    assert sleeps == []
-    assert result["tp_attached"] is False
-    assert result["tp_refused_reason"] == "NAKED_SHORT_GUARD"
-    assert result["alert_armed"] is True
-    assert result["state"] == "PROTECTED"
-
-    engine = _pg_engine()
-    with engine.connect() as conn:
-        events = conn.execute(
-            text("SELECT kind FROM xenon.wizard_events WHERE session_id = :sid"),
-            {"sid": sid},
-        ).fetchall()
-    engine.dispose()
-
-    kinds = [row[0] for row in events]
-    assert "PROTECTION_TP_REFUSED" in kinds
-
-
-def test_risk_alert_failure_keeps_session_pending(monkeypatch):
+@pytest.mark.asyncio
+async def test_risk_alert_failure_keeps_session_pending(place, monkeypatch):
     """A TP alone is not enough for the wizard's assisted-exit contract.
 
     If Risk Alert registration fails, the session must not be marked
-    PROTECTED because the stop monitor only polls alert_enabled rows.
+    PROTECTED because the Risk Alert task only polls alert_enabled rows.
     """
     sid = _init_session(state="FILLED")
 
-    class _AlertFailingIB:
-        def place_combo_tp(self, **kwargs):
-            return {"order_id": "tp-1", "perm_id": "tp-perm-1"}
+    def _fail(*_a, **_k):
+        raise RuntimeError("alert store unavailable")
 
-        def register_risk_alert(self, **kwargs):
-            raise RuntimeError("alert store unavailable")
+    monkeypatch.setattr(protect, "_register_risk_alert", _fail)
 
-    result = protect.attach_protection(
-        sid,
-        ib=_AlertFailingIB(),
-        tp_target_price=Decimal("3.50"),
-        alert_net_mid_threshold=Decimal("1.25"),
-        polarity="DEBIT",
-    )
+    result = await _protect(sid)
 
     assert result["tp_attached"] is True
     assert result["alert_armed"] is False
     assert result["state"] == "PROTECTION_PENDING"
-
-    engine = _pg_engine()
-    with engine.connect() as conn:
-        row = conn.execute(
-            text("SELECT state FROM xenon.wizard_sessions WHERE session_id = :sid"),
-            {"sid": sid},
-        ).fetchone()
-        prot = conn.execute(
-            text("SELECT config FROM xenon.wizard_protection WHERE session_id = :sid"),
-            {"sid": sid},
-        ).fetchone()
-    engine.dispose()
-
-    assert row[0] == "PROTECTION_PENDING"
-    config = prot[0]
+    assert _state(sid) == "PROTECTION_PENDING"
+    config = _config(sid)
     assert config["tp_enabled"] is True
     assert config["alert_enabled"] is False
 
 
-def test_signed_combo_pricing_preserved_for_credit(monkeypatch):
+@pytest.mark.asyncio
+async def test_signed_combo_pricing_preserved_for_credit(place):
     """CREDIT spreads have negative net prices -- protect must not apply abs()."""
     sid = _init_session(state="FILLED")
 
-    ib = _StubIB(
-        tp_acks=[{"order_id": 9001, "perm_id": "p"}],
-        alert_acks=[{"virtual_id": "alert-1"}],
+    await _protect(sid, target="-0.10", threshold="-0.45", polarity="CREDIT")
+
+    assert place.calls[0]["limitPrice"] == "-0.10"
+    config = _config(sid)
+    assert Decimal(config["tp_target_price"]) == Decimal("-0.10")
+    assert Decimal(config["alert_net_mid_threshold"]) == Decimal("-0.45")
+    assert "RISK_ALERT_REGISTERED" in _event_kinds(sid)
+
+
+@pytest.mark.asyncio
+async def test_retry_while_first_protect_is_in_flight_gets_409_without_send(monkeypatch):
+    """Between the claim and the reservation insert no order_submissions row
+    exists; a concurrent retry must not read "no row" as "nothing sent"."""
+    sid = _init_session(state="FILLED")
+    gate = asyncio.Event()
+    calls: list[dict] = []
+
+    async def slow_place(body):
+        calls.append(body)
+        await gate.wait()
+        return {"status": "ok", "orderId": 1, "permId": 2}
+
+    monkeypatch.setattr(order_entry, "place", slow_place)
+    first = asyncio.ensure_future(_protect(sid))
+    await asyncio.sleep(0)
+    while not calls:
+        await asyncio.sleep(0.01)
+
+    second = await _protect(sid)
+    assert (second.status_code, json.loads(second.body)["reason_code"]) == (409, "PLACE_OUTCOME_UNKNOWN")
+
+    gate.set()
+    assert (await first)["state"] == "PROTECTED"
+    assert len(calls) == 1
+
+
+async def _pending_with_dead_tp(place, monkeypatch, *, state: str, ib_order_id, perm_id) -> str:
+    """First protect is UNKNOWN; the stored TP row then reads ``state``."""
+    from types import SimpleNamespace
+
+    from xenon.execution import orders_store
+
+    sid = _init_session(state="FILLED")
+    place.replies[:] = [JSONResponse(status_code=502, content={"reason_code": "PLACE_OUTCOME_UNKNOWN"})]
+    await _protect(sid)
+    monkeypatch.setattr(
+        orders_store,
+        "lookup_by_attempt",
+        lambda *_a, **_k: SimpleNamespace(
+            submission_id="sub-1", state=state, perm_id=perm_id, ib_order_id=ib_order_id, quantity=1
+        ),
     )
+    return sid
 
-    signed_target = Decimal("-0.10")
-    signed_threshold = Decimal("-0.45")
 
-    protect.attach_protection(
-        sid,
-        ib=ib,
-        tp_target_price=signed_target,
-        alert_net_mid_threshold=signed_threshold,
-        polarity="CREDIT",
-        sleep=lambda _s: None,
-    )
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "ib_order_id", "perm_id"),
+    [("CANCELLED", "7", "77"), ("CANCELLED", None, None), ("REJECTED", "7", None), ("FAILED", None, "77")],
+    ids=["cancelled-with-ids", "cancelled-no-ids", "rejected-with-order-id", "failed-with-perm-id"],
+)
+async def test_dead_tp_that_may_have_reached_ib_keeps_claim_and_sends_nothing(place, monkeypatch, state, ib_order_id, perm_id):
+    sid = await _pending_with_dead_tp(place, monkeypatch, state=state, ib_order_id=ib_order_id, perm_id=perm_id)
 
-    assert ib.tp_calls[0]["target_price"] == signed_target
-    assert ib.alert_calls[0]["threshold"] == signed_threshold
+    again = await _protect(sid)
 
-    engine = _pg_engine()
-    with engine.connect() as conn:
-        prot = conn.execute(
-            text("SELECT config FROM xenon.wizard_protection WHERE session_id = :sid"),
-            {"sid": sid},
-        ).fetchone()
-    engine.dispose()
+    assert (again.status_code, json.loads(again.body)["reason_code"]) == (409, "PROTECT_TP_PARTIAL")
+    assert len(place.calls) == 1  # only the first, uncertain send
+    assert _state(sid) == "PROTECTION_PENDING"
+    assert "PROTECTION_TP_PARTIAL" in _event_kinds(sid)
 
-    config = prot[0]
-    assert Decimal(config["tp_target_price"]) == signed_target
-    assert Decimal(config["alert_net_mid_threshold"]) == signed_threshold
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["FAILED", "REJECTED"])
+async def test_dead_tp_never_at_ib_places_one_new_tp_at_entry_quantity(place, monkeypatch, state):
+    sid = await _pending_with_dead_tp(place, monkeypatch, state=state, ib_order_id=None, perm_id="0")
+    place.replies.append({"status": "ok", "orderId": 9002, "permId": 7002})
+
+    again = await _protect(sid)
+
+    assert again["state"] == "PROTECTED"
+    assert len(place.calls) == 2
+    assert place.calls[1]["quantity"] == place.calls[0]["quantity"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("row_kind", ["rejected-with-ids", "lookup-raises"])
+async def test_immediate_ib_reject_keeps_claim_unless_row_proves_never_placed(place, monkeypatch, row_kind):
+    """A 502 IB_REJECT alone does not release: the stored row must prove IB
+    never had the TP (no row, or FAILED/REJECTED without ids)."""
+    from types import SimpleNamespace
+
+    from xenon.execution import orders_store
+
+    def _lookup(*_a, **_k):
+        if row_kind == "lookup-raises":
+            raise RuntimeError("db down")
+        return SimpleNamespace(submission_id="sub-1", state="REJECTED", ib_order_id="7", perm_id="77", quantity=1)
+
+    monkeypatch.setattr(orders_store, "lookup_by_attempt", _lookup)
+    sid = _init_session(state="FILLED")
+    place.replies[:] = [JSONResponse(status_code=502, content={"reason_code": "IB_REJECT"})]
+
+    result = await _protect(sid)
+
+    assert result.status_code == 502
+    assert _state(sid) == "PROTECTION_PENDING"
+    assert len(place.calls) == 1

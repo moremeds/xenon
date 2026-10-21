@@ -173,74 +173,22 @@ async def wizard_abort(session_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
-# Wizard protect waits this long for the order owner; a started protect keeps
-# running on the worker after the request answers "unconfirmed".
-_PROTECT_TIMEOUT_S = 30
-
-
 @router.post("/wizard/sessions/{session_id}/protect", dependencies=[Depends(require_writable)])
 async def wizard_protect(session_id: str, request: Request, body: ProtectRequest) -> dict[str, Any]:
     denial = ensure_order_allowed("wizard protect", request.app.state)
     if denial is not None:
         return denial
-    try:
-        session = combo_session.get_session(session_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    state = str(session.get("state") or "")
-    upper = state.upper()
-    if upper == "PROTECTED":
-        return {
-            "state": "PROTECTED",
-            "noop": True,
-            "tp_attached": True,
-            "alert_armed": True,
-            "attempts": 0,
-        }
-    if upper != "FILLED":
-        raise HTTPException(
-            status_code=409,
-            detail=f"Wizard session {session_id} cannot protect from state {state}",
-        )
-
-    from xenon.api import server as server_mod
-    from xenon.api.services import order_entry
-    from xenon.execution.combo_wizard.ib_adapter import ComboWizardIbAdapter
     from xenon.execution.combo_wizard.protect import attach_protection
 
-    owner = server_mod.order_owner
-    if owner is None:
-        return order_entry._owner_unavailable()
-
-    from xenon.execution.account_scope import resolve_from_app_state
-
+    # The TP goes through order_entry.place (Gate-4 reservation, then the
+    # order owner) — no owner call here, so owner jobs never nest.
     try:
-        scope_account = resolve_from_app_state(request.app.state).broker_account
-    except ValueError:
-        scope_account = ""  # IBClient.place_order fails closed on an empty account
-
-    def protect(ib_client) -> dict:
-        # Runs on the orders worker. ib_client is the owner's guarded client:
-        # its place_order re-checks halt + broker readiness right before the
-        # send (A4). No request-path reconnect (A2).
-        adapter = ComboWizardIbAdapter(ib_client, account=scope_account)
-        try:
-            result = attach_protection(
-                session_id,
-                ib=adapter,
-                tp_target_price=body.tp_target_price,
-                alert_net_mid_threshold=body.alert_net_mid_threshold,
-                polarity=body.polarity,
-            )
-        except ValueError as exc:
-            return {"status": "error", "classification": "wizard_conflict", "message": str(exc)}
-        return {"status": "ok", "result": result}
-
-    reply = await owner.run(protect, timeout=_PROTECT_TIMEOUT_S)
-    if reply.get("status") == "ok":
-        return reply["result"]
-    if reply.get("classification") == "wizard_conflict":
-        raise HTTPException(status_code=409, detail=reply.get("message"))
-    status, reason_code, detail = order_entry._owner_error_detail(reply)
-    return order_entry.order_error(status, reason_code, detail)
+        return await attach_protection(
+            session_id,
+            tp_target_price=body.tp_target_price,
+            alert_net_mid_threshold=body.alert_net_mid_threshold,
+            polarity=body.polarity,
+        )
+    except ValueError as exc:
+        status = 404 if "Unknown wizard session" in str(exc) else 409
+        raise HTTPException(status_code=status, detail=str(exc)) from exc

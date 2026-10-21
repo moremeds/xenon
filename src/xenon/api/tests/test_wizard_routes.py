@@ -678,31 +678,59 @@ def test_protect_endpoint_is_idempotent_for_already_protected_without_ib_pool(cl
     assert resp.json()["state"] == "PROTECTED"
     assert resp.json()["noop"] is True
 
-
 # --------------------------------------------------------------------------
-# PR-10 — wizard protect on the single order owner: no request-path
-# reconnect (A2), halt + broker readiness re-checked right before the send (A4)
+# Wizard protect take-profit goes through order_entry.place: Gate-4 coverage
+# + an order_submissions reservation, then the single order owner (PR-10).
+# No request-path reconnect (A2); halt + broker readiness are re-checked
+# right before the send (A4).
 # --------------------------------------------------------------------------
 
 _PROTECT_BODY = {"tp_target_price": "3.50", "alert_net_mid_threshold": "1.25", "polarity": "DEBIT"}
 
 
+def _set_state(session_id: str, state: str) -> None:
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        cwq.update_session(conn, session_id, state=state)
+    engine.dispose()
+
+
+def _session_state(session_id: str) -> str:
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        state = conn.execute(
+            text("SELECT state FROM xenon.wizard_sessions WHERE session_id = :sid"), {"sid": session_id}
+        ).scalar_one()
+    engine.dispose()
+    return state
+
+
+def _tp_rows(session_id: str) -> list:
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT submission_id, action, security_type, tif, state, limit_price, legs, ib_order_id, perm_id "
+                "FROM xenon.order_submissions WHERE client_attempt_id LIKE :pat ORDER BY submitted_at"
+            ),
+            {"pat": f"wiz:{session_id}:tp:%"},
+        ).all()
+    engine.dispose()
+    return [row._mapping for row in rows]
+
+
 @pytest.fixture
 def filled_session():
     _seed_session("wiz-protect-owner", _plan_payload()["order_payload"])
-    engine = _pg_engine()
-    with engine.begin() as conn:
-        cwq.update_session(conn, "wiz-protect-owner", state="FILLED")
-    engine.dispose()
+    _set_state("wiz-protect-owner", "FILLED")
     return "wiz-protect-owner"
 
 
 @pytest.fixture
 def protect_owner(monkeypatch):
     """Owner over a fake orders pool; ib_pool.acquire must never run; the
-    protect algorithm is faked to send one TP through its adapter."""
-    from scripts.tests.order_owner_fakes import install_owner
-    from xenon.execution.combo_wizard import protect as protect_mod
+    place core is a fake that records its params and sends once."""
+    from scripts.tests.order_owner_fakes import install_cores, install_owner
 
     class _NoAcquirePool:
         def acquire(self, role):
@@ -713,44 +741,644 @@ def protect_owner(monkeypatch):
 
     monkeypatch.setattr(server_mod, "ib_pool", _NoAcquirePool())
     owner, pool = install_owner(monkeypatch)
-    calls = []
+    calls: list[dict] = []
 
-    def fake_attach(session_id, *, ib, **kw):
-        calls.append(session_id)
-        ib._ib.place_order("tp-contract", "tp-order")
-        return {"state": "PROTECTED", "tp_attached": True}
+    def fake_place(ib_client, params):
+        calls.append(params)
+        ib_client.place_order("tp-contract", "tp-order")
+        return {"status": "ok", "outcome": "accepted", "orderId": 9101, "permId": 9102, "initialStatus": "Submitted"}
 
-    monkeypatch.setattr(protect_mod, "attach_protection", fake_attach)
+    install_cores(monkeypatch, place=fake_place)
     return SimpleNamespace(owner=owner, pool=pool, calls=calls)
 
 
-def test_protect_runs_on_the_owner_with_a_fresh_pre_send_check(client, filled_session, protect_owner):
+def _real_place_path(monkeypatch) -> None:
+    # Test mode short-circuits _place_reserved before the owner; protect must
+    # take the real owner path here.
+    monkeypatch.setenv("XENON_API_TEST_MODE", "0")
+
+
+def test_protect_reserves_tp_through_gate4_and_places_once_on_the_owner(
+    monkeypatch, client, filled_session, protect_owner
+):
+    monkeypatch.delenv("XENON_GATE4_NETTING", raising=False)
+    _real_place_path(monkeypatch)
+
     resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
     assert resp.status_code == 200, resp.text
-    assert resp.json()["state"] == "PROTECTED"
+    body = resp.json()
+    assert body["state"] == "PROTECTED"
+    assert body["tp_attached"] is True and body["alert_armed"] is True
+    assert body["tp_order_id"] == "9102"
+    # Exactly one owner send, with a fresh readiness check before it.
+    assert len(protect_owner.calls) == 1
     assert protect_owner.pool.client.sent == [("place", ("tp-contract", "tp-order"))]
     assert protect_owner.pool.client.ready_checks == 1
+    params = protect_owner.calls[0]
+    # SELL envelope closes the BUY-opened combo; per-leg actions are the
+    # session's stored structure (never flipped a second time); signed LMT.
+    assert params["type"] == "combo" and params["action"] == "SELL" and params["tif"] == "GTC"
+    assert params["nonGuaranteed"] == 0
+    assert [(leg["action"], leg["strike"], leg["right"]) for leg in params["legs"]] == [
+        ("BUY", 200.0, "C"),
+        ("SELL", 210.0, "C"),
+    ]
+    assert params["limitPrice"] == "3.50"
+    assert params["account"] == "DU0000000"
+    assert params["submission_id"]
+    # One Gate-4 reservation row, now WORKING with the IB ids.
+    rows = _tp_rows(filled_session)
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["action"], row["security_type"], row["tif"], row["state"]) == ("SELL", "BAG", "GTC", "WORKING")
+    assert (row["ib_order_id"], row["perm_id"]) == ("9101", "9102")
+    assert [leg["action"] for leg in row["legs"]["legs"]] == ["BUY", "SELL"]
+    assert _session_state(filled_session) == "PROTECTED"
 
 
-def test_protect_refused_when_orders_halted(client, filled_session, protect_owner):
+def _replace_snapshot(positions: list[dict]) -> None:
+    """Latest scoped snapshot = exactly `positions` (shape ib_sync writes)."""
+    import json as _json
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    payload = {
+        "positions": positions,
+        "available_funds": 0,
+        "observation": {
+            "as_of": now.isoformat(),
+            "complete": True,
+            "account": "DU0000000",
+            "reads": {"positions": True, "open_orders": True, "executions": True},
+            **committed_pass_stamp(),
+        },
+    }
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        conn.execute(text("TRUNCATE xenon.account_snapshots CASCADE"))
+        conn.execute(
+            text(
+                """
+                INSERT INTO xenon.account_snapshots
+                  (account, bankroll, payload, snapshot_at, broker, account_env, broker_account)
+                VALUES ('DU0000000', 0, CAST(:p AS jsonb), :at, 'IB', 'paper', 'DU0000000')
+                """
+            ),
+            {"p": _json.dumps(payload), "at": now},
+        )
+    engine.dispose()
+
+
+def _spy_call(qty: int, strike: float) -> dict:
+    """The filled vertical's legs as ib_sync records them (expiry of _plan_payload)."""
+    return {
+        "ticker": "SPY",
+        "expiry": "2026-04-17",
+        "legs": [
+            {
+                "direction": "LONG" if qty >= 0 else "SHORT",
+                "type": "Call",
+                "contracts": abs(qty),
+                "strike": strike,
+                "account": "DU0000000",
+                "tc": "SPY",
+                "mult": 100,
+                "und_sec": "STK",
+            }
+        ],
+    }
+
+
+def test_protect_guaranteed_tp_closes_vertical_under_gate4_netting(monkeypatch, client, filled_session, protect_owner):
+    """Real Gate-4 evaluation: the account holds only the filled call debit
+    vertical (long 200C, short 210C) and nothing else works. The TP is a
+    GUARANTEED BAG, so with netting on its legs net per key → no new demand:
+    accepted, one reservation row recording guaranteed=True, one owner send
+    with NonGuaranteed=0."""
+    _replace_snapshot([_spy_call(1, 200.0), _spy_call(-1, 210.0)])
+    monkeypatch.setenv("XENON_GATE4_NETTING", "1")
+    _real_place_path(monkeypatch)
+
+    resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["state"] == "PROTECTED"
+    assert len(protect_owner.calls) == 1
+    assert protect_owner.calls[0]["nonGuaranteed"] == 0
+    rows = _tp_rows(filled_session)
+    assert len(rows) == 1
+    assert rows[0]["legs"]["guaranteed"] is True
+    assert [leg["action"] for leg in rows[0]["legs"]["legs"]] == ["BUY", "SELL"]
+
+
+def test_protect_guaranteed_tp_without_netting_is_refused_before_ib(monkeypatch, client, filled_session, protect_owner):
+    """Same holdings, netting off (the default: XENON_GATE4_NETTING unset).
+    Leg by leg the SELL 200C would leave the held short 210C uncovered, so
+    Gate 4 refuses with its leg-out code: no IB call, no reservation,
+    top-level reason_code, session back to FILLED."""
+    _replace_snapshot([_spy_call(1, 200.0), _spy_call(-1, 210.0)])
+    monkeypatch.delenv("XENON_GATE4_NETTING", raising=False)
+    _real_place_path(monkeypatch)
+
+    resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["reason_code"] == "COMBO_SPLIT_REQUIRED"
+    assert protect_owner.calls == [] and protect_owner.pool.client.sent == []
+    assert _tp_rows(filled_session) == []
+    assert _session_state(filled_session) == "FILLED"
+
+
+def test_protect_refused_when_another_working_order_uses_the_cover(monkeypatch, client, filled_session, protect_owner):
+    """A working reservation changes the TP decision. The only cover is 100
+    SPY shares (autouse snapshot, no option holdings). Alone, the TP passes
+    leg by leg (its SELL 200C is covered by the shares — see the owner test
+    above). Once another working order uses those shares, the SELL 200C leg
+    is uncovered → refused before IB, no reservation, session back to FILLED.
+
+    The code is COMBO_SPLIT_REQUIRED, not ETF_CALL_UNCOVERED: a guaranteed
+    same-key vertical close nets to zero call demand (coverage.py: netting
+    per Key, Key has no strike), so it can never *increase* uncovered calls
+    under netting and gate4 reports the leg-out code (gate4.py split_required
+    = not netting_enabled() and _accepted_with_netting)."""
+    monkeypatch.delenv("XENON_GATE4_NETTING", raising=False)
+    _seed_session("wiz-protect-other", _plan_payload()["order_payload"])
+    # Test mode: the other order reserves through Gate 4 and goes WORKING
+    # without the owner.
+    other = client.post("/wizard/sessions/wiz-protect-other/submit", json={"target_price": "2.45"})
+    assert other.status_code == 200, other.text
+    _real_place_path(monkeypatch)
+
+    resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["reason_code"] == "COMBO_SPLIT_REQUIRED"
+    assert protect_owner.calls == [] and protect_owner.pool.client.sent == []
+    assert _tp_rows(filled_session) == []
+    assert _session_state(filled_session) == "FILLED"
+
+
+def test_protect_refused_when_orders_halted(monkeypatch, client, filled_session, protect_owner):
+    _real_place_path(monkeypatch)
     protect_owner.owner._latch_halt("test")
     resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
     assert (resp.status_code, resp.json()["reason_code"]) == (503, "ORDERS_HALTED")
     assert protect_owner.calls == [] and protect_owner.pool.client.sent == []
+    assert _session_state(filled_session) == "FILLED"
 
 
-def test_protect_refused_when_orders_disconnected_without_reconnect(client, filled_session, protect_owner):
+def test_protect_refused_when_orders_disconnected_without_reconnect(monkeypatch, client, filled_session, protect_owner):
+    _real_place_path(monkeypatch)
     protect_owner.pool.connected["orders"] = False
     resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
     assert (resp.status_code, resp.json()["reason_code"]) == (503, "IB_BROKER_DISCONNECTED")
     assert protect_owner.pool.reconnects == [] and protect_owner.calls == []
+    assert _session_state(filled_session) == "FILLED"
 
 
-def test_protect_broker_not_ready_at_send_sends_nothing(client, filled_session, protect_owner):
+def test_protect_broker_not_ready_at_send_sends_nothing(monkeypatch, client, filled_session, protect_owner):
     """Admitted (socket up, readiness not LOST) but the round trip before the
-    core does not confirm the broker → refused before protect runs."""
+    core does not confirm the broker → refused before the place core runs."""
+    _real_place_path(monkeypatch)
     protect_owner.pool.client.readiness = "unknown"
     resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
     assert (resp.status_code, resp.json()["reason_code"]) == (503, "IB_BROKER_DISCONNECTED")
     assert protect_owner.calls == []
     assert protect_owner.pool.client.sent == []
+
+
+# --------------------------------------------------------------------------
+# Re-entrant protect for PROTECTION_PENDING (Astra P2 on PR #229): the intent
+# is stored before the send; a retry resolves the stored attempt from its
+# order_submissions row: bind a live TP, re-place only after proof that no TP
+# is live, else keep the claim (409). Each test counts owner sends.
+# --------------------------------------------------------------------------
+
+
+def _died_after_send(ib_client, params):
+    ib_client.place_order("tp-contract", "tp-order")
+    return {"status": "uncertain", "message": "socket closed after send"}
+
+
+def _accepted(ib_client, params):
+    ib_client.place_order("tp-contract", "tp-order")
+    return {"status": "ok", "outcome": "accepted", "orderId": 9201, "permId": 9202, "initialStatus": "Submitted"}
+
+
+def _sends(protect_owner) -> int:
+    return len(protect_owner.pool.client.sent)
+
+
+def _protection_config(session_id: str) -> dict | None:
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT config FROM xenon.wizard_protection WHERE session_id = :sid"), {"sid": session_id}
+        ).fetchone()
+    engine.dispose()
+    return row[0] if row else None
+
+
+def _first_attempt_unknown(monkeypatch, client, session_id, protect_body=None):
+    from scripts.tests.order_owner_fakes import install_cores
+
+    install_cores(monkeypatch, place=_died_after_send)
+    resp = client.post(f"/wizard/sessions/{session_id}/protect", json=protect_body or _PROTECT_BODY)
+    assert (resp.status_code, resp.json()["reason_code"]) == (502, "PLACE_OUTCOME_UNKNOWN")
+    assert _session_state(session_id) == "PROTECTION_PENDING"
+    rows = _tp_rows(session_id)
+    assert [r["state"] for r in rows] == ["UNKNOWN"]
+    # The intent was stored before the send.
+    config = _protection_config(session_id)
+    assert config["tp_client_attempt_id"].startswith(f"wiz:{session_id}:tp:")
+    assert (config["tp_enabled"], config["alert_enabled"]) == (False, False)
+    assert config["alert_net_mid_threshold"] == "1.25" and config["alert_polarity"] == "DEBIT"
+    accepted: list[dict] = []
+
+    def _recording_accepted(ib_client, params):
+        accepted.append(params)
+        return _accepted(ib_client, params)
+
+    install_cores(monkeypatch, place=_recording_accepted)
+    return rows[0]["submission_id"], accepted
+
+
+def test_protect_still_unknown_retry_gets_409_and_sends_nothing(monkeypatch, client, filled_session, protect_owner):
+    _real_place_path(monkeypatch)
+    _first_attempt_unknown(monkeypatch, client, filled_session)
+
+    again = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
+    assert again.status_code == 409
+    assert again.json()["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
+    assert _sends(protect_owner) == 1
+    assert len(_tp_rows(filled_session)) == 1
+    assert _session_state(filled_session) == "PROTECTION_PENDING"
+
+
+@pytest.mark.parametrize("dead_state", ["FAILED", "REJECTED"])
+def test_protect_late_refusal_retry_places_exactly_one_new_tp(monkeypatch, client, filled_session, protect_owner, dead_state):
+    """UNKNOWN → FAILED / REJECTED with no IB ids and no fills: never at IB
+    (gate4._may_be_at_ib rule) → executed 0 proven → one new TP at the
+    entry quantity."""
+    from xenon.execution import orders_store
+
+    _real_place_path(monkeypatch)
+    sub, accepted = _first_attempt_unknown(monkeypatch, client, filled_session)
+    assert orders_store.mark_terminal(
+        submission_id=sub, state=dead_state, reason_code="IB_CONNECTION", filled_qty=0,
+        avg_fill_price=None, expected_states=("UNKNOWN",),
+    )
+
+    again = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
+    assert again.status_code == 200, again.text
+    assert again.json()["state"] == "PROTECTED"
+    assert _sends(protect_owner) == 2  # the uncertain first send + exactly one new TP
+    assert len(accepted) == 1 and accepted[0]["quantity"] == 1  # entry quantity
+    assert [r["state"] for r in _tp_rows(filled_session)] == [dead_state, "WORKING"]
+    config = _protection_config(filled_session)
+    assert config["tp_enabled"] is True and config["alert_enabled"] is True
+    assert config["tp_ib_order_id"] == "9202"
+
+
+# --- a cancelled TP may carry executions (cancel keeps executed qty) --------
+
+
+@pytest.fixture
+def filled_session_qty2():
+    payload = {**_plan_payload()["order_payload"], "quantity": 2}
+    _seed_session("wiz-protect-q2", payload)
+    _set_state("wiz-protect-q2", "FILLED")
+    # 200 shares: Gate 4 (netting off) covers the 2-lot TP's SELL leg.
+    _replace_snapshot(
+        [{"ticker": "SPY", "structure_type": "Stock", "direction": "LONG", "contracts": 200, "expiry": None,
+          "legs": [{"direction": "LONG", "type": "Stock", "contracts": 200, "strike": 0.0, "account": "DU0000000"}]}]
+    )
+    return "wiz-protect-q2"
+
+
+def _working_then_cancelled(sub: str) -> None:
+    from xenon.execution import orders_store
+
+    assert orders_store.mark_submitted(
+        submission_id=sub, ib_order_id="9401", perm_id="9402", placing_client_id=4, expected_states=("UNKNOWN",)
+    )
+    # As _mark_submission_cancelled does (order_entry.py): filled_qty=None keeps executions.
+    assert orders_store.mark_terminal(
+        submission_id=sub, state="CANCELLED", reason_code="USER_CANCEL", filled_qty=None,
+        avg_fill_price=None, expected_states=orders_store.NON_TERMINAL_STATES,
+    )
+
+
+def _record_tp_envelope_fill(sub: str, qty: int) -> None:
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from xenon.execution import orders_store
+
+    assert orders_store.record_fill(
+        exec_id="tp-exec-1", submission_id=sub, perm_id="9402", ib_order_id="9401", con_id=None, ticker="SPY",
+        side="SLD", qty=Decimal(qty), price=Decimal("3.50"), filled_at=datetime.now(timezone.utc),
+        metadata={"sec_type": "BAG"}, broker="IB", account_env="paper", broker_account="DU0000000",
+    )
+
+
+def _assert_broker_reached_refusal(client, sid: str, accepted: list, protect_owner, row_state: str) -> None:
+    """409 PROTECT_TP_PARTIAL, claim kept, nothing sent, event recorded."""
+    again = client.post(f"/wizard/sessions/{sid}/protect", json=_PROTECT_BODY)
+    assert again.status_code == 409, again.text
+    assert again.json()["reason_code"] == "PROTECT_TP_PARTIAL"
+    assert "filled" not in again.json() and "remaining" not in again.json()
+    assert _sends(protect_owner) == 1 and accepted == []  # only the first, uncertain send
+    assert [r["state"] for r in _tp_rows(sid)] == [row_state]
+    assert _session_state(sid) == "PROTECTION_PENDING"
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        detail = conn.execute(
+            text("SELECT detail FROM xenon.wizard_events WHERE session_id = :sid AND kind = 'PROTECTION_TP_PARTIAL'"),
+            {"sid": sid},
+        ).scalar_one()
+    engine.dispose()
+    assert detail["row_state"] == row_state
+
+
+def _age_terminal(sub: str, seconds: float) -> None:
+    """Set the row's terminal time (order_submissions.updated_at) to `seconds` ago."""
+    from datetime import datetime, timedelta, timezone
+
+    from xenon.db.engine import get_sync_engine
+
+    with get_sync_engine().begin() as conn:
+        conn.execute(
+            text("UPDATE xenon.order_submissions SET updated_at = :ts WHERE submission_id = :sub"),
+            {"ts": datetime.now(timezone.utc) - timedelta(seconds=seconds), "sub": sub},
+        )
+
+
+def test_protect_cancelled_with_perm_id_and_no_fills_old_is_refused(monkeypatch, client, filled_session_qty2, protect_owner):
+    """(a) The TP reached IB (permId) and was cancelled; 0 recorded fills and
+    an old terminal time prove nothing (the fills poller can fail silently).
+    No auto re-place on the money path."""
+    _real_place_path(monkeypatch)
+    sid = filled_session_qty2
+    sub, accepted = _first_attempt_unknown(monkeypatch, client, sid)
+    _working_then_cancelled(sub)
+    _age_terminal(sub, 3600)
+    _assert_broker_reached_refusal(client, sid, accepted, protect_owner, "CANCELLED")
+
+
+def test_protect_cancelled_after_partial_fill_retry_refused_without_send(monkeypatch, client, filled_session_qty2, protect_owner):
+    """(b)"""
+    _real_place_path(monkeypatch)
+    sid = filled_session_qty2
+    sub, accepted = _first_attempt_unknown(monkeypatch, client, sid)
+    _record_tp_envelope_fill(sub, 1)  # 1 of 2 executed …
+    _working_then_cancelled(sub)  # … then the rest cancelled
+    _assert_broker_reached_refusal(client, sid, accepted, protect_owner, "CANCELLED")
+
+
+def test_protect_rejected_with_ib_order_id_is_refused(monkeypatch, client, filled_session, protect_owner):
+    """(d) REJECTED but IB assigned an order id: it may have reached IB."""
+    from xenon.execution import orders_store
+
+    _real_place_path(monkeypatch)
+    sub, accepted = _first_attempt_unknown(monkeypatch, client, filled_session)
+    assert orders_store.mark_submitted(
+        submission_id=sub, ib_order_id="9501", perm_id=None, placing_client_id=4, expected_states=("UNKNOWN",)
+    )
+    assert orders_store.mark_terminal(
+        submission_id=sub, state="REJECTED", reason_code="IB_REJECT", filled_qty=0,
+        avg_fill_price=None, expected_states=orders_store.NON_TERMINAL_STATES,
+    )
+    _assert_broker_reached_refusal(client, filled_session, accepted, protect_owner, "REJECTED")
+
+
+def test_protect_cancelled_without_perm_id_is_refused(monkeypatch, client, filled_session, protect_owner):
+    """CANCELLED with no ids: a cancel implies the order may have been at IB."""
+    from xenon.execution import orders_store
+
+    _real_place_path(monkeypatch)
+    sub, accepted = _first_attempt_unknown(monkeypatch, client, filled_session)
+    assert orders_store.mark_terminal(
+        submission_id=sub, state="CANCELLED", reason_code="USER_CANCEL", filled_qty=None,
+        avg_fill_price=None, expected_states=("UNKNOWN",),
+    )
+    _assert_broker_reached_refusal(client, filled_session, accepted, protect_owner, "CANCELLED")
+
+
+# --- explicit IB reject that carries IB ids (Astra R4 on PR #229) ----------
+# Real settlement: only the broker core's return value is faked; the ids
+# reach the row through order_entry._place_result, never seeded in the DB.
+
+
+def _ib_reject(ids: dict):
+    def core(ib_client, params):
+        ib_client.place_order("tp-contract", "tp-order")
+        return {
+            "status": "error", "outcome": "rejected", "code": 201, "message": "IB error 201: rejected",
+            "amend_outcome": "rejected", "filled": False, "fillCount": 0, **ids,
+        }
+
+    return core
+
+
+def _install_recording_accepted(monkeypatch) -> list:
+    from scripts.tests.order_owner_fakes import install_cores
+
+    accepted: list[dict] = []
+
+    def core(ib_client, params):
+        accepted.append(params)
+        return _accepted(ib_client, params)
+
+    install_cores(monkeypatch, place=core)
+    return accepted
+
+
+def test_protect_immediate_ib_reject_with_ids_keeps_claim_and_retry_is_refused(
+    monkeypatch, client, filled_session, protect_owner
+):
+    from scripts.tests.order_owner_fakes import install_cores
+
+    _real_place_path(monkeypatch)
+    install_cores(monkeypatch, place=_ib_reject({"orderId": 9301, "permId": 9302}))
+
+    resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
+    assert (resp.status_code, resp.json()["reason_code"]) == (502, "IB_REJECT"), resp.text
+    assert _session_state(filled_session) == "PROTECTION_PENDING"  # IB had it: claim kept
+    [row] = _tp_rows(filled_session)
+    assert (row["state"], row["ib_order_id"], row["perm_id"]) == ("REJECTED", "9301", "9302")
+
+    accepted = _install_recording_accepted(monkeypatch)
+    again = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+    assert (again.status_code, again.json()["reason_code"]) == (409, "PROTECT_TP_PARTIAL"), again.text
+    assert _sends(protect_owner) == 1 and accepted == []
+
+
+def test_protect_ib_reject_with_ids_settled_after_deadline_retry_is_refused(
+    monkeypatch, client, filled_session, protect_owner
+):
+    import threading
+    import time
+
+    from scripts.tests.order_owner_fakes import install_cores
+    from xenon.api.services import order_entry
+
+    _real_place_path(monkeypatch)
+    release = threading.Event()
+    reject = _ib_reject({"orderId": 9311, "permId": 9312})
+
+    def late_core(ib_client, params):
+        release.wait(5)
+        return reject(ib_client, params)
+
+    install_cores(monkeypatch, place=late_core)
+    monkeypatch.setattr(order_entry, "_PLACE_TIMEOUT_S", 0.3)
+
+    resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+    assert (resp.status_code, resp.json()["reason_code"]) == (502, "PLACE_OUTCOME_UNKNOWN"), resp.text
+    release.set()
+    for _ in range(60):
+        if _tp_rows(filled_session)[0]["state"] == "REJECTED":
+            break
+        time.sleep(0.05)
+    [row] = _tp_rows(filled_session)
+    assert (row["state"], row["ib_order_id"], row["perm_id"]) == ("REJECTED", "9311", "9312")
+    assert _session_state(filled_session) == "PROTECTION_PENDING"
+
+    accepted = _install_recording_accepted(monkeypatch)
+    again = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+    assert (again.status_code, again.json()["reason_code"]) == (409, "PROTECT_TP_PARTIAL"), again.text
+    assert _sends(protect_owner) == 1 and accepted == []
+
+
+def test_protect_ib_reject_without_ids_releases_and_retry_places_once(
+    monkeypatch, client, filled_session, protect_owner
+):
+    from scripts.tests.order_owner_fakes import install_cores
+
+    _real_place_path(monkeypatch)
+    install_cores(monkeypatch, place=_ib_reject({"orderId": 0, "permId": 0}))
+
+    resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
+    assert (resp.status_code, resp.json()["reason_code"]) == (502, "IB_REJECT"), resp.text
+    assert _session_state(filled_session) == "FILLED"  # never at IB: released
+    [row] = _tp_rows(filled_session)
+    assert (row["state"], row["ib_order_id"], row["perm_id"]) == ("REJECTED", None, None)
+
+    accepted = _install_recording_accepted(monkeypatch)
+    again = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+    assert again.status_code == 200, again.text
+    assert _sends(protect_owner) == 2
+    assert len(accepted) == 1 and accepted[0]["quantity"] == 1  # entry quantity
+
+
+# --- sessions claimed by an older build (no stored attempt) -----------------
+
+
+@pytest.mark.parametrize("config", [None, {"tp_enabled": False, "tp_target_price": "3.50", "alert_enabled": False}],
+                         ids=["no-config-row", "config-without-attempt-id"])
+def test_protect_legacy_pending_session_without_attempt_is_refused(monkeypatch, client, filled_session, protect_owner, config):
+    _real_place_path(monkeypatch)
+    _set_state(filled_session, "PROTECTION_PENDING")
+    if config is not None:
+        engine = _pg_engine()
+        with engine.begin() as conn:
+            cwq.upsert_protection(conn, filled_session, config=config)
+        engine.dispose()
+
+    resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
+    assert (resp.status_code, resp.json()["reason_code"]) == (409, "PLACE_OUTCOME_UNKNOWN")
+    assert _sends(protect_owner) == 0
+    assert _tp_rows(filled_session) == []
+    assert _session_state(filled_session) == "PROTECTION_PENDING"
+
+
+def test_protect_late_acceptance_retry_binds_and_arms_without_sending(monkeypatch, client, filled_session, protect_owner):
+    from xenon.execution import orders_store
+
+    _real_place_path(monkeypatch)
+    sub, _accepted_calls = _first_attempt_unknown(monkeypatch, client, filled_session)
+    assert orders_store.mark_submitted(
+        submission_id=sub, ib_order_id="9301", perm_id="9302", placing_client_id=4, expected_states=("UNKNOWN",)
+    )
+
+    # A different target on the retry: the live TP keeps the stored price.
+    again = client.post(
+        f"/wizard/sessions/{filled_session}/protect",
+        json={**_PROTECT_BODY, "tp_target_price": "4.00", "alert_net_mid_threshold": "9.99"},
+    )
+
+    assert again.status_code == 200, again.text
+    body = again.json()
+    assert (body["state"], body["bound"], body["tp_order_id"]) == ("PROTECTED", True, "9302")
+    assert body["tp_target_price"] == "3.50" and body["requested_tp_target_price"] == "4.00"
+    assert _sends(protect_owner) == 1  # no new send
+    assert len(_tp_rows(filled_session)) == 1
+    config = _protection_config(filled_session)
+    assert (config["tp_enabled"], config["alert_enabled"], config["tp_ib_order_id"]) == (True, True, "9302")
+    assert config["tp_target_price"] == "3.50" and config["alert_net_mid_threshold"] == "1.25"  # stored values
+
+
+def test_protect_cancelled_after_claim_then_row_working_retry_binds(monkeypatch, client, filled_session, protect_owner):
+    import asyncio
+    from decimal import Decimal
+
+    from xenon.execution.combo_wizard import protect as protect_mod
+
+    _real_place_path(monkeypatch)
+    from scripts.tests.order_owner_fakes import install_cores
+
+    install_cores(monkeypatch, place=_accepted)
+    real_place = order_entry.place
+
+    async def place_then_cancelled(body):
+        await real_place(body)  # reserved + sent: row WORKING
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(order_entry, "place", place_then_cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            protect_mod.attach_protection(
+                filled_session, tp_target_price=Decimal("3.50"), alert_net_mid_threshold=Decimal("1.25"), polarity="DEBIT"
+            )
+        )
+    monkeypatch.setattr(order_entry, "place", real_place)
+    assert _session_state(filled_session) == "PROTECTION_PENDING"
+    assert [r["state"] for r in _tp_rows(filled_session)] == ["WORKING"]
+
+    again = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
+    assert again.status_code == 200, again.text
+    assert again.json()["state"] == "PROTECTED" and again.json()["bound"] is True
+    assert _sends(protect_owner) == 1
+    assert len(_tp_rows(filled_session)) == 1
+
+
+def test_protect_tp_placed_alert_failed_retry_arms_alert_only(monkeypatch, client, filled_session, protect_owner):
+    from xenon.execution.combo_wizard import protect as protect_mod
+
+    _real_place_path(monkeypatch)
+    real_register = protect_mod._register_risk_alert
+
+    def _fail(*_a, **_k):
+        raise RuntimeError("alert store unavailable")
+
+    monkeypatch.setattr(protect_mod, "_register_risk_alert", _fail)
+    first = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+    assert first.status_code == 200, first.text
+    assert (first.json()["state"], first.json()["alert_armed"]) == ("PROTECTION_PENDING", False)
+    assert _sends(protect_owner) == 1
+
+    monkeypatch.setattr(protect_mod, "_register_risk_alert", real_register)
+    again = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
+    assert again.status_code == 200, again.text
+    assert (again.json()["state"], again.json()["alert_armed"], again.json()["bound"]) == ("PROTECTED", True, True)
+    assert _sends(protect_owner) == 1  # alert only, no second TP
+    assert len(_tp_rows(filled_session)) == 1
