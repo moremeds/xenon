@@ -43,6 +43,39 @@ def _extract_error_message(stdout: str, stderr: str, default: str) -> str:
     return default
 
 
+def _last_line_json(stdout: str) -> Optional[dict]:
+    """The last non-empty stdout line, if it is a JSON object (else None)."""
+    for line in reversed(stdout.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        if not line.startswith("{"):
+            return None
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        return candidate if isinstance(candidate, dict) else None
+    return None
+
+
+def _parse_stdout_json(stdout: str) -> Optional[dict]:
+    """JSON payload of a script's stdout: from the first "{" to the end; when
+    that fails or is not an object, the last non-empty line if it is a JSON
+    object. Progress text may contain "{" (e.g. SQLAlchemy "[parameters: {…}]"
+    in a warning) before a script's final one-line JSON result."""
+    json_start = stdout.find("{")
+    if json_start == -1:
+        return None
+    try:
+        candidate = json.loads(stdout[json_start:])
+    except json.JSONDecodeError:
+        candidate = None
+    if isinstance(candidate, dict):
+        return candidate
+    return _last_line_json(stdout)
+
+
 @dataclass
 class ScriptResult:
     ok: bool
@@ -99,15 +132,7 @@ async def run_entry_point(
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
 
-        json_start = stdout.find("{")
-        parsed_data: Optional[dict] = None
-        if json_start != -1:
-            try:
-                candidate = json.loads(stdout[json_start:])
-                if isinstance(candidate, dict):
-                    parsed_data = candidate
-            except json.JSONDecodeError:
-                parsed_data = None
+        parsed_data = _parse_stdout_json(stdout)
 
         if proc.returncode != 0:
             # Structured subprocess errors emit JSON with ``status`` and
@@ -184,7 +209,16 @@ async def run_module(
         if json_start == -1:
             return ScriptResult(ok=True, data={})
 
-        data = json.loads(stdout[json_start:])
+        try:
+            data = json.loads(stdout[json_start:])
+        except json.JSONDecodeError:
+            # Noise with "{" before a final one-line JSON result.
+            data = _last_line_json(stdout)
+            if data is None:
+                raise
+        else:
+            if not isinstance(data, dict):
+                data = _last_line_json(stdout) or data
         return ScriptResult(ok=True, data=data)
 
     except asyncio.TimeoutError:

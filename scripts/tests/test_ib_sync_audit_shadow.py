@@ -151,15 +151,10 @@ def test_read_only_sync_still_audits_what_it_sees(monkeypatch, caplog):
 
 
 def _parsed_like_run_entry_point(out: str) -> dict | None:
-    """Same parse as `xenon.api.subprocess.run_entry_point` builds `data`."""
-    start = out.find("{")
-    if start == -1:
-        return None
-    try:
-        data = json.loads(out[start:])
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
+    """The parse `xenon.api.subprocess.run_entry_point` uses to build `data`."""
+    from xenon.api.subprocess import _parse_stdout_json
+
+    return _parse_stdout_json(out)
 
 
 def test_sync_emits_audit_summary_as_script_result_data(monkeypatch, capsys):
@@ -201,3 +196,22 @@ def test_flag_on_sync_subprocess_still_cancels_nothing(monkeypatch):
     _run(monkeypatch, fake)
     assert fake.cancels == []
     assert json.loads(_health_row().detail)["mode"] == "shadow"
+
+
+def test_audit_summary_survives_brace_noise_earlier_in_stdout(monkeypatch, capsys):
+    """herd-reject 1: a real pass printed a SQLAlchemy error with
+    "[parameters: {...}]" before the summary; the summary must still parse."""
+    real_save = ib_sync.save_portfolio
+
+    def _noisy_save(portfolio):
+        print("  Warning: Postgres write failed: (psycopg.errors.UniqueViolation) dup")
+        print("[parameters: {'ticker': '6981', 'currency': 'JPY', 'quantity': 100}]")
+        return real_save(portfolio)
+
+    monkeypatch.setattr(ib_sync, "save_portfolio", _noisy_save)
+    fake = _naked_call_client()
+    _run(monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert "[parameters: {" in out
+    audit = _parsed_like_run_entry_point(out)["naked_short_audit"]
+    assert audit["status"] == "violations" and audit["violations"][0]["perm_id"] == 990001
