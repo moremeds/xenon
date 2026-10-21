@@ -46,7 +46,7 @@ SRC_DB="${XENON_REFRESH_SRC:-core_dev}"
 DST_DB="${XENON_REFRESH_DST:-core_test}"
 PG_HOST="${PGHOST:-localhost}"
 PG_PORT="${PGPORT:-5432}"
-PG_USER="${PGUSER:-xenon_migrator}"
+PG_USER="${PGUSER:-xenon_app}"
 
 # Prefer the highest-version PG client tools available. pg_dump must be
 # >= the server's major version (a 15.x client cannot dump a 17.x

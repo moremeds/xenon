@@ -68,18 +68,19 @@ Postgres is the runtime source of truth for portfolio, orders, fills, and journa
 
 ## Dev/Prod DB Split
 
-Two databases on the macmini Postgres, written by two distinct roles. **Everything writes to Postgres first; the website only reads.** Full policy + role/grant SQL: `docs/architecture/production-database-strategy.md` § Dev/Prod DB Split. Operator cutover steps: `docs/runbooks/dev-prod-db-cutover.md`.
+Two databases on the macmini Postgres, both owned and written by one role, `xenon_app` (prod `.env`, the migrator and laptop `.env` all use it). **Everything writes to Postgres first; the website only reads.** Isolation is by database name and code guards, not by role grants. Policy: `docs/architecture/production-database-strategy.md` § Dev/Prod DB Split. The role split in `docs/runbooks/dev-prod-db-cutover.md` is planned, not applied.
 
 | DB          | Role         | Writers                                                 | Refresh                                                                                                              |
 | ----------- | ------------ | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `core_dev`  | `xenon_prod` | macmini Docker stack (api, migrator, realtime services) | source of truth                                                                                                      |
-| `core_test` | `xenon_dev`  | MacBook dev sessions via `scripts/infra/dev.sh paper`   | `pg_dump core_dev → pg_restore core_test` nightly at 04:00 ET (`scripts/infra/refresh-core-test.sh` via LaunchAgent) |
+| `core_dev`  | `xenon_app`  | macmini Docker stack (api, migrator, realtime services) | source of truth                                                                                                      |
+| `core_test` | `xenon_app`  | MacBook dev sessions via `scripts/infra/dev.sh paper`   | `pg_dump core_dev → pg_restore core_test` nightly at 04:00 ET (`scripts/infra/refresh-core-test.sh` via LaunchAgent) |
 
-Defense in depth — three layers prevent dev sessions from touching prod:
+Defense in depth — name-based layers keep dev sessions off prod (there is no role-grant layer, because one role can write both DBs):
 
-1. **PG role grants** — `xenon_dev` has no write permission on `core_dev`; `xenon_prod` is the only role granted INSERT/UPDATE/DELETE there, with `ALTER DEFAULT PRIVILEGES` so new tables inherit the ACL.
-2. **`dev.sh` startup guard** — refuses to boot when `DATABASE_URL` parses to `core_dev`, regardless of the role. Test: `scripts/tests/test_dev_sh_db_guard.py`.
-3. **CI write-side guard** — `scripts/checks/no_json_write_on_order_path.py` fails new `writeFile` / `Path(...).write_text` / `_atomic_save` against `data/*.json` in `web/app/api/`, `web/lib/order/`, `src/xenon/api/`, `src/xenon/execution/`. Mirror of the existing read-side guard; locks in DB-first as a CI invariant.
+1. **`dev.sh` startup guard** — refuses to boot when `DATABASE_URL` parses to `core_dev`. Test: `scripts/tests/test_dev_sh_db_guard.py`.
+2. **Test-DB guard** — root `conftest.py` aborts pytest when the test DB is `core_dev`, matches `DATABASE_URL`, or lacks `test` in its name. Test: `scripts/tests/test_test_db_guard.py`.
+3. **`XENON_READ_ONLY=1`** (`dev.sh live`) — refuses every write surface (see below).
+4. **CI write-side guard** — `scripts/checks/no_json_write_on_order_path.py` fails new `writeFile` / `Path(...).write_text` / `_atomic_save` against `data/*.json` in `web/app/api/`, `web/lib/order/`, `src/xenon/api/`, `src/xenon/execution/`. Mirror of the existing read-side guard; locks in DB-first as a CI invariant.
 
 ### `dev.sh live` is read-only
 
@@ -197,7 +198,7 @@ Quotes, fills, and position updates flow whenever IB Gateway is connected. Outsi
 - [ ] `scripts/infra/dev.sh paper` (paper IB on local `127.0.0.1:4002`, writes `core_test`) — OR `scripts/infra/dev.sh live` (live IB on macmini `100.66.147.98:4001`, **read-only — `XENON_READ_ONLY=1`**)
 - [ ] Dev stack binds **3200** (Next), **8421** (FastAPI), **8866** (realtime WS). Prod is the Docker stack on the macmini (`deploy/compose.prod.yml`, published on 127.0.0.1:3000 / 8321 / 8765); the dev ports are offset so the xenon dev stack coexists with the local radon stack.
 - [ ] If cold start: approve 2FA on IBKR mobile
-- [ ] `psql -h 100.66.147.98 -U xenon_dev core_test -c "SELECT 1"` — verify Postgres reachable. `dev.sh` refuses to start if `DATABASE_URL` points at `core_dev` (prod).
+- [ ] `psql -h 100.66.147.98 -U xenon_app core_test -c "SELECT 1"` — verify Postgres reachable. `dev.sh` refuses to start if `DATABASE_URL` points at `core_dev` (prod).
 - [ ] `curl http://localhost:8421/health` — verify `ib_gateway.port_listening: true` and `status: ok` (`orders_halted` means the order owner latched; see `src/xenon/api/CLAUDE.md` § Order owner)
 - [ ] Reconciliation auto-runs on lifespan boot (single-leg rehydrate + fills replay) — **skipped under `XENON_READ_ONLY=1`**
 - [ ] IB activity poller running (60s default — TWS-side edits + fills mirrored into Postgres) — **skipped under `XENON_READ_ONLY=1`**

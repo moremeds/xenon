@@ -66,11 +66,11 @@ XENON_PAPER_ACCOUNT=DU0000000             # DU* prefix required for paper
 # XENON_LIVE_ACCOUNT=U1234567             # U* prefix required for live
 
 # dev.sh refuses to start when DATABASE_URL points at core_dev (prod)
-DATABASE_URL=postgresql+asyncpg://xenon_dev:<dev-pw>@<db-host>:5432/core_test
+DATABASE_URL=postgresql+asyncpg://xenon_app:<app-pw>@<db-host>:5432/core_test
 # pytest only: a separate, existing database whose name contains "test" (not core_dev,
 # not the same database as DATABASE_URL), e.g. xenon_test. pytest refuses to start otherwise
 # (src/xenon/_test_db.py); per-worker clones are made from it.
-DATABASE_URL_TEST=postgresql+asyncpg://xenon_dev:<dev-pw>@<db-host>:5432/xenon_test
+DATABASE_URL_TEST=postgresql+asyncpg://xenon_app:<app-pw>@<db-host>:5432/xenon_test
 
 # Next -> FastAPI shared secret (required; FastAPI fails closed without a credential)
 XENON_INTERNAL_API_TOKEN=...

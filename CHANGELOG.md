@@ -5,6 +5,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+- Docs and the refresh-core-test job use the real `xenon_app` role.
+
 ## [0.13.0] — 2026-10-21
 
 Summary: the Ratings tab works again on FastAPI; one ET-aware market calendar that treats holidays as closed; `server.py` split into route and service modules; docs and runbooks match the code.

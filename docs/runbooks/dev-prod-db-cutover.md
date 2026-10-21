@@ -1,5 +1,8 @@
 # Dev/Prod Postgres Split — Cutover Runbook
 
+> Status: not executed as of 2026-10-21; prod and dev both use `xenon_app`.
+> The roles `xenon_prod`, `xenon_dev` and `xenon_migrator` below do not exist yet.
+
 One-time procedure to enforce the rule that **`core_dev` is written only
 by the macmini Docker stack**, **`core_test` is written by dev machines**,
 and the two are linked by a nightly **`core_dev → core_test` refresh**.

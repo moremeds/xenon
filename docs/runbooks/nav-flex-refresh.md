@@ -8,7 +8,7 @@ Polls IB Flex `EquitySummaryByReportDateInBase` daily at 17:30 ET on the macmini
 
 ### Prerequisites
 
-- The job runs from the api image (no source checkout on the macmini). The api `env_file` (`/opt/xenon/.env`, `web.env`) includes: `IB_FLEX_TOKEN`, `IB_FLEX_NAV_QUERY_ID`, `XENON_LIVE_ACCOUNT`, `DATABASE_URL` pointing at `core_dev` via the `xenon_prod` role.
+- The job runs from the api image (no source checkout on the macmini). The api `env_file` (`/opt/xenon/.env`, `web.env`) includes: `IB_FLEX_TOKEN`, `IB_FLEX_NAV_QUERY_ID`, `XENON_LIVE_ACCOUNT`, `DATABASE_URL` pointing at `core_dev` via the `xenon_app` role.
 - **Pass-2 T7 — explicit `XENON_TRADING_MODE`.** The api `env_file` MUST set `XENON_TRADING_MODE=live` explicitly. There is intentionally no silent default; the account is derived from the mode (`src/xenon/jobs/nav_flex_refresh.py`). Operator paper-mode testing requires the same explicit set in the relevant shell.
 - IB Flex query saved with:
   - **Format: XML _or_ CSV** — both work. `fetch_ib_nav_series` sniffs the response body (CSV header `"ClientAccountID"` → CSV branch, presence of `<FlexStatements>` → XML branch).
@@ -21,13 +21,13 @@ The 2026-06-03 schema migration (`2026_06_03_nav_src_pk`) changes `nav_history`'
 
 ```bash
 # Confirm the new PK is in place.
-psql -h 100.66.147.98 -U xenon_prod core_dev -c "
+psql -h 100.66.147.98 -U xenon_app core_dev -c "
   SELECT conname FROM pg_constraint
    WHERE conrelid = 'xenon.nav_history'::regclass AND contype = 'p';"
 # Expect: nav_history_pkey
 
 # Confirm columns include 'source'.
-psql -h 100.66.147.98 -U xenon_prod core_dev -c "
+psql -h 100.66.147.98 -U xenon_app core_dev -c "
   SELECT a.attname FROM pg_constraint c
     JOIN pg_attribute a ON a.attnum = ANY(c.conkey) AND a.attrelid = c.conrelid
    WHERE c.conrelid = 'xenon.nav_history'::regclass AND c.contype = 'p'
@@ -68,7 +68,7 @@ Evidence: output lines `xenon-nav-flex-refresh: mode=live account=...` and `fetc
 Cross-check the PG side:
 
 ```bash
-psql -h 100.66.147.98 -U xenon_prod core_dev -c "
+psql -h 100.66.147.98 -U xenon_app core_dev -c "
 SELECT date, total, source
   FROM xenon.nav_history
  WHERE broker='IB' AND account_env='live' AND broker_account='U18007831'

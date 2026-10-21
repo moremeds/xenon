@@ -136,15 +136,23 @@ Recommended credentials:
 - `signal_writer`: writes `signals` and selected `backtests` rows only.
 - `backtest_writer`: writes `backtests` only.
 
-## Dev/Prod DB Split (implemented)
+## Dev/Prod DB Split (implemented by database name)
 
-The previous section describes the _target_. The implemented form, as
-of 2026-06, is concrete:
+The previous section describes the _target_. The current state, as of
+2026-10-21: two databases, one role. The single role `xenon_app` owns
+`core_dev`, `core_test` and the schemas `xenon` and `events`. Prod, the
+migrator and laptop `.env` files all connect as `xenon_app`.
 
-| Database    | Host                    | Writers (role) | Readers (role)                     | Purpose                                                                                               |
-| ----------- | ----------------------- | -------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `core_dev`  | macmini (LAN/Tailscale) | `xenon_prod`   | `xenon_prod`, `xenon_dev` (SELECT) | Production. Written exclusively by the macmini Docker stack.                                          |
-| `core_test` | macmini (LAN/Tailscale) | `xenon_dev`    | `xenon_dev`, `xenon_prod` (SELECT) | Dev mirror. Written by `scripts/infra/dev.sh` sessions and pytest. Refreshed nightly from `core_dev`. |
+| Database    | Host                    | Writers (role) | Readers (role) | Purpose                                                                                               |
+| ----------- | ----------------------- | -------------- | -------------- | ----------------------------------------------------------------------------------------------------- |
+| `core_dev`  | macmini (LAN/Tailscale) | `xenon_app`    | `xenon_app`    | Production. Written by the macmini Docker stack.                                                      |
+| `core_test` | macmini (LAN/Tailscale) | `xenon_app`    | `xenon_app`    | Dev mirror. Written by `scripts/infra/dev.sh` sessions and pytest. Refreshed nightly from `core_dev`. |
+
+Planned, not applied: separate `xenon_prod`, `xenon_dev` and `xenon_migrator`
+roles with per-DB grants, so a wrong `.env` gets permission-denied at insert
+time. These roles do not exist. The procedure is in
+[`docs/runbooks/dev-prod-db-cutover.md`](../runbooks/dev-prod-db-cutover.md);
+it has not been executed.
 
 **Refresh direction is one-way: `core_dev → core_test`.**
 At 04:00 ET (08:00 UTC) the macmini's LaunchAgent
@@ -154,16 +162,15 @@ At 04:00 ET (08:00 UTC) the macmini's LaunchAgent
 `core_test` is therefore ephemeral — any in-progress local-only
 migration is rolled back overnight. Re-apply after refresh.
 
-**Enforcement (defense in depth):**
+**Enforcement (defense in depth, name-based; there is no role-grant layer):**
 
-1. **Postgres role grants** — `xenon_dev` has SELECT only on `core_dev`
-   and full DML on `core_test`. `xenon_prod` is the mirror. A
-   misconfigured `.env` that points the wrong role at the wrong DB
-   gets a permission-denied at insert time, not a silent corruption.
-2. **`scripts/infra/dev.sh` startup guard** — parses the database name
+1. **`scripts/infra/dev.sh` startup guard** — parses the database name
    from `DATABASE_URL`; aborts with `FATAL: dev.sh refuses to start
 against core_dev` if it sees prod. Locked in by
    `scripts/tests/test_dev_sh_db_guard.py`.
+2. **Test-DB guard** — the root `conftest.py` aborts the pytest session when
+   the test DB is `core_dev`, equals `DATABASE_URL`, or lacks `test` in its
+   name. Locked in by `scripts/tests/test_test_db_guard.py`.
 3. **CI write-side guard** —
    `scripts/checks/no_json_write_on_order_path.py` blocks any new
    `json.dump`/`writeFile` to `data/*.json` from the API/execution
