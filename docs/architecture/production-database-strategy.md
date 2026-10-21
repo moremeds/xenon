@@ -146,7 +146,7 @@ migrator and laptop `.env` files all connect as `xenon_app`.
 | Database    | Host                    | Writers (role) | Readers (role) | Purpose                                                                                               |
 | ----------- | ----------------------- | -------------- | -------------- | ----------------------------------------------------------------------------------------------------- |
 | `core_dev`  | macmini (LAN/Tailscale) | `xenon_app`    | `xenon_app`    | Production. Written by the macmini Docker stack.                                                      |
-| `core_test` | macmini (LAN/Tailscale) | `xenon_app`    | `xenon_app`    | Dev mirror. Written by `scripts/infra/dev.sh` sessions and pytest. Refreshed nightly from `core_dev`. |
+| `core_test` | macmini (LAN/Tailscale) | `xenon_app`    | `xenon_app`    | Dev mirror. Written by `scripts/infra/dev.sh` sessions and pytest. Nightly refresh job not installed yet.   |
 
 Planned, not applied: separate `xenon_prod`, `xenon_dev` and `xenon_migrator`
 roles with per-DB grants, so a wrong `.env` gets permission-denied at insert

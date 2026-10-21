@@ -73,7 +73,7 @@ Two databases on the macmini Postgres, both owned and written by one role, `xeno
 | DB          | Role         | Writers                                                 | Refresh                                                                                                              |
 | ----------- | ------------ | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | `core_dev`  | `xenon_app`  | macmini Docker stack (api, migrator, realtime services) | source of truth                                                                                                      |
-| `core_test` | `xenon_app`  | MacBook dev sessions via `scripts/infra/dev.sh paper`   | `pg_dump core_dev → pg_restore core_test` nightly at 04:00 ET (`scripts/infra/refresh-core-test.sh` via LaunchAgent) |
+| `core_test` | `xenon_app`  | MacBook dev sessions via `scripts/infra/dev.sh paper`   | `pg_dump core_dev → pg_restore core_test` nightly at 04:00 ET (`scripts/infra/refresh-core-test.sh` via LaunchAgent; not installed on the mini yet)  |
 
 Defense in depth — name-based layers keep dev sessions off prod (there is no role-grant layer, because one role can write both DBs):
 
