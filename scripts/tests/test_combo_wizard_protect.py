@@ -458,3 +458,71 @@ async def test_retry_while_first_protect_is_in_flight_gets_409_without_send(monk
     gate.set()
     assert (await first)["state"] == "PROTECTED"
     assert len(calls) == 1
+
+
+async def _pending_with_dead_tp(place, monkeypatch, *, evidence) -> str:
+    """First protect is UNKNOWN; the stored TP row then reads CANCELLED with a
+    permId and ``evidence`` (an ExecutionEvidence or an exception to raise)."""
+    from types import SimpleNamespace
+
+    from xenon.execution import orders_store
+
+    sid = _init_session(state="FILLED")
+    place.replies[:] = [JSONResponse(status_code=502, content={"reason_code": "PLACE_OUTCOME_UNKNOWN"})]
+    await _protect(sid)
+    monkeypatch.setattr(
+        orders_store,
+        "lookup_by_attempt",
+        lambda *_a, **_k: SimpleNamespace(
+            submission_id="sub-1", state="CANCELLED", perm_id="77", ib_order_id="7", quantity=1
+        ),
+    )
+
+    def _evidence(*_a, **_k):
+        if isinstance(evidence, Exception):
+            raise evidence
+        return evidence
+
+    monkeypatch.setattr(orders_store, "execution_evidence", _evidence)
+    return sid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "evidence_kind",
+    ["lookup_raises", "leg_fills_without_envelope"],
+)
+async def test_dead_tp_with_unknown_executions_keeps_claim_and_sends_nothing(place, monkeypatch, evidence_kind):
+    from xenon.execution import orders_store
+
+    evidence = (
+        RuntimeError("db down")
+        if evidence_kind == "lookup_raises"
+        else orders_store.ExecutionEvidence(filled_qty=0, fill_rows=2, envelope_qty=Decimal(0))
+    )
+    sid = await _pending_with_dead_tp(place, monkeypatch, evidence=evidence)
+
+    again = await _protect(sid)
+
+    body = json.loads(again.body)
+    assert (again.status_code, body["reason_code"]) == (409, "PROTECT_TP_PARTIAL")
+    assert body["filled"] is None  # executed quantity unknown
+    assert len(place.calls) == 1  # only the first, uncertain send
+    assert _state(sid) == "PROTECTION_PENDING"
+    assert "PROTECTION_TP_PARTIAL" in _event_kinds(sid)
+
+
+@pytest.mark.asyncio
+async def test_dead_tp_with_proven_zero_executions_places_one_new_tp(place, monkeypatch):
+    from xenon.execution import orders_store
+
+    sid = await _pending_with_dead_tp(
+        place, monkeypatch, evidence=orders_store.ExecutionEvidence(filled_qty=0, fill_rows=0, envelope_qty=Decimal(0))
+    )
+    place.replies.append({"status": "ok", "orderId": 9002, "permId": 7002})
+
+    again = await _protect(sid)
+
+    assert again["state"] == "PROTECTED"
+    assert len(place.calls) == 2
+    assert place.calls[1]["quantity"] == place.calls[0]["quantity"]

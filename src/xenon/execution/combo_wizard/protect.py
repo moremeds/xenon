@@ -134,7 +134,10 @@ def _claim_with_intent(session_id: str, intent: dict[str, Any]) -> bool:
     any send: a claimed session always has the link a retry needs."""
     engine = get_sync_engine()
     with engine.begin() as conn:
-        if combo_wizard.transition_session_state(conn, session_id, from_state="FILLED", to_state="PROTECTION_PENDING") != 1:
+        if (
+            combo_wizard.transition_session_state(conn, session_id, from_state="FILLED", to_state="PROTECTION_PENDING")
+            != 1
+        ):
             return False
         combo_wizard.upsert_protection(conn, session_id, config=intent)
     return True
@@ -415,6 +418,11 @@ def _resume_pending(session_id: str, *, requested_target: Decimal) -> dict[str, 
             out.update(price_note)
         return out
 
+    if state in _TP_DEAD_STATES:
+        refusal = _dead_tp_executions_refusal(session_id, cid, row, scope=order_entry._resolve_scope_kwargs())
+        if refusal is not None:
+            return refusal
+
     if state is None or state in _TP_DEAD_STATES:
         if not _transition(session_id, "PROTECTION_PENDING", "FILLED"):
             current = _load_session(session_id)
@@ -424,8 +432,73 @@ def _resume_pending(session_id: str, *, requested_target: Decimal) -> dict[str, 
         )
         return None
 
-    _record_event(session_id, "PROTECTION_PENDING", {"reason": "TP_UNRESOLVED", "client_attempt_id": cid, "row_state": state})
+    _record_event(
+        session_id, "PROTECTION_PENDING", {"reason": "TP_UNRESOLVED", "client_attempt_id": cid, "row_state": state}
+    )
     return _outcome_unknown_409(session_id, f"its order is {state}")
+
+
+def _dead_tp_executions_refusal(session_id: str, cid: str, row: Any, *, scope: dict[str, str]) -> JSONResponse | None:
+    """None only when the dead TP provably executed nothing; else a 409
+    PROTECT_TP_PARTIAL (claim kept, nothing sent).
+
+    A cancel keeps executed quantity (order_entry._mark_submission_cancelled
+    passes filled_qty=None), so a re-place at the full entry quantity after a
+    partial fill would over-close."""
+    from xenon.execution import orders_store
+
+    perm_id = str(row.perm_id or "")
+    has_perm = perm_id not in ("", "0")
+    # gate4._may_be_at_ib: ids, or a state other than proven not-placed.
+    may_have_been_at_ib = (
+        has_perm or str(row.ib_order_id or "") not in ("", "0") or row.state not in ("FAILED", "REJECTED")
+    )
+    quantity = int(row.quantity)
+    filled: Decimal | None = None
+    why: str | None = None
+    try:
+        ev = orders_store.execution_evidence(row.submission_id, perm_id=perm_id or None, **scope)
+    except Exception as exc:  # noqa: BLE001 — unknown executions block the re-place
+        why = f"fills lookup failed: {exc}"
+    else:
+        if ev.filled_qty > 0 or ev.fill_rows > 0:
+            filled = max(Decimal(ev.filled_qty), ev.envelope_qty)
+            # Leg rows without an envelope give no closed-spread count.
+            why = "executions recorded" if filled > 0 else "leg fills without an envelope fill"
+        elif may_have_been_at_ib and not has_perm:
+            # The activity mirror links fills by permId; without one, fills
+            # recorded by IB cannot be checked.
+            why = "no permId to check fills"
+    if why is None:
+        return None
+
+    # Combo contract counts are whole numbers (order_submissions.filled_qty is Integer).
+    filled_n = int(filled) if filled else None
+    remaining = quantity - filled_n if filled_n else None
+    _record_event(
+        session_id,
+        "PROTECTION_TP_PARTIAL",
+        {
+            "client_attempt_id": cid,
+            "row_state": row.state,
+            "filled": filled_n,
+            "remaining": remaining,
+            "quantity": quantity,
+            "reason": why,
+        },
+    )
+    return JSONResponse(
+        status_code=409,
+        content={
+            "reason_code": "PROTECT_TP_PARTIAL",
+            "detail": (
+                f"Take-profit for wizard session {session_id} is {row.state} and may have partly filled "
+                f"({why}). Close the rest from the order ticket. Do not resubmit."
+            ),
+            "filled": filled_n,
+            "remaining": remaining,
+        },
+    )
 
 
 def _arm_and_finish(session_id: str, intent: dict[str, Any], *, tp_order_id: str, bound: bool) -> dict[str, Any]:
