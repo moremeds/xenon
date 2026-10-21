@@ -5,6 +5,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+- **Ratings tab works again.** `GET /ticker/ratings?ticker=XYZ` on FastAPI returns the raw Unusual Whales analyst rows (`screener/analysts`) with `as_of` and `source`; it caches each ticker for 15 minutes and answers 502 with a top-level `reason_code` when UW fails. `/api/ticker/ratings` now calls it through `xenonFetch` instead of spawning the removed `xenon-fetch-analyst` CLI. The tab lists recent analyst actions with the price target of each; it no longer shows an aggregate recommendation or consensus counts.
+
 ## [0.12.0] — 2026-10-21
 
 Summary: the Futu tab syncs again after page load; the naked-short audit gains an enforce mode that stays off unless `XENON_AUDIT_CANCEL=1`.

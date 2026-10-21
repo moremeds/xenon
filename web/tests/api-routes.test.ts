@@ -16,12 +16,6 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // Mocks — must be declared before imports (vi.mock is hoisted)
 // ---------------------------------------------------------------------------
 
-// Mock @tools/runner so routes that import runScript don't spawn real processes
-vi.mock("@tools/runner", () => ({
-  runScript: vi.fn().mockResolvedValue({ ok: false, stderr: "mocked" }),
-  resolveProjectRoot: vi.fn().mockReturnValue("/mock/root"),
-}));
-
 // Mock @/lib/xenonApi — the NEW dependency for migrated routes
 const mockXenonFetch = vi.fn().mockRejectedValue(new Error("mocked"));
 vi.mock("@/lib/xenonApi", () => ({

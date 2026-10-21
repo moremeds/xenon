@@ -51,6 +51,7 @@ from xenon.api.routes.watchlist import router as watchlist_router
 from xenon.api.routes.wizard import router as wizard_router
 from xenon.api.subprocess import ScriptResult, run_entry_point
 from xenon.api.routes.market import router as market_router
+from xenon.api.routes.ratings import router as ratings_router
 from xenon.api.routes.order_entry import router as order_entry_router
 from xenon.api.routes import futu as futu_routes
 from xenon.api.routes.futu import router as futu_router
@@ -788,6 +789,7 @@ app.include_router(order_entry_router)
 app.include_router(futu_router)
 app.include_router(blotter_router)
 app.include_router(market_router)
+app.include_router(ratings_router)
 
 
 # ---------------------------------------------------------------------------

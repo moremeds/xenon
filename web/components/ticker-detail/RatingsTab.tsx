@@ -30,6 +30,7 @@ type UpgradeEntry = {
   action: string;
   to_grade?: string;
   from_grade?: string;
+  target?: number | null;
 };
 
 type RawRatingsData = {
@@ -143,6 +144,10 @@ export default function RatingsTab({ ticker, active, currentPrice }: RatingsTabP
 
   const rec = data.recommendation;
 
+  if (changes.length === 0 && !hasPriceTargets && !rec && total === 0) {
+    return <div className="tab-empty">No analyst data for {ticker}</div>;
+  }
+
   return (
     <div className="ratings-tab">
       {/* Recommendation + summary */}
@@ -237,6 +242,7 @@ export default function RatingsTab({ ticker, active, currentPrice }: RatingsTabP
                 <th>Firm</th>
                 <th>Action</th>
                 <th>Rating</th>
+                <th>Target</th>
               </tr>
             </thead>
             <tbody>
@@ -256,6 +262,7 @@ export default function RatingsTab({ ticker, active, currentPrice }: RatingsTabP
                         </span>
                       )}
                     </td>
+                    <td>{c.target != null ? fmtPrice(c.target) : "---"}</td>
                   </tr>
                 );
               })}
@@ -266,7 +273,7 @@ export default function RatingsTab({ ticker, active, currentPrice }: RatingsTabP
 
       {/* Source indicator */}
       {data.source && (
-        <div className="news-fallback-notice">via {data.source === "uw" ? "Unusual Whales" : data.source}</div>
+        <div className="news-fallback-notice">via {data.source === "uw" || data.source === "unusual_whales" ? "Unusual Whales" : data.source}</div>
       )}
     </div>
   );

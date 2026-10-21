@@ -32,15 +32,6 @@ vi.mock("fs/promises", () => ({
   mkdir: mockMkdir,
 }));
 
-// Mock @tools/runner for orders/place
-const mockRunScript = vi
-  .fn()
-  .mockResolvedValue({ ok: false, stderr: "mocked" });
-vi.mock("@tools/runner", () => ({
-  runScript: mockRunScript,
-  resolveProjectRoot: vi.fn().mockReturnValue("/mock/root"),
-}));
-
 // previous-close mints WS tickets server-side via the internal token; the
 // global fetch mock below covers the /ws-ticket call.
 
@@ -1342,64 +1333,6 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
     const parsed = JSON.parse(opts.body);
     expect(parsed.legs[0]).toMatchObject({ limitPrice: 1.75 });
     expect(parsed.legs[1]).toMatchObject({ limitPrice: 0.9 });
-  });
-});
-
-// =============================================================================
-// 7. GET /api/ticker/ratings — mocked runScript
-// =============================================================================
-
-describe("GET /api/ticker/ratings — extended", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    mockRunScript.mockReset();
-  });
-
-  it("returns ratings data when script succeeds", async () => {
-    mockRunScript.mockResolvedValue({
-      ok: true,
-      data: {
-        ticker: "AAPL",
-        consensus: "Buy",
-        buy_count: 25,
-        hold_count: 5,
-        sell_count: 1,
-        price_target_avg: 200,
-      },
-    });
-
-    const { GET } = await import("../app/api/ticker/ratings/route");
-    const res = await GET(
-      new Request("http://localhost/api/ticker/ratings?ticker=AAPL"),
-    );
-    expect(res.status).toBe(200);
-
-    const body = await res.json();
-    expect(body.ticker).toBe("AAPL");
-    expect(body.consensus).toBe("Buy");
-  });
-
-  it("returns 502 when script fails", async () => {
-    mockRunScript.mockResolvedValue({
-      ok: false,
-      exitCode: 1,
-      stderr: "UW API error",
-    });
-
-    const { GET } = await import("../app/api/ticker/ratings/route");
-    const res = await GET(
-      new Request("http://localhost/api/ticker/ratings?ticker=XYZ"),
-    );
-    expect(res.status).toBe(502);
-
-    const body = await res.json();
-    expect(body.error).toContain("Failed to fetch ratings");
-  });
-
-  it("returns 400 when ticker param is missing", async () => {
-    const { GET } = await import("../app/api/ticker/ratings/route");
-    const res = await GET(new Request("http://localhost/api/ticker/ratings"));
-    expect(res.status).toBe(400);
   });
 });
 
