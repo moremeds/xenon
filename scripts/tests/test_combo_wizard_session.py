@@ -209,7 +209,7 @@ def _place_returns(monkeypatch, status: int, content: dict):
     async def _place(_payload):
         return JSONResponse(status_code=status, content=content)
 
-    monkeypatch.setattr(order_entry, "_orders_place_from_body", _place)
+    monkeypatch.setattr(order_entry, "place", _place)
 
 
 def _session_claim(session_id: str):

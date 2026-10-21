@@ -131,7 +131,7 @@ async def test_boot_scope_env_unmanaged_is_unverified_and_places_nothing(monkeyp
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as exc_info:
-        await order_entry._orders_place_from_body(
+        await order_entry.place(
             {"type": "stock", "symbol": "SPY", "action": "BUY", "quantity": 1, "limitPrice": 1.0}
         )
 

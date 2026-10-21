@@ -429,7 +429,7 @@ def _lookup_min_tick_via_pool(con_id: int) -> Decimal:
     prices server-side**.
 
     When IB rejects with error code 110 ("price does not conform to
-    minimum price variation"), ``_orders_place_from_body`` re-maps the
+    minimum price variation"), ``place`` re-maps the
     response from generic ``IB_REJECT`` to ``LIMIT_OFF_TICK`` so the UI
     surfaces a clean message and the IB code+message land in the
     ``orders_events`` audit row for later analysis.
@@ -796,7 +796,7 @@ def _resolve_scope_kwargs() -> dict[str, str]:
     return {"broker": "IB", "account_env": "legacy_unknown", "broker_account": "legacy_unknown"}
 
 
-async def _orders_place_from_body(body: dict):
+async def place(body: dict):
     from xenon.api import server
 
     denial = ensure_order_allowed("order placement", server.app.state)
@@ -1381,7 +1381,7 @@ def _record_manage_event(
         )
 
 
-async def _orders_cancel_from_body(body: dict):
+async def cancel(body: dict):
     from xenon.api import server
 
     denial = ensure_order_allowed("order cancellation", server.app.state)
@@ -1597,7 +1597,7 @@ _REPLACE_UNKNOWN_COPY = (
 )
 
 
-async def _orders_replace_from_body(body: dict):
+async def replace(body: dict):
     from xenon.api import server
 
     denial = ensure_order_allowed("order replacement", server.app.state)
@@ -1758,7 +1758,7 @@ def _confirmed_int(confirmed, requested) -> int | None:
     return None
 
 
-async def _orders_modify_from_body(body: dict):
+async def modify(body: dict):
     from xenon.api import server
 
     denial = ensure_order_allowed("order modification", server.app.state)

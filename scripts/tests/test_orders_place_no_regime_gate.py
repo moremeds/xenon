@@ -3,7 +3,7 @@
 The VCG-CRI "regime gate" (signal layer) was removed in the pure-portfolio
 pivot (#104, cc568c3): `xenon.api.services.regime_gate` and
 `regime_state` were deleted along with their imports. But the call sites
-in `_orders_place_from_body` / `_orders_modify_from_body` were left
+in `place` / `modify` were left
 behind, so every live order placement raised
 
     NameError: name 'get_regime_state_for_scope' is not defined

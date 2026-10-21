@@ -1602,16 +1602,16 @@ def test_replace_in_process_path_runs_every_guard(monkeypatch, client, broker):
     target = _original(client, broker)
     # Gate 4 (claim): a naked replacement is refused with nothing cancelled.
     naked = _replace_body(target, "rep-naked", legs=((510.0, "SELL", 1), (520.0, "SELL", 1)))
-    resp = asyncio.run(order_entry._orders_replace_from_body(naked))
+    resp = asyncio.run(order_entry.replace(naked))
     assert resp.status_code == 400 and json.loads(resp.body)["reason_code"].endswith("UNCOVERED")
     # Read-only and non-IB broker: refused in-process and over HTTP.
     monkeypatch.setenv("XENON_READ_ONLY", "1")
-    resp = asyncio.run(order_entry._orders_replace_from_body(_replace_body(target, "rep-ro")))
+    resp = asyncio.run(order_entry.replace(_replace_body(target, "rep-ro")))
     assert json.loads(resp.body)["reason_code"] == "READ_ONLY_MODE"
     assert client.post("/orders/replace", json=_replace_body(target, "rep-ro")).status_code == 403
     monkeypatch.delenv("XENON_READ_ONLY")
     monkeypatch.setattr(server_mod.app.state, "broker", "FUTU", raising=False)
-    resp = asyncio.run(order_entry._orders_replace_from_body(_replace_body(target, "rep-futu")))
+    resp = asyncio.run(order_entry.replace(_replace_body(target, "rep-futu")))
     assert json.loads(resp.body)["reason_code"] == "READ_ONLY_BROKER"
     assert broker.calls == []
     assert {r.client_attempt_id for r in _submission_rows()} == {"orig-1"}

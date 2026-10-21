@@ -325,16 +325,16 @@ def test_wizard_post_routes_return_403_in_read_only(read_only_client, monkeypatc
 
 
 def test_in_process_order_helpers_blocked_in_read_only(read_only_client):
-    """_orders_{place,cancel,modify}_from_body self-guard.
+    """order_entry.{place,cancel,modify} self-guard.
 
     The wizard submit path reaches these without going through the
     /orders/* routes, so the read-only denial must live inside them.
     """
 
     for helper in (
-        order_entry._orders_place_from_body,
-        order_entry._orders_cancel_from_body,
-        order_entry._orders_modify_from_body,
+        order_entry.place,
+        order_entry.cancel,
+        order_entry.modify,
     ):
         result = asyncio.run(helper({}))
         assert result.status_code == 403, f"{helper.__name__} did not deny in read-only"

@@ -99,7 +99,7 @@ def harness(monkeypatch):
 async def test_place_forwards_scope_account_over_body_account(harness):
     harness["set_result"]({"status": "ok", "orderId": 1, "permId": 2})
 
-    await order_entry._orders_place_from_body({**_COMBO, "account": "U1111111"})
+    await order_entry.place({**_COMBO, "account": "U1111111"})
 
     entry, payload = harness["runner"][0]
     assert entry == "xenon-ib-place-order"
@@ -111,7 +111,7 @@ async def test_place_account_not_managed_returns_top_level_reason_code(harness):
         {"status": "error", "reason_code": "ACCOUNT_NOT_MANAGED", "message": "account 'U2222222' is not managed"}
     )
 
-    resp = await order_entry._orders_place_from_body(dict(_COMBO))
+    resp = await order_entry.place(dict(_COMBO))
 
     assert resp.status_code == 502
     body = json.loads(resp.body)
@@ -131,7 +131,7 @@ async def test_place_ib_435_maps_to_account_unresolved(harness):
         }
     )
 
-    resp = await order_entry._orders_place_from_body(dict(_COMBO))
+    resp = await order_entry.place(dict(_COMBO))
 
     body = json.loads(resp.body)
     assert body["reason_code"] == "ACCOUNT_UNRESOLVED"
@@ -156,7 +156,7 @@ async def test_place_validation_error_without_perm_id_is_rejected(harness):
         }
     )
 
-    resp = await order_entry._orders_place_from_body(dict(_COMBO))
+    resp = await order_entry.place(dict(_COMBO))
 
     assert resp.status_code == 502
     assert harness["terminal"][0]["state"] == "REJECTED"
@@ -175,7 +175,7 @@ async def test_place_110_returns_top_level_limit_off_tick(harness):
         }
     )
 
-    resp = await order_entry._orders_place_from_body(dict(_COMBO))
+    resp = await order_entry.place(dict(_COMBO))
 
     assert resp.status_code == 502
     assert json.loads(resp.body)["reason_code"] == "LIMIT_OFF_TICK"
@@ -186,7 +186,7 @@ async def test_place_110_returns_top_level_limit_off_tick(harness):
 async def test_place_empty_cli_output_marks_unknown_not_pending(harness, data):
     harness["set_result"](data)
 
-    resp = await order_entry._orders_place_from_body(dict(_COMBO))
+    resp = await order_entry.place(dict(_COMBO))
 
     assert resp.status_code == 502
     body = json.loads(resp.body)
@@ -212,7 +212,7 @@ async def test_place_stores_the_owner_client_id(harness):
     legacy 26 fallback."""
     harness["set_result"]({"status": "ok", "orderId": 7, "permId": 8, "clientId": 20})
 
-    resp = await order_entry._orders_place_from_body(dict(_COMBO))
+    resp = await order_entry.place(dict(_COMBO))
 
     assert harness["submitted"][0]["placing_client_id"] == OWNER_ID
     assert resp["clientId"] == OWNER_ID
@@ -224,7 +224,7 @@ async def test_place_ok_with_notices_records_ib_notice_event(harness):
         {"status": "ok", "orderId": 7, "permId": 123456, "initialStatus": "PreSubmitted", "ibNotices": notices}
     )
 
-    resp = await order_entry._orders_place_from_body(dict(_COMBO))
+    resp = await order_entry.place(dict(_COMBO))
 
     assert resp["status"] == "ok"
     assert harness["submitted"][0]["perm_id"] == "123456"
@@ -246,7 +246,7 @@ async def test_place_unconfirmed_399_without_perm_id_goes_working(harness):
         }
     )
 
-    resp = await order_entry._orders_place_from_body(dict(_COMBO))
+    resp = await order_entry.place(dict(_COMBO))
 
     assert resp["status"] == "ok"
     assert harness["terminal"] == []
@@ -276,7 +276,7 @@ async def test_place_outcome_rejected_wins_over_perm_id_and_live_status(harness)
         }
     )
 
-    resp = await order_entry._orders_place_from_body(dict(_COMBO))
+    resp = await order_entry.place(dict(_COMBO))
 
     assert resp.status_code == 502
     assert json.loads(resp.body)["reason_code"] == "IB_REJECT"
@@ -290,7 +290,7 @@ async def test_place_outcome_accepted_or_unconfirmed_goes_working(harness, outco
         {"status": "ok", "outcome": outcome, "orderId": 7, "permId": 0, "initialStatus": "ValidationError"}
     )
 
-    resp = await order_entry._orders_place_from_body(dict(_COMBO))
+    resp = await order_entry.place(dict(_COMBO))
 
     assert resp["status"] == "ok"
     assert harness["terminal"] == []

@@ -340,7 +340,7 @@ async def submit_combo(session_id: str, request: dict[str, Any]) -> dict[str, An
     from xenon.api.services import order_entry
 
     try:
-        result = await order_entry._orders_place_from_body(payload)
+        result = await order_entry.place(payload)
     except Exception:
         _release_submit_claim(session_id, attempt_id)
         raise
@@ -416,7 +416,7 @@ async def reprice_combo(session_id: str, request: dict[str, Any]) -> dict[str, A
             limit_price=Decimal(str(request["target_price"])),
         )
     try:
-        return await order_entry._orders_modify_from_body(
+        return await order_entry.modify(
             {
                 "orderId": int(current["ib_order_id"] or 0),
                 "permId": int(current["perm_id"] or 0),
@@ -498,7 +498,7 @@ async def abort_session(session_id: str) -> dict[str, Any] | Response:
         current = _load_current_attempt(session_id)
         from xenon.api.services import order_entry
 
-        cancel_result = await order_entry._orders_cancel_from_body(
+        cancel_result = await order_entry.cancel(
             {
                 "orderId": int(current["ib_order_id"] or 0),
                 "permId": int(current["perm_id"] or 0),

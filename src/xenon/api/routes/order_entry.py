@@ -56,7 +56,7 @@ async def orders_place(request: Request):
     if is_read_only():
         return read_only_403()
     body = await request.json()
-    return await order_entry._orders_place_from_body(body)
+    return await order_entry.place(body)
 
 
 @router.post("/orders/cancel")
@@ -76,7 +76,7 @@ async def orders_cancel(request: Request):
     if is_read_only():
         return read_only_403()
     body = await request.json()
-    return await order_entry._orders_cancel_from_body(body)
+    return await order_entry.cancel(body)
 
 
 @router.post("/orders/replace")
@@ -88,7 +88,7 @@ async def orders_replace(request: Request):
     if is_read_only():
         return read_only_403()
     body = await request.json()
-    return await order_entry._orders_replace_from_body(body)
+    return await order_entry.replace(body)
 
 
 @router.post("/orders/modify")
@@ -107,4 +107,4 @@ async def orders_modify(request: Request):
     if is_read_only():
         return read_only_403()
     body = await request.json()
-    return await order_entry._orders_modify_from_body(body)
+    return await order_entry.modify(body)

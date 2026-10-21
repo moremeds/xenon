@@ -346,7 +346,7 @@ def test_submit_endpoint_claims_session_before_live_order(monkeypatch, client):
             "submission_id": "sub-claim",
         }
 
-    monkeypatch.setattr(order_entry, "_orders_place_from_body", fake_place)
+    monkeypatch.setattr(order_entry, "place", fake_place)
 
     resp = client.post(
         "/wizard/sessions/wiz-submit-claim/submit",
@@ -431,7 +431,7 @@ def test_submit_endpoint_preserves_order_helper_error_and_releases_claim(monkeyp
             content={"detail": "Preflight blocked", "reason_code": "NAKED_SHORT"},
         )
 
-    monkeypatch.setattr(order_entry, "_orders_place_from_body", fake_place)
+    monkeypatch.setattr(order_entry, "place", fake_place)
 
     resp = client.post(
         "/wizard/sessions/wiz-submit-blocked/submit",
@@ -475,7 +475,7 @@ def test_abort_endpoint_cancels_working_combo_before_marking_aborted(monkeypatch
         assert state == "working"
         return {"status": "ok", "message": "Cancelled", "echo": body}
 
-    monkeypatch.setattr(order_entry, "_orders_cancel_from_body", fake_cancel)
+    monkeypatch.setattr(order_entry, "cancel", fake_cancel)
 
     abort_resp = client.post("/wizard/sessions/wiz-abort-working/abort", json={})
 
@@ -503,7 +503,7 @@ def test_abort_endpoint_preserves_cancel_error_and_keeps_working(monkeypatch, cl
             content={"detail": {"reason_code": "IB_CONNECTION", "message": "offline"}},
         )
 
-    monkeypatch.setattr(order_entry, "_orders_cancel_from_body", fake_cancel)
+    monkeypatch.setattr(order_entry, "cancel", fake_cancel)
 
     abort_resp = client.post("/wizard/sessions/wiz-abort-cancel-error/abort", json={})
 
