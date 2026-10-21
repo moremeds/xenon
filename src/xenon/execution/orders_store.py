@@ -123,7 +123,6 @@ def _log_noop(writer: str, submission_id: str, to_state: str, expected_states) -
         tuple(expected_states),
     )
 
-
 ATTEMPT_BODY_MISMATCH = "ATTEMPT_BODY_MISMATCH"
 
 # IB ``orderRef`` on every Xenon-placed order: "xo:<submission_id>". The
@@ -141,7 +140,6 @@ def submission_id_from_order_ref(ref: object) -> str | None:
     if isinstance(ref, str) and ref.startswith(XO_REF_PREFIX) and len(ref) > len(XO_REF_PREFIX):
         return ref[len(XO_REF_PREFIX) :]
     return None
-
 
 # Sentinel for optional JSONB write-through params (register_from_snapshot):
 # "not provided" must not overwrite a stored value the caller never computed.
@@ -1490,61 +1488,6 @@ def lookup_by_attempt(
     if vals[12] is not None and not isinstance(vals[12], str):
         vals[12] = str(vals[12])
     return SubmissionRow(*vals)
-
-
-@dataclass(frozen=True)
-class ExecutionEvidence:
-    """What Postgres knows about executions on one submission."""
-
-    filled_qty: int  # order_submissions.filled_qty (0 when NULL)
-    fill_rows: int  # order_fills rows linked by submission_id or scoped perm_id
-    envelope_qty: Decimal  # sum of BAG envelope fill qty (leg rows excluded)
-    terminal_at: datetime | None  # order_submissions.updated_at (the terminal write or later)
-
-
-def execution_evidence(
-    submission_id: str,
-    *,
-    perm_id: str | None,
-    broker: str,
-    account_env: str,
-    broker_account: str,
-) -> ExecutionEvidence:
-    """Executions recorded for a submission. Raises on DB error — the caller
-    must treat a failure as "executions cannot be excluded".
-
-    Fills link by submission_id, or by perm_id inside the account scope (the
-    activity mirror can record a fill before the submission link exists,
-    ib_activity_mirror.py sweep). Leg fills count in ``fill_rows`` but not in
-    ``envelope_qty``: a leg row without an envelope is ambiguous."""
-    engine = get_sync_engine()
-    link = order_fills.c.submission_id == submission_id
-    if perm_id and perm_id != "0":
-        link = link | (
-            (order_fills.c.perm_id == perm_id)
-            & (order_fills.c.broker == broker)
-            & (order_fills.c.account_env == account_env)
-            & (order_fills.c.broker_account == broker_account)
-        )
-    is_envelope = order_fills.c.metadata["sec_type"].astext == "BAG"
-    with engine.connect() as conn:
-        sub = conn.execute(
-            select(order_submissions.c.filled_qty, order_submissions.c.updated_at).where(
-                order_submissions.c.submission_id == submission_id
-            )
-        ).first()
-        rows, env_qty = conn.execute(
-            select(
-                func.count(),
-                func.coalesce(func.sum(order_fills.c.qty).filter(is_envelope), 0),
-            ).where(link)
-        ).one()
-    return ExecutionEvidence(
-        filled_qty=int((sub.filled_qty if sub else 0) or 0),
-        fill_rows=int(rows),
-        envelope_qty=Decimal(env_qty),
-        terminal_at=sub.updated_at if sub else None,
-    )
 
 
 from xenon.execution.preflight import WorkingReservations

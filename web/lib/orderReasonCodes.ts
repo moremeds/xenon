@@ -167,7 +167,7 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
   },
   PROTECT_TP_PARTIAL: {
     severity: "error",
-    copy: "The take-profit partly filled (or its fills are unknown); close the rest from the order ticket.",
+    copy: "The take-profit reached IB and ended; check its fills and close any rest from the order ticket.",
   },
 };
 

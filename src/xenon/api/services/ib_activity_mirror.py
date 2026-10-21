@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
@@ -39,19 +38,6 @@ logger = logging.getLogger(__name__)
 # user noticing a stale price/qty in the UI should not have to wait > 1
 # minute for the mirror to catch up.
 DEFAULT_POLL_INTERVAL_S = 60
-
-
-def poller_enabled() -> bool:
-    """XENON_IB_ACTIVITY_POLLER: on by default; 0/false/no/off disables."""
-    return os.environ.get("XENON_IB_ACTIVITY_POLLER", "").strip().lower() not in {"0", "false", "no", "off"}
-
-
-def poll_interval_s() -> float:
-    """XENON_IB_ACTIVITY_POLL_S, else DEFAULT_POLL_INTERVAL_S (bad value → default)."""
-    try:
-        return float(os.environ.get("XENON_IB_ACTIVITY_POLL_S", DEFAULT_POLL_INTERVAL_S))
-    except ValueError:
-        return float(DEFAULT_POLL_INTERVAL_S)
 
 
 def reconcile_fills_on_boot(

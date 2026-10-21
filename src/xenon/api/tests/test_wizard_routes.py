@@ -1085,19 +1085,14 @@ def _record_tp_envelope_fill(sub: str, qty: int) -> None:
     )
 
 
-def test_protect_cancelled_after_partial_fill_retry_refused_without_send(monkeypatch, client, filled_session_qty2, protect_owner):
-    _real_place_path(monkeypatch)
-    sid = filled_session_qty2
-    sub, accepted = _first_attempt_unknown(monkeypatch, client, sid)
-    _record_tp_envelope_fill(sub, 1)  # 1 of 2 executed …
-    _working_then_cancelled(sub)  # … then the rest cancelled
-
+def _assert_broker_reached_refusal(client, sid: str, accepted: list, protect_owner, row_state: str) -> None:
+    """409 PROTECT_TP_PARTIAL, claim kept, nothing sent, event recorded."""
     again = client.post(f"/wizard/sessions/{sid}/protect", json=_PROTECT_BODY)
-
     assert again.status_code == 409, again.text
     assert again.json()["reason_code"] == "PROTECT_TP_PARTIAL"
-    assert _sends(protect_owner) == 1 and accepted == []  # no new send
-    assert len(_tp_rows(sid)) == 1
+    assert "filled" not in again.json() and "remaining" not in again.json()
+    assert _sends(protect_owner) == 1 and accepted == []  # only the first, uncertain send
+    assert [r["state"] for r in _tp_rows(sid)] == [row_state]
     assert _session_state(sid) == "PROTECTION_PENDING"
     engine = _pg_engine()
     with engine.connect() as conn:
@@ -1106,7 +1101,7 @@ def test_protect_cancelled_after_partial_fill_retry_refused_without_send(monkeyp
             {"sid": sid},
         ).scalar_one()
     engine.dispose()
-    assert (detail["filled"], detail["remaining"], detail["quantity"]) == (1, 1, 2)
+    assert detail["row_state"] == row_state
 
 
 def _age_terminal(sub: str, seconds: float) -> None:
@@ -1122,70 +1117,46 @@ def _age_terminal(sub: str, seconds: float) -> None:
         )
 
 
-@pytest.mark.parametrize(
-    ("poll_s", "age_s"),
-    [(None, 3600), ("1", 5)],
-    ids=["default-interval-old-row", "env-interval-1s-row-5s"],
-)
-def test_protect_cancelled_with_proven_zero_fill_places_one_tp_at_entry_quantity(
-    monkeypatch, client, filled_session_qty2, protect_owner, poll_s, age_s
-):
-    """Terminal time older than 2 × XENON_IB_ACTIVITY_POLL_S (read from env,
-    default 60 s): the poller has had a full tick after the cancel."""
-    monkeypatch.delenv("XENON_IB_ACTIVITY_POLLER", raising=False)
-    if poll_s is None:
-        monkeypatch.delenv("XENON_IB_ACTIVITY_POLL_S", raising=False)
-    else:
-        monkeypatch.setenv("XENON_IB_ACTIVITY_POLL_S", poll_s)
-    _real_place_path(monkeypatch)
-    sid = filled_session_qty2
-    sub, accepted = _first_attempt_unknown(monkeypatch, client, sid)
-    _working_then_cancelled(sub)  # permId known, no fills
-    _age_terminal(sub, age_s)
-
-    again = client.post(f"/wizard/sessions/{sid}/protect", json=_PROTECT_BODY)
-
-    assert again.status_code == 200, again.text
-    assert again.json()["state"] == "PROTECTED"
-    assert _sends(protect_owner) == 2
-    assert len(accepted) == 1 and accepted[0]["quantity"] == 2  # entry quantity
-    assert [r["state"] for r in _tp_rows(sid)] == ["CANCELLED", "WORKING"]
-
-
-@pytest.mark.parametrize(
-    ("poller_flag", "age_s"),
-    [(None, 5), ("0", 3600)],
-    ids=["terminal-5s-ago", "poller-disabled"],
-)
-def test_protect_dead_tp_before_fills_sync_is_refused_without_send(
-    monkeypatch, client, filled_session_qty2, protect_owner, poller_flag, age_s
-):
-    """Cancel writes no filled quantity; fills arrive only through the
-    activity poller. A dead row with 0 recorded fills is not proof of 0
-    executions until a poll has run after it (or ever, with the poller off)."""
-    monkeypatch.delenv("XENON_IB_ACTIVITY_POLL_S", raising=False)
-    if poller_flag is None:
-        monkeypatch.delenv("XENON_IB_ACTIVITY_POLLER", raising=False)
-    else:
-        monkeypatch.setenv("XENON_IB_ACTIVITY_POLLER", poller_flag)
+def test_protect_cancelled_with_perm_id_and_no_fills_old_is_refused(monkeypatch, client, filled_session_qty2, protect_owner):
+    """(a) The TP reached IB (permId) and was cancelled; 0 recorded fills and
+    an old terminal time prove nothing (the fills poller can fail silently).
+    No auto re-place on the money path."""
     _real_place_path(monkeypatch)
     sid = filled_session_qty2
     sub, accepted = _first_attempt_unknown(monkeypatch, client, sid)
     _working_then_cancelled(sub)
-    _age_terminal(sub, age_s)
+    _age_terminal(sub, 3600)
+    _assert_broker_reached_refusal(client, sid, accepted, protect_owner, "CANCELLED")
 
-    again = client.post(f"/wizard/sessions/{sid}/protect", json=_PROTECT_BODY)
 
-    assert again.status_code == 409, again.text
-    assert again.json()["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
-    assert "fills sync" in again.json()["detail"]
-    assert _sends(protect_owner) == 1 and accepted == []  # no new send
-    assert [r["state"] for r in _tp_rows(sid)] == ["CANCELLED"]
-    assert _session_state(sid) == "PROTECTION_PENDING"
+def test_protect_cancelled_after_partial_fill_retry_refused_without_send(monkeypatch, client, filled_session_qty2, protect_owner):
+    """(b)"""
+    _real_place_path(monkeypatch)
+    sid = filled_session_qty2
+    sub, accepted = _first_attempt_unknown(monkeypatch, client, sid)
+    _record_tp_envelope_fill(sub, 1)  # 1 of 2 executed …
+    _working_then_cancelled(sub)  # … then the rest cancelled
+    _assert_broker_reached_refusal(client, sid, accepted, protect_owner, "CANCELLED")
+
+
+def test_protect_rejected_with_ib_order_id_is_refused(monkeypatch, client, filled_session, protect_owner):
+    """(d) REJECTED but IB assigned an order id: it may have reached IB."""
+    from xenon.execution import orders_store
+
+    _real_place_path(monkeypatch)
+    sub, accepted = _first_attempt_unknown(monkeypatch, client, filled_session)
+    assert orders_store.mark_submitted(
+        submission_id=sub, ib_order_id="9501", perm_id=None, placing_client_id=4, expected_states=("UNKNOWN",)
+    )
+    assert orders_store.mark_terminal(
+        submission_id=sub, state="REJECTED", reason_code="IB_REJECT", filled_qty=0,
+        avg_fill_price=None, expected_states=orders_store.NON_TERMINAL_STATES,
+    )
+    _assert_broker_reached_refusal(client, filled_session, accepted, protect_owner, "REJECTED")
 
 
 def test_protect_cancelled_without_perm_id_is_refused(monkeypatch, client, filled_session, protect_owner):
-    """CANCELLED with no permId: executions cannot be matched → refused."""
+    """CANCELLED with no ids: a cancel implies the order may have been at IB."""
     from xenon.execution import orders_store
 
     _real_place_path(monkeypatch)
@@ -1194,11 +1165,7 @@ def test_protect_cancelled_without_perm_id_is_refused(monkeypatch, client, fille
         submission_id=sub, state="CANCELLED", reason_code="USER_CANCEL", filled_qty=None,
         avg_fill_price=None, expected_states=("UNKNOWN",),
     )
-
-    again = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
-
-    assert (again.status_code, again.json()["reason_code"]) == (409, "PROTECT_TP_PARTIAL")
-    assert _sends(protect_owner) == 1 and accepted == []
+    _assert_broker_reached_refusal(client, filled_session, accepted, protect_owner, "CANCELLED")
 
 
 # --- sessions claimed by an older build (no stored attempt) -----------------

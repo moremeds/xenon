@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -461,15 +460,12 @@ async def test_retry_while_first_protect_is_in_flight_gets_409_without_send(monk
     assert len(calls) == 1
 
 
-async def _pending_with_dead_tp(place, monkeypatch, *, evidence) -> str:
-    """First protect is UNKNOWN; the stored TP row then reads CANCELLED with a
-    permId and ``evidence`` (an ExecutionEvidence or an exception to raise)."""
+async def _pending_with_dead_tp(place, monkeypatch, *, state: str, ib_order_id, perm_id) -> str:
+    """First protect is UNKNOWN; the stored TP row then reads ``state``."""
     from types import SimpleNamespace
 
     from xenon.execution import orders_store
 
-    monkeypatch.delenv("XENON_IB_ACTIVITY_POLLER", raising=False)
-    monkeypatch.delenv("XENON_IB_ACTIVITY_POLL_S", raising=False)
     sid = _init_session(state="FILLED")
     place.replies[:] = [JSONResponse(status_code=502, content={"reason_code": "PLACE_OUTCOME_UNKNOWN"})]
     await _protect(sid)
@@ -477,55 +473,33 @@ async def _pending_with_dead_tp(place, monkeypatch, *, evidence) -> str:
         orders_store,
         "lookup_by_attempt",
         lambda *_a, **_k: SimpleNamespace(
-            submission_id="sub-1", state="CANCELLED", perm_id="77", ib_order_id="7", quantity=1
+            submission_id="sub-1", state=state, perm_id=perm_id, ib_order_id=ib_order_id, quantity=1
         ),
     )
-
-    def _evidence(*_a, **_k):
-        if isinstance(evidence, Exception):
-            raise evidence
-        return evidence
-
-    monkeypatch.setattr(orders_store, "execution_evidence", _evidence)
     return sid
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "evidence_kind",
-    ["lookup_raises", "leg_fills_without_envelope"],
+    ("state", "ib_order_id", "perm_id"),
+    [("CANCELLED", "7", "77"), ("CANCELLED", None, None), ("REJECTED", "7", None), ("FAILED", None, "77")],
+    ids=["cancelled-with-ids", "cancelled-no-ids", "rejected-with-order-id", "failed-with-perm-id"],
 )
-async def test_dead_tp_with_unknown_executions_keeps_claim_and_sends_nothing(place, monkeypatch, evidence_kind):
-    from xenon.execution import orders_store
-
-    evidence = (
-        RuntimeError("db down")
-        if evidence_kind == "lookup_raises"
-        else orders_store.ExecutionEvidence(
-            filled_qty=0, fill_rows=2, envelope_qty=Decimal(0), terminal_at=datetime.now(timezone.utc) - timedelta(hours=1)
-        )
-    )
-    sid = await _pending_with_dead_tp(place, monkeypatch, evidence=evidence)
+async def test_dead_tp_that_may_have_reached_ib_keeps_claim_and_sends_nothing(place, monkeypatch, state, ib_order_id, perm_id):
+    sid = await _pending_with_dead_tp(place, monkeypatch, state=state, ib_order_id=ib_order_id, perm_id=perm_id)
 
     again = await _protect(sid)
 
-    body = json.loads(again.body)
-    assert (again.status_code, body["reason_code"]) == (409, "PROTECT_TP_PARTIAL")
-    assert body["filled"] is None  # executed quantity unknown
+    assert (again.status_code, json.loads(again.body)["reason_code"]) == (409, "PROTECT_TP_PARTIAL")
     assert len(place.calls) == 1  # only the first, uncertain send
     assert _state(sid) == "PROTECTION_PENDING"
     assert "PROTECTION_TP_PARTIAL" in _event_kinds(sid)
 
 
 @pytest.mark.asyncio
-async def test_dead_tp_with_proven_zero_executions_places_one_new_tp(place, monkeypatch):
-    from xenon.execution import orders_store
-
-    sid = await _pending_with_dead_tp(
-        place, monkeypatch, evidence=orders_store.ExecutionEvidence(
-            filled_qty=0, fill_rows=0, envelope_qty=Decimal(0), terminal_at=datetime.now(timezone.utc) - timedelta(hours=1)
-        ),
-    )
+@pytest.mark.parametrize("state", ["FAILED", "REJECTED"])
+async def test_dead_tp_never_at_ib_places_one_new_tp_at_entry_quantity(place, monkeypatch, state):
+    sid = await _pending_with_dead_tp(place, monkeypatch, state=state, ib_order_id=None, perm_id="0")
     place.replies.append({"status": "ok", "orderId": 9002, "permId": 7002})
 
     again = await _protect(sid)

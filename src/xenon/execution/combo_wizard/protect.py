@@ -418,10 +418,8 @@ def _resume_pending(session_id: str, *, requested_target: Decimal) -> dict[str, 
             out.update(price_note)
         return out
 
-    if state in _TP_DEAD_STATES:
-        refusal = _dead_tp_executions_refusal(session_id, cid, row, scope=order_entry._resolve_scope_kwargs())
-        if refusal is not None:
-            return refusal
+    if state in _TP_DEAD_STATES and _tp_may_have_reached_ib(row, state):
+        return _broker_reached_refusal(session_id, cid, state)
 
     if state is None or state in _TP_DEAD_STATES:
         if not _transition(session_id, "PROTECTION_PENDING", "FILLED"):
@@ -438,95 +436,31 @@ def _resume_pending(session_id: str, *, requested_target: Decimal) -> dict[str, 
     return _outcome_unknown_409(session_id, f"its order is {state}")
 
 
-def _fills_sync_pending(terminal_at: datetime | None) -> str | None:
-    """Why 0 recorded fills is not yet proof of 0 executions, or None.
+def _tp_may_have_reached_ib(row: Any, state: str) -> bool:
+    """gate4._may_be_at_ib: broker ids, or a state other than proven not-placed
+    (FAILED / REJECTED). A CANCELLED row is always treated as broker-reached."""
+    from xenon.execution.gate4 import _may_be_at_ib
 
-    A cancel writes no filled quantity; fills on owner-placed orders reach
-    order_fills only through the activity poller (server.py
-    _maybe_start_activity_poller). Proof needs the poller on and the terminal
-    write older than 2 × its interval (one full tick after it)."""
-    from xenon.api.services.ib_activity_mirror import poll_interval_s, poller_enabled
-
-    if not poller_enabled():
-        return "the activity poller is off (XENON_IB_ACTIVITY_POLLER), so fills are never recorded"
-    window = 2 * poll_interval_s()
-    if terminal_at is None or (_now() - terminal_at).total_seconds() < window:
-        return f"it ended less than {window:g} s ago and its fills may not be recorded yet"
-    return None
+    return _may_be_at_ib({"ib_order_id": row.ib_order_id, "perm_id": row.perm_id, "state": state})
 
 
-def _dead_tp_executions_refusal(session_id: str, cid: str, row: Any, *, scope: dict[str, str]) -> JSONResponse | None:
-    """None only when the dead TP provably executed nothing; else a 409
-    (claim kept, nothing sent): PROTECT_TP_PARTIAL when executions are > 0 or
-    cannot be checked, PLACE_OUTCOME_UNKNOWN while the fills sync may still
-    be behind the terminal write (_fills_sync_pending).
+def _broker_reached_refusal(session_id: str, cid: str, state: str) -> JSONResponse:
+    """A dead TP that may have reached IB is never re-placed automatically.
 
-    A cancel keeps executed quantity (order_entry._mark_submission_cancelled
-    passes filled_qty=None), so a re-place at the full entry quantity after a
-    partial fill would over-close."""
-    from xenon.execution import orders_store
-
-    perm_id = str(row.perm_id or "")
-    has_perm = perm_id not in ("", "0")
-    # gate4._may_be_at_ib: ids, or a state other than proven not-placed.
-    may_have_been_at_ib = (
-        has_perm or str(row.ib_order_id or "") not in ("", "0") or row.state not in ("FAILED", "REJECTED")
-    )
-    quantity = int(row.quantity)
-    filled: Decimal | None = None
-    why: str | None = None
-    try:
-        ev = orders_store.execution_evidence(row.submission_id, perm_id=perm_id or None, **scope)
-    except Exception as exc:  # noqa: BLE001 — unknown executions block the re-place
-        why = f"fills lookup failed: {exc}"
-    else:
-        if ev.filled_qty > 0 or ev.fill_rows > 0:
-            filled = max(Decimal(ev.filled_qty), ev.envelope_qty)
-            # Leg rows without an envelope give no closed-spread count.
-            why = "executions recorded" if filled > 0 else "leg fills without an envelope fill"
-        elif may_have_been_at_ib and not has_perm:
-            # The activity mirror links fills by permId; without one, fills
-            # recorded by IB cannot be checked.
-            why = "no permId to check fills"
-        elif may_have_been_at_ib:
-            pending = _fills_sync_pending(ev.terminal_at)
-            if pending:
-                _record_event(
-                    session_id,
-                    "PROTECTION_PENDING",
-                    {"reason": "FILLS_SYNC_PENDING", "client_attempt_id": cid, "row_state": row.state, "why": pending},
-                )
-                return _outcome_unknown_409(
-                    session_id, f"its order is {row.state} but {pending}; retry after the next fills sync"
-                )
-    if why is None:
-        return None
-
-    # Combo contract counts are whole numbers (order_submissions.filled_qty is Integer).
-    filled_n = int(filled) if filled else None
-    remaining = quantity - filled_n if filled_n else None
-    _record_event(
-        session_id,
-        "PROTECTION_TP_PARTIAL",
-        {
-            "client_attempt_id": cid,
-            "row_state": row.state,
-            "filled": filled_n,
-            "remaining": remaining,
-            "quantity": quantity,
-            "reason": why,
-        },
-    )
+    Its executions cannot be proven: a cancel keeps the executed quantity
+    (order_entry._mark_submission_cancelled passes filled_qty=None) and fills
+    arrive only through the activity poller, which can fail silently. A
+    full-size re-place could over-close. The operator takes over from the
+    order ticket; the session stays PROTECTION_PENDING (claim kept)."""
+    _record_event(session_id, "PROTECTION_TP_PARTIAL", {"client_attempt_id": cid, "row_state": state})
     return JSONResponse(
         status_code=409,
         content={
             "reason_code": "PROTECT_TP_PARTIAL",
             "detail": (
-                f"Take-profit for wizard session {session_id} is {row.state} and may have partly filled "
-                f"({why}). Close the rest from the order ticket. Do not resubmit."
+                f"Take-profit for wizard session {session_id} reached IB and ended ({state}). "
+                "Check its fills and close any rest from the order ticket. Do not resubmit."
             ),
-            "filled": filled_n,
-            "remaining": remaining,
         },
     )
 
