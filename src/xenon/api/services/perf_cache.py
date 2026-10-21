@@ -1,7 +1,7 @@
 """Scope-keyed memoize for performance.compute() (spec Decisions §6).
 
-Market-aware TTL: 60s during US market hours (9:30–16:00 ET Mon-Fri),
-30min otherwise. Process-local — multi-worker uvicorn has independent
+Market-aware TTL: 60s during the US regular session (xenon.utils.market_calendar:
+9:30–16:00 ET on trading days), 30min otherwise. Process-local — multi-worker uvicorn has independent
 caches per worker (v1 limitation; v2 follow-up: shared cache).
 
 Correction #26 (perf-rebuild): half-day market sessions are NOT handled
@@ -12,12 +12,11 @@ from __future__ import annotations
 
 import datetime as dt
 import time
-import zoneinfo
 from typing import Any
 
 from xenon.execution.account_scope import AccountScope
+from xenon.utils import market_calendar
 
-_ET = zoneinfo.ZoneInfo("America/New_York")
 _TTL_OPEN_SEC = 60
 _TTL_CLOSED_SEC = 30 * 60
 
@@ -26,18 +25,9 @@ _cache: dict[tuple[str, str, str, str], tuple[Any, float]] = {}
 
 
 def _ttl_for_now(now: dt.datetime | None = None) -> int:
-    """Return TTL seconds: 60 if open RTH, else 1800."""
-    now = now or dt.datetime.now(tz=_ET)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=_ET)
-    else:
-        now = now.astimezone(_ET)
-    if now.weekday() >= 5:  # Sat / Sun
-        return _TTL_CLOSED_SEC
-    minutes = now.hour * 60 + now.minute
-    if 9 * 60 + 30 <= minutes < 16 * 60:
-        return _TTL_OPEN_SEC
-    return _TTL_CLOSED_SEC
+    """Return TTL seconds: 60 during the regular session, else 1800."""
+    now = now or market_calendar.now_et()
+    return _TTL_OPEN_SEC if market_calendar.is_open(now, strict=False) else _TTL_CLOSED_SEC
 
 
 def _key(scope: AccountScope, period: str = "YTD") -> tuple[str, str, str, str]:

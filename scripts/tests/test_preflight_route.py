@@ -22,6 +22,7 @@ pytestmark = pytest.mark.committed_db
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from xenon.api.services import order_entry
+from xenon.utils import market_calendar
 
 
 def _insert_portfolio_snapshot(payload: dict, *, snapshot_at: datetime | None = None) -> None:
@@ -310,7 +311,7 @@ def test_stale_portfolio_snapshot_blocks_sell(client, monkeypatch):
     )
 
 
-    monkeypatch.setattr(order_entry, "_is_market_open_now", lambda: True)
+    monkeypatch.setattr(market_calendar, "is_open", lambda *a, **k: True)
 
     resp = client.post(
         "/orders/place",
@@ -331,7 +332,7 @@ def test_stale_portfolio_snapshot_blocks_sell(client, monkeypatch):
 def test_closed_market_snapshot_stale_default_is_30_minutes(monkeypatch):
 
     monkeypatch.delenv("XENON_PORTFOLIO_SNAPSHOT_STALE_CLOSED_S", raising=False)
-    monkeypatch.setattr(order_entry, "_is_market_open_now", lambda: False)
+    monkeypatch.setattr(market_calendar, "is_open", lambda *a, **k: False)
     verdict = order_entry._portfolio_snapshot_stale_response(datetime.now(timezone.utc) - timedelta(minutes=20))
     assert verdict is None
 

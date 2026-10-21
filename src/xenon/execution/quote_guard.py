@@ -14,8 +14,8 @@ from typing import Callable, Literal
 from pydantic import BaseModel
 
 from xenon.execution import quote_tokens
-from xenon.execution.market_hours import is_opt_tradeable
 from xenon.execution.preflight import ReasonCode
+from xenon.utils import market_calendar
 
 MAX_AGE_RTH_MS = 500
 
@@ -31,11 +31,13 @@ def check_market_hours(
     security_type: Literal["STK", "OPT"],
     now: datetime,
 ) -> QuoteVerdict:
-    if security_type == "OPT" and not is_opt_tradeable(now):
+    # Equity options trade the regular session only. A year missing from the
+    # holiday file degrades to the weekday rule (logged): IB stays the final gate.
+    if security_type == "OPT" and not market_calendar.is_open(now, strict=False):
         return QuoteVerdict(
             accept=False,
             reason_code=ReasonCode.OPTION_MARKET_CLOSED,
-            reason_detail="equity-option market closed (09:30-16:00 ET weekdays)",
+            reason_detail="equity-option market closed (09:30-16:00 ET on US trading days)",
         )
     return QuoteVerdict(accept=True)
 
