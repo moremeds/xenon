@@ -286,7 +286,8 @@ v0.0.3 target use `v0.0.3`, see "Tag convention").
    ```
 
 3. `docker-compose stop -t 60 api realtime`, run the stale-socket check (step 7 of the
-   release flow), then `docker-compose up -d --pull never`.
+   release flow), then `docker-compose up -d --pull never api web realtime`. Name the
+   services: a bare `up -d` also recreates Watchtower, which would pull the bad `:latest` again.
 4. Resume Watchtower (`docker start xenon-watchtower-1`) only after the registry `:latest`
    is no longer the bad release (publish a fixed release first).
 
