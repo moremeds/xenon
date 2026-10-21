@@ -69,10 +69,10 @@ XENON_PAPER_ACCOUNT=DU0000000             # DU* prefix required for paper
 # Role: xenon_app today; xenon_dev (read-only on core_dev, owner of core_test) after
 # step 3 of docs/runbooks/dev-prod-db-cutover.md. See .env.example.
 DATABASE_URL=postgresql+asyncpg://xenon_app:<app-pw>@<db-host>:5432/core_test
-# pytest only: a separate, existing database whose name contains "test" (not core_dev,
+# pytest only: a separate, existing LOCAL database (your OS user has CREATEDB for xdist clones) whose name contains "test" (not core_dev,
 # not the same database as DATABASE_URL), e.g. xenon_test. pytest refuses to start otherwise
 # (src/xenon/_test_db.py); per-worker clones are made from it.
-DATABASE_URL_TEST=postgresql+asyncpg://xenon_app:<app-pw>@<db-host>:5432/xenon_test
+DATABASE_URL_TEST=postgresql+asyncpg://<local-user>:<local-pw>@127.0.0.1:5432/xenon_test
 
 # Next -> FastAPI shared secret (required; FastAPI fails closed without a credential)
 XENON_INTERNAL_API_TOKEN=...

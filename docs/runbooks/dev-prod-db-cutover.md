@@ -88,11 +88,13 @@ PGHOST=localhost PGUSER=xenon_dev PGPASSFILE=/opt/xenon/.pgpass-refresh \
 
 ## Step 5: laptop `.env`
 
-Set `DATABASE_URL` and `DATABASE_URL_TEST` to `xenon_dev` (see `.env.example`).
-Remove the `xenon_app` URL from the active `.env`. Read-only prod checks use
-`xenon_dev` too. `pytest -n` needs `CREATE DATABASE` for worker clones, which
-`xenon_dev` lacks (no CREATEDB): pre-create the `*_gwN` worker DBs, or run
-pytest on a local Postgres.
+Set `DATABASE_URL` to the remote `core_test` as `xenon_dev` (see
+`.env.example`). Remove the `xenon_app` URL from the active `.env`. Read-only
+prod checks use `xenon_dev` too.
+
+`DATABASE_URL_TEST` does not move to the remote role. Laptops run pytest on a
+LOCAL Postgres `*_test` database owned by the local OS user. That user has
+CREATEDB, so `pytest -n` can clone worker DBs; `xenon_dev` has no CREATEDB.
 
 ## Step 6 (optional): rotate the `xenon_app` password
 
@@ -118,11 +120,23 @@ psql core_dev -c "CREATE TABLE xenon.__probe(i int)"                   # permiss
 
 - After step 4: log line `=== refresh ok: core_dev -> core_test ===` in `/var/log/xenon/refresh-core-test.log`.
 - After step 5: `scripts/infra/dev.sh paper` boots and migrates `core_test`.
+- After step 5: `uv run pytest -q scripts/tests/test_test_db_guard.py` passes (the local test DB differs from `DATABASE_URL`).
 - Prod `/health` is unchanged (no restart in steps 1-5).
 
 ## Rollback
 
-`core_test` is a mirror; the refresh rebuilds it.
+`core_test` is a mirror; the refresh rebuilds it. Do the steps in this order.
+Dropping the role first would break laptops and the refresh.
+
+1. Stop dev sessions (`dev.sh`). If the refresh LaunchAgent is installed, boot
+   it out (`launchctl bootout gui/$(id -u)/com.xenon.refresh-core-test`).
+2. Give the laptop `DATABASE_URL` a working credential again. Before step 6:
+   `xenon_app` from the backup the operator kept. After step 6: the current
+   `xenon_app` password from the operator's secret workflow, never an old one.
+3. Refresh: set `PGUSER` to `xenon_app` in the plist and put a `xenon_app` line
+   in `/opt/xenon/.pgpass-refresh`, or leave the job uninstalled. The script
+   default is `xenon_dev`, so the plist or cron line must set `PGUSER`.
+4. Only then run the SQL that removes the role:
 
 ```sql
 -- core_dev
@@ -142,3 +156,6 @@ DROP OWNED BY xenon_dev;
 DROP OWNED BY xenon_dev;
 DROP ROLE xenon_dev;
 ```
+
+5. Verify: the laptop connects to `core_test`; the refresh `--dry` passes with
+   the restored role (`PGUSER=xenon_app`); prod `/health` is unchanged.
