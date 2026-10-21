@@ -91,7 +91,7 @@ if [[ "$MODE" == "paper" ]]; then
     log_info "Using DATABASE_URL_PAPER (local) for paper mode."
   else
     log_warn "DATABASE_URL_PAPER not set — paper mode will use DATABASE_URL ($DATABASE_URL)."
-    log_warn "Off-LAN dev: add DATABASE_URL_PAPER=postgresql+asyncpg://xenon_dev:<dev-pw>@127.0.0.1:5432/core_test to .env"
+    log_warn "Off-LAN dev: add DATABASE_URL_PAPER=postgresql+asyncpg://xenon_app:<app-pw>@127.0.0.1:5432/core_test to .env"
   fi
   if [[ -n "${DATABASE_URL_TEST_PAPER:-}" ]]; then
     DATABASE_URL_TEST="$DATABASE_URL_TEST_PAPER"

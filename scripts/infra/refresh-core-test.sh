@@ -10,6 +10,10 @@
 # in-progress local dev migrations are wiped — re-apply them after
 # refresh.
 #
+# Runs as the limited role xenon_dev: SELECT on core_dev, owner of core_test.
+# pg_dump is scoped to -n xenon -n events (xenon_dev cannot read other apps'
+# schemas, and dev does not need them).
+#
 # Connection details come from PGSERVICE entries or env vars set by the
 # LaunchAgent plist (PGHOST, PGUSER, PGPASSFILE). The script does NOT
 # read .env so it stays valid when run from launchd (which has no shell
@@ -46,7 +50,7 @@ SRC_DB="${XENON_REFRESH_SRC:-core_dev}"
 DST_DB="${XENON_REFRESH_DST:-core_test}"
 PG_HOST="${PGHOST:-localhost}"
 PG_PORT="${PGPORT:-5432}"
-PG_USER="${PGUSER:-xenon_migrator}"
+PG_USER="${PGUSER:-xenon_dev}"
 
 # Prefer the highest-version PG client tools available. pg_dump must be
 # >= the server's major version (a 15.x client cannot dump a 17.x
@@ -130,7 +134,7 @@ fi
 
 if [[ "$DRY" == "1" ]]; then
   # Stream to /dev/null so we still exercise the connection + permissions.
-  if pg_dump -Fc -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$SRC_DB" > /dev/null 2>>"$LOG_FILE"; then
+  if pg_dump -Fc -n xenon -n events -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$SRC_DB" > /dev/null 2>>"$LOG_FILE"; then
     log "DRY: pg_dump of $SRC_DB succeeded — restore would have followed."
     exit 0
   else
@@ -155,7 +159,7 @@ fi
 # Production path: pipe the custom-format dump straight into pg_restore.
 # --clean --if-exists drops anything the pre-drop missed (extensions,
 # the public-schema objects we don't pre-drop, etc).
-if pg_dump -Fc -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$SRC_DB" 2>>"$LOG_FILE" \
+if pg_dump -Fc -n xenon -n events -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$SRC_DB" 2>>"$LOG_FILE" \
    | pg_restore --clean --if-exists --no-owner --no-privileges \
        -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$DST_DB" 2>>"$LOG_FILE"; then
   log "=== refresh ok: $SRC_DB -> $DST_DB ==="

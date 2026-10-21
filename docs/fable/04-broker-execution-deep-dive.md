@@ -87,6 +87,9 @@ The read-side plumbing is a genuine head start for any future execution work
   `test_place_quote_gate.py:234`).
 - **Paper/live separation?** Strong and multi-layered (dev.sh guard `dev.sh:133-138`,
   PG role grants, `XENON_READ_ONLY`, scope columns + env validation). Verified.
+  _Note (2026-10-21): the "PG role grants" layer did not exist when this was written. Only the
+  single role `xenon_app` existed, so isolation was name-based. Since 2026-10-21 the role
+  `xenon_dev` is read-only on `core_dev`; see `docs/runbooks/dev-prod-db-cutover.md`._
 - **Persistence broker-neutral in practice?** No — see CHECK constraints; Futu data lives in
   its own mirror tables. Honest, if not neutral.
 

@@ -349,6 +349,18 @@ def test_refresh_allows_core_dev_to_core_test_and_releases_lock(tmp_path: Path) 
     assert _run_refresh(env).returncode == 0  # and a later run is not blocked
 
 
+@pytest.mark.parametrize("extra", [(), ("--dry",)])
+def test_refresh_dumps_only_app_schemas_as_xenon_dev(tmp_path: Path, extra: tuple[str, ...]) -> None:
+    """The limited xenon_dev role cannot read other apps' schemas: pg_dump must be scoped to xenon + events."""
+    bindir, calls = _stub_pg(tmp_path)
+    proc = _run_refresh(_refresh_env(tmp_path, bindir, "core_dev", "core_test"), *extra)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    dumps = [line for line in calls.read_text().splitlines() if line.startswith("pg_dump ")]
+    assert len(dumps) == 1, dumps
+    assert " -n xenon -n events " in dumps[0] + " ", dumps[0]
+    assert "-U xenon_dev" in dumps[0], dumps[0]
+
+
 def test_refresh_second_concurrent_run_exits_without_calling_pg(tmp_path: Path) -> None:
     bindir, calls = _stub_pg(tmp_path, sleep_s=1.5)
     env = _refresh_env(tmp_path, bindir, "core_dev", "core_test")
