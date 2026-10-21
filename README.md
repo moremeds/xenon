@@ -65,7 +65,9 @@ XENON_TRADING_MODE=paper                  # paper (port 4002) or live (port 4001
 XENON_PAPER_ACCOUNT=DU0000000             # DU* prefix required for paper
 # XENON_LIVE_ACCOUNT=U1234567             # U* prefix required for live
 
-# dev.sh refuses to start when DATABASE_URL points at core_dev (prod)
+# dev.sh refuses to start when DATABASE_URL points at core_dev (prod).
+# Role: xenon_app today; xenon_dev (read-only on core_dev, owner of core_test) after
+# step 3 of docs/runbooks/dev-prod-db-cutover.md. See .env.example.
 DATABASE_URL=postgresql+asyncpg://xenon_app:<app-pw>@<db-host>:5432/core_test
 # pytest only: a separate, existing database whose name contains "test" (not core_dev,
 # not the same database as DATABASE_URL), e.g. xenon_test. pytest refuses to start otherwise

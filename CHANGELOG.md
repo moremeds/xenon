@@ -5,7 +5,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-- Docs and the refresh-core-test job use the real `xenon_app` role.
+- Docs match the real Postgres roles: prod uses `xenon_app`; the new limited `xenon_dev` role is read-only on `core_dev` and will own `core_test` (runbook `docs/runbooks/dev-prod-db-cutover.md`, ownership step pending).
+- `refresh-core-test.sh` runs as `xenon_dev` by default and dumps only the `xenon` and `events` schemas (`pg_dump -n xenon -n events`); the LaunchAgent is not installed yet.
 
 ## [0.13.0] — 2026-10-21
 
