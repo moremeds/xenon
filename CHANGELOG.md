@@ -5,11 +5,16 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-10-21
+
+Summary: the Ratings tab works again on FastAPI; one ET-aware market calendar that treats holidays as closed; `server.py` split into route and service modules; docs and runbooks match the code.
+
 - **Ratings tab works again.** `GET /ticker/ratings?ticker=XYZ` on FastAPI returns the raw Unusual Whales analyst rows (`screener/analysts`) with `as_of` and `source`. It caches each ticker for 15 minutes and rejects malformed UW rows (wrong types, non-finite or oversized numbers) and evicts the rejected payload from the shared 60 s UW cache, so the next request refetches instead of reusing it. Status codes: 400 `INVALID_TICKER`, 502 `UW_UPSTREAM_ERROR` (UW error or malformed payload), 504 `UW_TIMEOUT` (no answer within 12 s), 503 `RATINGS_BUSY` (both of the 2 dedicated fetch workers are in use; a stuck UW read keeps its worker until it returns). Every error has a top-level `reason_code`. `/api/ticker/ratings` calls it through `xenonFetch` instead of spawning the removed `xenon-fetch-analyst` CLI and maps failures to stable generic bodies with a top-level `reason_code`: `INVALID_TICKER` 400, `UW_UPSTREAM_ERROR` 502, `RATINGS_UNAVAILABLE` 502 (FastAPI unreachable or unexpected body), `RATINGS_TIMEOUT` 504, `RATINGS_BUSY` 503. The tab lists recent analyst actions with the price target of each; it no longer shows an aggregate recommendation or consensus counts.
 
 - **One market calendar (PR-21).** `xenon.utils.market_calendar` is the only Python "is the US market open" check (the web `useMarketHours` hook and `scripts/infra/ib_realtime/ib_realtime_server.js` have their own): ET-aware, 09:30 to 16:00 (16:00 exclusive), weekdays minus `market_holidays.json`. Option order entry, the portfolio-snapshot stale thresholds (order preflight and gate4) and the performance cache TTL now treat market holidays as closed; before, they used a weekday-only rule. The snapshot stale checks keep the whole 16:00 minute open (`close_inclusive_minute`). A naive `datetime` is rejected; a year missing from, or malformed content in, the holiday file raises `CalendarYearMissing`, and the runtime callers above log an error and fall back to the weekday rule. The duplicate `utils/market_hours.py` and `execution/market_hours.py` are deleted; `xenon-market-hours` now lives in `market_calendar`. Early closes (13:00 ET) are still not modelled.
 - **Order-path caller guard parses Python imports.** `scripts/checks/order_path_caller_allowlist.py` now reads `.py` files with `ast`, so multiline imports (`from xenon.execution import (\n    ib_place_order,\n)`) and relative imports of `ib_place_order` / `ib_order_manage` outside the allowlist fail the build; before, only single-line imports matched. Other file types keep the line match. A file that does not parse falls back to the line match. Tests: `scripts/tests/test_order_path_caller_allowlist.py`.
-- Docs match the code after the uplift.
+- **`server.py` split (PR-20).** `src/xenon/api/server.py` keeps the app, lifespan, middleware and shared state; HTTP handlers moved to `src/xenon/api/routes/{market,order_entry,futu,blotter,system,portfolio}.py` and the place / cancel / modify / replace cores to `src/xenon/api/services/order_entry.py`. Routes, status codes and lifespan tasks are unchanged.
+- Docs match the code after the uplift (root and subdirectory `CLAUDE.md`, README, release and deploy runbooks with the controlled cutover).
 
 ## [0.12.0] — 2026-10-21
 
