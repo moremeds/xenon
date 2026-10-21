@@ -4,7 +4,8 @@ Background
 ----------
 Order writes run through the connected-client cores in
 `xenon.execution.ib_place_order` (place) and `xenon.execution.ib_order_manage`
-(cancel / modify). Since PR-10 the only caller is `src/xenon/api/server.py`,
+(cancel / modify). Since PR-10 the only caller is the order-entry service
+(`src/xenon/api/services/order_entry.py`, moved out of `server.py` in PR-20),
 which runs them on the API's single order owner (`api/order_owner.py`, pool
 `orders` connection) *only after* `_run_preflight()`, Gate 4 and
 `_validate_non_combo_quote()` have approved the request. There is no
@@ -40,7 +41,7 @@ _ALLOWLIST = frozenset(
         "src/xenon/execution/ib_order_manage.py",
         # The single legitimate runtime caller — runs the cores on the
         # order owner after preflight + Gate 4 + quote gate.
-        "src/xenon/api/server.py",
+        "src/xenon/api/services/order_entry.py",
         # Static analysis — the guard itself names the symbols.
         "scripts/checks/order_path_caller_allowlist.py",
     }
@@ -146,7 +147,7 @@ def main() -> int:
     )
     print("", file=sys.stderr)
     print(
-        "Order writes must go through src/xenon/api/server.py (order owner) after",
+        "Order writes must go through src/xenon/api/services/order_entry.py (order owner) after",
         file=sys.stderr,
     )
     print(

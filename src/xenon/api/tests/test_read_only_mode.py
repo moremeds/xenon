@@ -21,6 +21,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+from xenon.api.services import order_entry
 
 
 @pytest.fixture
@@ -329,12 +330,11 @@ def test_in_process_order_helpers_blocked_in_read_only(read_only_client):
     The wizard submit path reaches these without going through the
     /orders/* routes, so the read-only denial must live inside them.
     """
-    import xenon.api.server as server
 
     for helper in (
-        server._orders_place_from_body,
-        server._orders_cancel_from_body,
-        server._orders_modify_from_body,
+        order_entry._orders_place_from_body,
+        order_entry._orders_cancel_from_body,
+        order_entry._orders_modify_from_body,
     ):
         result = asyncio.run(helper({}))
         assert result.status_code == 403, f"{helper.__name__} did not deny in read-only"

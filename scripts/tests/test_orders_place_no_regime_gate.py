@@ -30,6 +30,7 @@ import pytest
 pytestmark = pytest.mark.committed_db
 
 from fastapi.testclient import TestClient
+from xenon.api.services import order_entry
 
 SECRET = "d" * 64
 
@@ -52,7 +53,7 @@ def client():
     from xenon.execution import orders_store, quote_guard
 
     orders_store.init_store()
-    server._tick_rule_cache = quote_guard.TickRuleCache(
+    order_entry._tick_rule_cache = quote_guard.TickRuleCache(
         source=lambda con_id: Decimal("0.01"),
         ttl_seconds=3600,
     )
@@ -60,7 +61,6 @@ def client():
 
 
 def test_place_stock_buy_does_not_500_with_gate_forced_on(client, monkeypatch):
-    from xenon.api import server
 
     async def _fresh_quote(ticker: str, con_id: int):
         return {
@@ -70,7 +70,7 @@ def test_place_stock_buy_does_not_500_with_gate_forced_on(client, monkeypatch):
             "ask_size": 120,
         }
 
-    monkeypatch.setattr(server, "_fetch_quote_snapshot", _fresh_quote)
+    monkeypatch.setattr(order_entry, "_fetch_quote_snapshot", _fresh_quote)
 
     resp = client.post(
         "/orders/place",

@@ -26,6 +26,7 @@ from xenon.api import server as server_mod
 from xenon.api import trading_mode
 from xenon.api.subprocess import ScriptResult
 from xenon.execution.account_scope import IBAccountSelectionError, select_ib_account
+from xenon.api.services import order_entry
 
 # Captured at collection time, before the autouse conftest fixture swaps the
 # module attribute for a constant lambda.
@@ -130,7 +131,7 @@ async def test_boot_scope_env_unmanaged_is_unverified_and_places_nothing(monkeyp
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as exc_info:
-        await server_mod._orders_place_from_body(
+        await order_entry._orders_place_from_body(
             {"type": "stock", "symbol": "SPY", "action": "BUY", "quantity": 1, "limitPrice": 1.0}
         )
 

@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+from xenon.api.services import order_entry
 
 SECRET = "e" * 64
 
@@ -23,7 +24,7 @@ def client():
     from xenon.execution import orders_store, quote_guard
 
     orders_store.init_store()
-    server._tick_rule_cache = quote_guard.TickRuleCache(
+    order_entry._tick_rule_cache = quote_guard.TickRuleCache(
         source=lambda con_id: Decimal("0.01"),
         ttl_seconds=3600,
     )

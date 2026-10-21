@@ -12,6 +12,7 @@ pytestmark = pytest.mark.committed_db
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
+from xenon.api.services import order_entry
 
 SECRET = "d" * 64
 
@@ -31,7 +32,7 @@ def client():
     from xenon.execution import orders_store, quote_guard
 
     orders_store.init_store()
-    server._tick_rule_cache = quote_guard.TickRuleCache(
+    order_entry._tick_rule_cache = quote_guard.TickRuleCache(
         source=lambda con_id: Decimal("0.01"),
         ttl_seconds=3600,
     )
@@ -54,7 +55,6 @@ def _mint_token(con_id=756733, ticker="SPY", age_ms=0, bid="500.10", ask="500.20
 
 
 def test_missing_quote_token_fetches_fresh_quote_and_accepts(client, monkeypatch):
-    from xenon.api import server
 
     async def _fresh_quote(ticker: str, con_id: int):
         assert ticker == "SPY"
@@ -66,7 +66,7 @@ def test_missing_quote_token_fetches_fresh_quote_and_accepts(client, monkeypatch
             "ask_size": 120,
         }
 
-    monkeypatch.setattr(server, "_fetch_quote_snapshot", _fresh_quote)
+    monkeypatch.setattr(order_entry, "_fetch_quote_snapshot", _fresh_quote)
 
     resp = client.post(
         "/orders/place",
@@ -84,7 +84,6 @@ def test_missing_quote_token_fetches_fresh_quote_and_accepts(client, monkeypatch
 
 
 def test_expired_token_fetches_fresh_quote_and_accepts(client, monkeypatch):
-    from xenon.api import server
 
     async def _fresh_quote(ticker: str, con_id: int):
         assert ticker == "SPY"
@@ -96,7 +95,7 @@ def test_expired_token_fetches_fresh_quote_and_accepts(client, monkeypatch):
             "ask_size": 120,
         }
 
-    monkeypatch.setattr(server, "_fetch_quote_snapshot", _fresh_quote)
+    monkeypatch.setattr(order_entry, "_fetch_quote_snapshot", _fresh_quote)
 
     token = _mint_token(age_ms=10_000)
     resp = client.post(
@@ -118,12 +117,11 @@ def test_expired_token_fetches_fresh_quote_and_accepts(client, monkeypatch):
 def test_missing_quote_token_without_live_quote_returns_QUOTE_UNAVAILABLE(client, monkeypatch):
     from fastapi import HTTPException
 
-    from xenon.api import server
 
     async def _no_quote(ticker: str, con_id: int):
         raise HTTPException(status_code=503, detail=f"No quote available for {ticker}/{con_id}")
 
-    monkeypatch.setattr(server, "_fetch_quote_snapshot", _no_quote)
+    monkeypatch.setattr(order_entry, "_fetch_quote_snapshot", _no_quote)
 
     resp = client.post(
         "/orders/place",
@@ -142,12 +140,11 @@ def test_missing_quote_token_without_live_quote_returns_QUOTE_UNAVAILABLE(client
 
 
 def test_token_contract_mismatch_rejects_without_fallback(client, monkeypatch):
-    from xenon.api import server
 
     async def _unexpected_quote_fetch(ticker: str, con_id: int):
         raise AssertionError("contract mismatch must not fall back to a fresh quote")
 
-    monkeypatch.setattr(server, "_fetch_quote_snapshot", _unexpected_quote_fetch)
+    monkeypatch.setattr(order_entry, "_fetch_quote_snapshot", _unexpected_quote_fetch)
 
     token = _mint_token(con_id=756733, ticker="SPY")
     resp = client.post(
@@ -171,17 +168,16 @@ def test_option_token_contract_mismatch_without_body_con_id_rejects(client, monk
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    from xenon.api import server
 
     midday = datetime(2026, 4, 22, 13, 0, tzinfo=ZoneInfo("America/New_York"))
-    monkeypatch.setattr(server, "_now", lambda: midday, raising=False)
+    monkeypatch.setattr(order_entry, "_now", lambda: midday)
 
     async def _qualified_con_id(body: dict):
         assert body["type"] == "option"
         assert body["symbol"] == "SPY"
         return 222222
 
-    monkeypatch.setattr(server, "_qualify_order_con_id", _qualified_con_id, raising=False)
+    monkeypatch.setattr(order_entry, "_qualify_order_con_id", _qualified_con_id)
 
     token = _mint_token(con_id=111111, ticker="SPY", bid="4.90", ask="5.00")
     resp = client.post(
@@ -207,10 +203,9 @@ def test_option_market_closed_returns_OPTION_MARKET_CLOSED(client, monkeypatch):
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    from xenon.api import server
 
     after_hours = datetime(2026, 4, 22, 17, 0, tzinfo=ZoneInfo("America/New_York"))
-    monkeypatch.setattr(server, "_now", lambda: after_hours, raising=False)
+    monkeypatch.setattr(order_entry, "_now", lambda: after_hours)
 
     resp = client.post(
         "/orders/place",
@@ -293,10 +288,9 @@ def test_limit_override_records_PREFLIGHT_ACK_LIMIT_event(client, monkeypatch):
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    from xenon.api import server
 
     midday = datetime(2026, 4, 22, 13, 0, tzinfo=ZoneInfo("America/New_York"))
-    monkeypatch.setattr(server, "_now", lambda: midday, raising=False)
+    monkeypatch.setattr(order_entry, "_now", lambda: midday)
 
     token = _mint_token(bid="9.50", ask="10.00")
     resp = client.post(

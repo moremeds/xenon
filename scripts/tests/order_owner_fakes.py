@@ -30,6 +30,7 @@ from xenon.api import server as server_mod
 from xenon.api.order_owner import OrderOwner
 from xenon.clients.ib_client import READINESS_READY, pool_client_id
 from xenon.execution import ib_order_manage, ib_place_order
+from xenon.api.services import order_entry
 
 def orders_id() -> int:
     return pool_client_id("orders")
@@ -209,9 +210,9 @@ def install_cores(monkeypatch, *, cancel=None, modify=None, place=None) -> None:
         cancel_order_on_client=cancel or ib_order_manage.cancel_order_on_client,
         modify_order_on_client=modify or ib_order_manage.modify_order_on_client,
     )
-    monkeypatch.setattr(server_mod, "ib_order_manage", proxy)
+    monkeypatch.setattr(order_entry, "ib_order_manage", proxy)
     monkeypatch.setattr(
-        server_mod,
+        order_entry,
         "ib_place_order",
         SimpleNamespace(place_order_on_client=place or ib_place_order.place_order_on_client),
     )

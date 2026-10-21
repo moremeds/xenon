@@ -21,6 +21,7 @@ pytestmark = pytest.mark.committed_db
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
+from xenon.api.services import order_entry
 
 
 def _insert_portfolio_snapshot(payload: dict, *, snapshot_at: datetime | None = None) -> None:
@@ -74,7 +75,6 @@ def _insert_portfolio_snapshot(payload: dict, *, snapshot_at: datetime | None = 
 @pytest.fixture(autouse=True)
 def _test_mode(monkeypatch, tmp_path):
     monkeypatch.setenv("XENON_API_TEST_MODE", "1")
-    from xenon.api import server
 
     async def _ib_qualified(body):
         # Stand-in for reqContractDetails on standard equity options: IB
@@ -83,10 +83,10 @@ def _test_mode(monkeypatch, tmp_path):
         sym = str(body.get("symbol", "")).upper()
         return [
             {"con_id": 7000 + i, "tc": sym, "mult": 100, "und_sec": "STK"}
-            for i, _ in enumerate(server._gate4_leg_specs(body))
+            for i, _ in enumerate(order_entry._gate4_leg_specs(body))
         ]
 
-    monkeypatch.setattr(server, "_resolve_gate4_leg_meta", _ib_qualified)
+    monkeypatch.setattr(order_entry, "_resolve_gate4_leg_meta", _ib_qualified)
     # Point data dir at an empty portfolio
     portfolio = {"positions": []}
     pf_file = tmp_path / "portfolio.json"
@@ -265,12 +265,11 @@ def test_preflight_uses_postgres_snapshot_not_portfolio_json(client, monkeypatch
         }
     )
 
-    from xenon.api import server
 
     async def _fresh_quote(ticker: str, con_id: int):
         return {"bid": 500.10, "ask": 500.20, "bid_size": 100, "ask_size": 120}
 
-    monkeypatch.setattr(server, "_fetch_quote_snapshot", _fresh_quote)
+    monkeypatch.setattr(order_entry, "_fetch_quote_snapshot", _fresh_quote)
 
     resp = client.post(
         "/orders/place",
@@ -310,9 +309,8 @@ def test_stale_portfolio_snapshot_blocks_sell(client, monkeypatch):
         snapshot_at=datetime.now(timezone.utc) - timedelta(minutes=20),
     )
 
-    from xenon.api import server
 
-    monkeypatch.setattr(server, "_is_market_open_now", lambda: True)
+    monkeypatch.setattr(order_entry, "_is_market_open_now", lambda: True)
 
     resp = client.post(
         "/orders/place",
@@ -331,11 +329,10 @@ def test_stale_portfolio_snapshot_blocks_sell(client, monkeypatch):
 
 
 def test_closed_market_snapshot_stale_default_is_30_minutes(monkeypatch):
-    from xenon.api import server
 
     monkeypatch.delenv("XENON_PORTFOLIO_SNAPSHOT_STALE_CLOSED_S", raising=False)
-    monkeypatch.setattr(server, "_is_market_open_now", lambda: False)
-    verdict = server._portfolio_snapshot_stale_response(datetime.now(timezone.utc) - timedelta(minutes=20))
+    monkeypatch.setattr(order_entry, "_is_market_open_now", lambda: False)
+    verdict = order_entry._portfolio_snapshot_stale_response(datetime.now(timezone.utc) - timedelta(minutes=20))
     assert verdict is None
 
 
@@ -363,7 +360,6 @@ def test_combo_call_ratio_spread_blocked_by_server_preflight(client):
 
 @pytest.mark.asyncio
 async def test_run_preflight_awaits_async_portfolio_loader(monkeypatch):
-    from xenon.api import server
     from xenon.execution.preflight import PortfolioView
 
     called = {"value": False}
@@ -384,8 +380,8 @@ async def test_run_preflight_awaits_async_portfolio_loader(monkeypatch):
             available_funds=0,
         )
 
-    monkeypatch.setattr(server, "_load_portfolio_view", _snapshot)
-    verdict = await server._run_preflight(
+    monkeypatch.setattr(order_entry, "_load_portfolio_view", _snapshot)
+    verdict = await order_entry._run_preflight(
         {
             "type": "stock",
             "symbol": "SPY",

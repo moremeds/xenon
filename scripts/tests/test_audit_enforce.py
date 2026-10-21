@@ -22,6 +22,7 @@ from xenon.api import server as server_mod
 from xenon.api.services import audit_enforce
 from xenon.api.subprocess import ScriptResult
 from xenon.execution import orders_store
+from xenon.api.services import order_entry
 
 ACCT = "DU0000000"
 
@@ -435,7 +436,7 @@ def glue(monkeypatch):
     monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", _runner)
     monkeypatch.setattr(server_mod, "_sync_task", None, raising=False)
     monkeypatch.setattr(server_mod, "_is_test_mode", lambda: False)
-    monkeypatch.setattr(server_mod, "_record_manage_event", lambda *a, **k: None)
+    monkeypatch.setattr(order_entry, "_record_manage_event", lambda *a, **k: None)
     install_cores(monkeypatch, cancel=_core)
     owner, _pool = install_owner(monkeypatch)
     state["owner"] = owner

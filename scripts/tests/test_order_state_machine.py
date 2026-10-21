@@ -13,6 +13,7 @@ from xenon.db.engine import get_sync_engine
 from xenon.db.queries import combo_wizard
 from xenon.db.schema import order_submissions
 from xenon.execution import orders_store
+from xenon.api.services import order_entry
 
 SCOPE = {"broker": "IB", "account_env": "paper", "broker_account": "DU_SM"}
 
@@ -98,14 +99,13 @@ def test_expected_states_is_required_keyword(call):
 def test_user_cancel_never_overwrites_filled():
     """`_mark_submission_cancelled` only leaves a non-terminal state: a fill
     the poller recorded first wins over the cancel reply."""
-    from xenon.api import server
 
     _seed("sm-cx-filled", "FILLED")
     _seed("sm-cx-working", "WORKING")
     _seed("sm-cx-unknown", "UNKNOWN")
-    server._mark_submission_cancelled("sm-cx-filled")
-    server._mark_submission_cancelled("sm-cx-working")
-    server._mark_submission_cancelled("sm-cx-unknown")
+    order_entry._mark_submission_cancelled("sm-cx-filled")
+    order_entry._mark_submission_cancelled("sm-cx-working")
+    order_entry._mark_submission_cancelled("sm-cx-unknown")
     assert _state("sm-cx-filled") == "FILLED"
     assert _state("sm-cx-working") == "CANCELLED"
     assert _state("sm-cx-unknown") == "CANCELLED"
