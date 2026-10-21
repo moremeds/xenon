@@ -5,6 +5,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+- **Wizard protect take-profit goes through Gate 4.** `POST /wizard/sessions/{id}/protect` now places its GTC SELL BAG take-profit through `order_entry.place`, like every other order: Gate 4 checks coverage against the snapshot and every working reservation and writes an `order_submissions` row before the order owner sends it. A refusal returns the place response with its top-level `reason_code` (for example `COMBO_SPLIT_REQUIRED`, `ETF_CALL_UNCOVERED`, `ORDERS_HALTED`) and leaves the session FILLED. The session is claimed (FILLED → `PROTECTION_PENDING`) before the place, so two protects cannot send two TPs; an uncertain place (`PLACE_OUTCOME_UNKNOWN`) keeps it claimed. The TP retry loop, `place_combo_tp` and the unused `ComboWizardIbAdapter` module are removed.
+
 ## [0.13.0] — 2026-10-21
 
 Summary: the Ratings tab works again on FastAPI; one ET-aware market calendar that treats holidays as closed; `server.py` split into route and service modules; docs and runbooks match the code.
