@@ -125,7 +125,9 @@ def _snapshot_stale(as_of: datetime | None) -> bool:
     """Same thresholds as the legacy route-level check."""
     if as_of is None:
         return False
-    market_open = market_calendar.is_open(market_calendar.now_et(), strict=False)
+    market_open = market_calendar.is_open(
+        market_calendar.now_et(), strict=False, close_inclusive_minute=True
+    )
     env = "XENON_PORTFOLIO_SNAPSHOT_STALE_S" if market_open else "XENON_PORTFOLIO_SNAPSHOT_STALE_CLOSED_S"
     default = 300 if market_open else 1800
     try:

@@ -5,7 +5,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-- **One market calendar (PR-21).** `xenon.utils.market_calendar` is the only "is the US market open" check: ET-aware, 09:30 to 16:00 (16:00 exclusive), weekdays minus `market_holidays.json`. Option order entry, the portfolio-snapshot stale thresholds (order preflight and gate4) and the performance cache TTL now treat market holidays as closed; before, they used a weekday-only rule. A naive `datetime` is rejected; a year missing from the holiday file raises, and the runtime callers above log an error and fall back to the weekday rule. The duplicate `utils/market_hours.py` and `execution/market_hours.py` are deleted; `xenon-market-hours` now lives in `market_calendar`. Early closes (13:00 ET) are still not modelled.
+- **One market calendar (PR-21).** `xenon.utils.market_calendar` is the only "is the US market open" check: ET-aware, 09:30 to 16:00 (16:00 exclusive), weekdays minus `market_holidays.json`. Option order entry, the portfolio-snapshot stale thresholds (order preflight and gate4) and the performance cache TTL now treat market holidays as closed; before, they used a weekday-only rule. The snapshot stale checks keep the whole 16:00 minute open (`close_inclusive_minute`). A naive `datetime` is rejected; a year missing from, or malformed content in, the holiday file raises `CalendarYearMissing`, and the runtime callers above log an error and fall back to the weekday rule. The duplicate `utils/market_hours.py` and `execution/market_hours.py` are deleted; `xenon-market-hours` now lives in `market_calendar`. Early closes (13:00 ET) are still not modelled.
 
 ## [0.12.0] — 2026-10-21
 

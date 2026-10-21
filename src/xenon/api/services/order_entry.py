@@ -82,7 +82,9 @@ def _portfolio_snapshot_stale_response(snapshot_at: datetime | None) -> Verdict 
         return None
     if snapshot_at.tzinfo is None:
         snapshot_at = snapshot_at.replace(tzinfo=timezone.utc)
-    market_open = market_calendar.is_open(market_calendar.now_et(), strict=False)
+    market_open = market_calendar.is_open(
+        market_calendar.now_et(), strict=False, close_inclusive_minute=True
+    )
     threshold_env = "XENON_PORTFOLIO_SNAPSHOT_STALE_S" if market_open else "XENON_PORTFOLIO_SNAPSHOT_STALE_CLOSED_S"
     default_seconds = "300" if market_open else "1800"
     try:

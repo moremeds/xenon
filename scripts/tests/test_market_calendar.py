@@ -211,7 +211,6 @@ def test_current_session_date_et_is_date():
 def test_unreadable_holiday_file_is_calendar_error_not_silent(monkeypatch, tmp_path):
     monkeypatch.setattr(mc, "_CONFIG_PATH", tmp_path / "missing.json")
     mc._load_file.cache_clear()
-    mc._holidays.cache_clear()
     try:
         with pytest.raises(mc.CalendarYearMissing, match="cannot read"):
             mc.is_trading_day(date(2026, 3, 3))
@@ -219,10 +218,35 @@ def test_unreadable_holiday_file_is_calendar_error_not_silent(monkeypatch, tmp_p
     finally:
         monkeypatch.undo()
         mc._load_file.cache_clear()
-        mc._holidays.cache_clear()
 
 
 def test_cli_main_prints_status(capsys):
     mc.main([])
     out = capsys.readouterr().out
     assert "Market status:" in out and "Last market close:" in out
+
+
+def test_close_inclusive_minute_keeps_whole_1600_minute_open():
+    for hh, mm, ss, expect_default, expect_incl in [
+        (15, 59, 59, True, True),
+        (16, 0, 0, False, True),
+        (16, 0, 59, False, True),
+        (16, 1, 0, False, False),
+    ]:
+        t = datetime(2026, 11, 25, hh, mm, ss, tzinfo=ET)
+        assert mc.is_open(t) is expect_default
+        assert mc.is_open(t, close_inclusive_minute=True) is expect_incl
+
+
+def test_close_inclusive_minute_does_not_open_a_holiday():
+    assert mc.is_open(_et(2026, 11, 26, 16, 0), close_inclusive_minute=True) is False
+
+
+def test_cli_status_formats(monkeypatch):
+    assert mc._status(_et(2026, 11, 25, 15, 30)) == "OPEN (30m to close)"
+    assert mc._status(_et(2026, 11, 25, 12, 0)) == "OPEN (4h 0m to close)"
+    assert mc._status(_et(2026, 11, 25, 8, 0)) == "CLOSED (pre-market, 1h 30m to open)"
+    assert mc._status(_et(2026, 11, 25, 9, 0)) == "CLOSED (pre-market, 30m to open)"
+    assert mc._status(_et(2026, 11, 25, 17, 0)) == "CLOSED (after hours)"
+    assert mc._status(_et(2026, 11, 26, 12, 0)) == "CLOSED (holiday)"
+    assert mc._status(_et(2026, 11, 28, 12, 0)) == "CLOSED (weekend)"

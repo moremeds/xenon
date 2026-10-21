@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 MARKET_OPEN = time(9, 30)
 MARKET_CLOSE = time(16, 0)
+_CLOSE_INCLUSIVE_MINUTE = time(16, 1)
 
 # src/xenon/utils/market_calendar.py → src/xenon/config/market_holidays.json
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "market_holidays.json"
@@ -38,22 +39,39 @@ class CalendarYearMissing(LookupError):
 
 
 @lru_cache(maxsize=1)
-def _load_file() -> dict[str, list[str]]:
-    with open(_CONFIG_PATH) as f:
-        return json.load(f)
+def _load_file() -> dict[str, frozenset[date]]:
+    """Read and validate the holiday file: ``{"YYYY": ["YYYY-MM-DD", ...]}``.
 
-
-@lru_cache(maxsize=None)
-def _holidays(year: int) -> frozenset[date]:
+    Any unreadable or malformed content raises ``CalendarYearMissing`` so that
+    lenient callers take the logged weekday fallback instead of crashing.
+    """
     try:
-        entries = _load_file().get(str(year))
-    except (OSError, ValueError) as exc:
+        with open(_CONFIG_PATH) as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            raise ValueError("top level must be an object of year -> [dates]")
+        parsed: dict[str, frozenset[date]] = {}
+        for year, entries in raw.items():
+            if not isinstance(year, str) or not year.isdigit():
+                raise ValueError(f"bad year key {year!r}")
+            if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
+                raise ValueError(f"{year}: must be a list of ISO date strings")
+            days = frozenset(date.fromisoformat(e) for e in entries)
+            if any(d.year != int(year) for d in days):
+                raise ValueError(f"{year}: contains a date from another year")
+            parsed[year] = days
+        return parsed
+    except (OSError, ValueError, TypeError) as exc:
         raise CalendarYearMissing(f"cannot read {_CONFIG_PATH}: {exc}") from exc
-    if entries is None:
+
+
+def _holidays(year: int) -> frozenset[date]:
+    days = _load_file().get(str(year))
+    if days is None:
         raise CalendarYearMissing(
             f"{_CONFIG_PATH.name} has no entry for {year}; add the {year} NYSE holidays"
         )
-    return frozenset(date.fromisoformat(s) for s in entries)
+    return days
 
 
 def now_et() -> datetime:
@@ -80,12 +98,15 @@ def is_trading_day(d: date) -> bool:
     return d.weekday() < 5 and d not in holidays
 
 
-def is_open(now: datetime, *, strict: bool = True) -> bool:
+def is_open(now: datetime, *, strict: bool = True, close_inclusive_minute: bool = False) -> bool:
     """True when the regular session is open at *now* (09:30 <= t < 16:00 ET).
 
     ``now`` must be timezone-aware; any zone is converted to ET.
-    ``strict=False`` turns a missing holiday year into a logged error plus the
-    weekday-only answer instead of raising.
+    ``strict=False`` turns a missing or malformed holiday file into a logged
+    error plus the weekday-only answer instead of raising.
+    ``close_inclusive_minute=True`` keeps the whole 16:00 minute open
+    (t < 16:01): the snapshot-staleness checks use it so the stricter
+    market-open threshold applies through 16:00:59.
     """
     et = _to_et(now)
     try:
@@ -95,7 +116,8 @@ def is_open(now: datetime, *, strict: bool = True) -> bool:
             raise
         logger.error("%s; falling back to weekday-only market hours", exc)
         trading = et.weekday() < 5
-    return trading and MARKET_OPEN <= et.time() < MARKET_CLOSE
+    close = _CLOSE_INCLUSIVE_MINUTE if close_inclusive_minute else MARKET_CLOSE
+    return trading and MARKET_OPEN <= et.time() < close
 
 
 def last_close(now: datetime) -> datetime:
@@ -115,17 +137,22 @@ def _to_et(now: datetime) -> datetime:
     return now.astimezone(ET)
 
 
+def _hm(mins: int) -> str:
+    return f"{mins // 60}h {mins % 60}m" if mins >= 60 else f"{mins}m"
+
+
 def _status(et: datetime) -> str:
     """Human-readable status line for the CLI."""
     if is_open(et):
-        mins = int((datetime.combine(et.date(), MARKET_CLOSE, tzinfo=ET) - et).total_seconds() // 60)
-        return f"OPEN ({mins // 60}h {mins % 60}m to close)"
+        mins = int((datetime.combine(et.date(), MARKET_CLOSE, tzinfo=ET) - et).total_seconds() / 60)
+        return f"OPEN ({_hm(mins)} to close)"
     if et.weekday() >= 5:
         return "CLOSED (weekend)"
     if not is_trading_day(et.date()):
         return "CLOSED (holiday)"
     if et.time() < MARKET_OPEN:
-        return "CLOSED (pre-market)"
+        mins = int((datetime.combine(et.date(), MARKET_OPEN, tzinfo=ET) - et).total_seconds() / 60)
+        return f"CLOSED (pre-market, {_hm(mins)} to open)"
     return "CLOSED (after hours)"
 
 
@@ -137,7 +164,7 @@ def main(argv: list[str] | None = None) -> None:
     et = now_et()
     print(f"Current time (ET): {et.strftime('%A %Y-%m-%d %H:%M:%S %Z')}")
     print(f"Market status: {_status(et)}")
-    print(f"is_open(): {is_open(et)}")
+    print(f"is_market_open(): {is_open(et)}")
     print(f"Last market close: {last_close(et).strftime('%Y-%m-%d %H:%M %Z')}")
 
 
