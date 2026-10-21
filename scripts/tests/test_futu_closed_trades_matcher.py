@@ -53,13 +53,15 @@ def test_partial_close_across_two_open_lots_unique_ids():
     assert sum(l.realized_pnl for l in lots) == Decimal("100")  # (110-100)*10
 
 
-def test_close_with_no_open_lot_warns_and_emits_nothing(caplog):
+def test_close_with_no_open_lot_logs_info_and_emits_nothing(caplog):
+    """Pre-inception opens (deal history starts 2024-01-01) are expected, not a defect."""
     import logging
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.DEBUG, logger="xenon.api.services.futu_closed_trades"):
         lots = match_closed_lots([_t("s1", "SELL", 5, 100, 1)])
     assert lots == []
-    assert any("no open lot" in r.message for r in caplog.records)
+    records = [r for r in caplog.records if "no open lot" in r.getMessage()]
+    assert records and all(r.levelno == logging.INFO for r in records)
 
 
 def test_unknown_side_skipped(caplog):
@@ -119,3 +121,4 @@ def test_multi_leg_close_shares_one_close_order_id():
     )
     assert {l.close_order_id for l in lots} == {"O-CLOSE"}
     assert {l.ticker for l in lots} == {"AAOI270115C200000", "AAOI270115C190000"}
+

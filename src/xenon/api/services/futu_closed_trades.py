@@ -64,8 +64,8 @@ def match_closed_lots(trades: list[dict]) -> list[ClosedLot]:
     `futu_close_id = close_deal_id:open_deal_id` — unique even when one close spans
     multiple open lots, and stable (not a positional index).
 
-    Closes against an empty book (pre-inception position) warn and emit nothing;
-    unknown sides warn and are skipped — preserving the NAV walk's observability.
+    Closes against an empty book (pre-inception position) log at INFO and emit
+    nothing; unknown sides warn and are skipped — preserving the NAV walk's observability.
     """
     trades = sorted(trades, key=lambda t: (t["filled_at"], str(t["futu_deal_id"])))
     longs: dict[str, deque] = defaultdict(deque)  # (qty, price, opened_at, open_deal_id)
@@ -121,7 +121,10 @@ def match_closed_lots(trades: list[dict]) -> list[ClosedLot]:
                     book[0] = (lot_qty - matched, lot_price, lot_when, open_deal_id)
                 remaining -= matched
             if remaining > 0:
-                logger.warning(
+                # Expected, not a defect: the stored deal history starts at the 2024-01-01
+                # inception while some positions opened earlier (or arrived via assignment,
+                # which has no deal). The rebuild re-runs on every sync, so WARNING was noise.
+                logger.info(
                     "close with no open lot: side=%s code=%s qty_unmatched=%s deal=%s (pre-inception?)",
                     side,
                     code,
