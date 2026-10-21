@@ -16,10 +16,11 @@ idempotency and the single owner.
 This is exactly the [In-process route bypass] regression class that has
 already burned the repo twice (#34 quote_token, #47 audit gating).
 
-This guard fails the build if any non-allowlisted file references the
+This guard fails the build if any non-allowlisted file imports the
 order-write modules, or if ANY file (server.py and pyproject.toml included)
 names the removed console scripts `xenon-ib-place-order` /
-`xenon-ib-order-manage`.
+`xenon-ib-order-manage`. Python files are parsed with `ast`, so multiline and
+relative imports are caught; other files are matched line by line.
 
 Reference: docs/reference/order-path-incident-history.md (Layer 2 guards).
 """
@@ -27,6 +28,7 @@ Reference: docs/reference/order-path-incident-history.md (Layer 2 guards).
 from __future__ import annotations
 
 import argparse
+import ast
 import re
 import sys
 from pathlib import Path
@@ -59,6 +61,41 @@ _IMPORT_PATTERNS = (
     re.compile(rf"^\s*from\s+xenon\.execution\s+import\b[^#\n]*\b{_MODULES}\b"),
     re.compile(rf"^\s*import\s+xenon\.execution\.{_MODULES}\b"),
 )
+
+_MODULE_NAMES = frozenset({"ib_place_order", "ib_order_manage"})
+_PACKAGE = "xenon.execution"
+
+
+def _python_import_linenos(source: str) -> list[int] | None:
+    """Line numbers of imports of the order-write modules, via `ast`.
+
+    Returns None when the source does not parse; the caller then falls back to
+    the line-by-line patterns so a syntax error can never hide an import.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+    linenos: list[int] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            hit = any(a.name.startswith(f"{_PACKAGE}.") and a.name.split(".")[2] in _MODULE_NAMES for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level == 0:
+                parts = module.split(".")
+                from_module = module.startswith(f"{_PACKAGE}.") and len(parts) > 2 and parts[2] in _MODULE_NAMES
+                from_package = module == _PACKAGE and any(a.name in _MODULE_NAMES for a in node.names)
+                hit = from_module or from_package
+            else:
+                # `from .ib_place_order import x` / `from . import ib_place_order`
+                hit = module.split(".")[0] in _MODULE_NAMES or any(a.name in _MODULE_NAMES for a in node.names)
+        else:
+            continue
+        if hit:
+            linenos.append(node.lineno)
+    return linenos
+
 
 # The removed console scripts: forbidden everywhere except this guard.
 _CLI_PATTERN = re.compile(r"\bxenon-ib-(?:place-order|order-manage)\b")
@@ -127,14 +164,21 @@ def main() -> int:
                 lines = file_path.read_text(encoding="utf-8").splitlines()
             except (OSError, UnicodeDecodeError):
                 continue
+            ast_linenos: set[int] | None = None
+            if not allowlisted and file_path.suffix == ".py":
+                found = _python_import_linenos("\n".join(lines))
+                ast_linenos = None if found is None else set(found)
             for lineno, line in enumerate(lines, start=1):
                 # Skip comment lines — Python `#`, JS/TS `//`, or YAML/TOML `#`.
                 stripped = line.lstrip()
                 if stripped.startswith(("#", "//")):
                     continue
-                if _CLI_PATTERN.search(line) or (
-                    not allowlisted and any(p.search(line) for p in _IMPORT_PATTERNS)
-                ):
+                if ast_linenos is not None:
+                    # Python file that parsed: imports come from the AST only.
+                    import_hit = lineno in ast_linenos
+                else:
+                    import_hit = not allowlisted and any(p.search(line) for p in _IMPORT_PATTERNS)
+                if _CLI_PATTERN.search(line) or import_hit:
                     violations.append((rel, lineno, line.strip()))
 
     if not violations:
