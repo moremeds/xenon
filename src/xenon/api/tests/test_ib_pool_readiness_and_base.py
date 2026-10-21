@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from xenon.api import ib_pool as ib_pool_mod
 from xenon.api.ib_pool import IBPool, check_client_id_base_mapping
 from xenon.clients.ib_client import READINESS_LOST, READINESS_READY, READINESS_UNKNOWN
+from xenon.api.routes import system as system_routes
 
 
 def _fake_client(connected: bool, readiness: str) -> MagicMock:
@@ -177,7 +178,7 @@ def test_health_exposes_broker_readiness(monkeypatch):
 
     pool = IBPool()
     pool._clients["orders"] = _fake_client(True, READINESS_LOST)
-    monkeypatch.setattr(server, "check_ib_gateway", fake_gateway)
+    monkeypatch.setattr(system_routes, "check_ib_gateway", fake_gateway)
     monkeypatch.setattr(server, "ib_pool", pool)
 
     body = TestClient(server.app).get("/health").json()

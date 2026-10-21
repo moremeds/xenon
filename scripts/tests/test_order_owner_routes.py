@@ -30,6 +30,7 @@ from scripts.tests.test_gate4_route import (  # noqa: F401 — fixtures
 )
 from xenon.api import server as server_mod
 from xenon.api.services import order_entry
+from xenon.api.routes import system as system_routes
 
 pytestmark = pytest.mark.committed_db
 
@@ -211,7 +212,7 @@ def test_halted_owner_refuses_cancel_with_orders_halted(client, broker_calls, fr
     async def _gw():
         return {"port_listening": True}
 
-    monkeypatch.setattr(server_mod, "check_ib_gateway", _gw)
+    monkeypatch.setattr(system_routes, "check_ib_gateway", _gw)
     _placed(client)
     broker_calls.clear()
     server_mod.order_owner._latch_halt("test")

@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from xenon.api.services import flex_token
+from xenon.api.routes import system as system_routes
 
 NOW = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
 
@@ -67,7 +68,7 @@ def test_health_and_operator_expose_flex_token(monkeypatch, tmp_path, path):
     async def fake_gateway():
         return {"port_listening": True}
 
-    monkeypatch.setattr(server, "check_ib_gateway", fake_gateway)
+    monkeypatch.setattr(system_routes, "check_ib_gateway", fake_gateway)
     monkeypatch.setattr(
         flex_token, "CONFIG_PATH", _write(tmp_path, expires_at="2099-01-01T00:00:00+00:00")
     )
@@ -98,7 +99,7 @@ def test_malformed_config_keeps_health_up(monkeypatch, tmp_path):
     async def fake_gateway():
         return {"port_listening": True}
 
-    monkeypatch.setattr(server, "check_ib_gateway", fake_gateway)
+    monkeypatch.setattr(system_routes, "check_ib_gateway", fake_gateway)
     monkeypatch.setattr(
         flex_token,
         "CONFIG_PATH",

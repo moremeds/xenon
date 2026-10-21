@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import insert
+from xenon.api.routes import system as system_routes
 
 
 @pytest.fixture
@@ -16,7 +17,7 @@ def client(monkeypatch):
     async def fake_gateway():
         return {"port_listening": True}
 
-    monkeypatch.setattr(server, "check_ib_gateway", fake_gateway)
+    monkeypatch.setattr(system_routes, "check_ib_gateway", fake_gateway)
     return TestClient(server.app)
 
 

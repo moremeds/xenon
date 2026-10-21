@@ -151,7 +151,7 @@ def test_snapshot_resurrect_is_noop_when_row_moved_on(monkeypatch):
 
 
 def test_health_counts_stale_pending_without_changing_it():
-    from xenon.api.server import _order_submissions_health
+    from xenon.api.routes.system import _order_submissions_health
     from xenon.api.services import ib_activity_mirror
     from xenon.execution.account_scope import AccountScope
 
