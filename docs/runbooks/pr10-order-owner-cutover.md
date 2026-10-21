@@ -58,10 +58,9 @@ Zones inside a block (absolute id = base + offset):
 
 ## 3. Deploy
 
-Watchtower replaces `api` when the new `:latest` image appears. The steps are the same for a manual `docker-compose pull api && docker-compose up -d api`.
+Use the controlled cutover in `docs/runbooks/remote-deploy.md` § Standard release flow: stop Watchtower before the tag push, pull after `release.yml` finishes, `docker-compose stop -t 60 api realtime`, run the stale-socket check (§ 4) **before** the new api connects, then `docker-compose up -d --pull never`. Left running, Watchtower would replace `api` on its own when the new `:latest` image appears, with no socket check in between.
 
-1. When the old api has stopped, check the gateway for stale sockets (§ 4) **before** the new api connects. With Watchtower the gap is short. To control it, stop `api` by hand first (`docker-compose stop api`, which waits 60s), check, then `docker-compose up -d api`.
-2. Wait for `healthy`, then run the post-deploy checks.
+1. Wait for `healthy`, then run the post-deploy checks (§ 5).
 
 ## 4. Stale gateway sockets (colima usernet)
 
