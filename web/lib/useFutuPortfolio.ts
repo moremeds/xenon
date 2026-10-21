@@ -68,6 +68,9 @@ export function useFutuPortfolio(enabled: boolean) {
   const initialLoadStartedRef = useRef(false);
   // `fetched_at` of the newest snapshot we hold; drives the first-sync delay.
   const latestFetchedAtRef = useRef<string | null>(null);
+  // True only while mounted AND enabled. Read by scheduleNext so an in-flight
+  // POST that settles after disable/unmount cannot rearm the loop.
+  const activeRef = useRef(false);
   const doSyncRef = useRef<() => Promise<void>>(async () => {});
 
   const applyResponse = useCallback((body: FutuPortfolioResponse) => {
@@ -118,13 +121,13 @@ export function useFutuPortfolio(enabled: boolean) {
 
   const scheduleNext = useCallback(
     (delay: number) => {
-      if (!enabled) return;
+      if (!activeRef.current) return;
       if (intervalRef.current) clearTimeout(intervalRef.current);
       intervalRef.current = setTimeout(() => {
         void doSyncRef.current();
       }, delay);
     },
-    [enabled],
+    [],
   );
 
   const doSync = useCallback(async () => {
@@ -165,6 +168,20 @@ export function useFutuPortfolio(enabled: boolean) {
     void doSync();
   }, [doSync]);
 
+  // Lifecycle gate, declared before the effects that schedule. Cleanup runs on
+  // disable and unmount and drops any pending timer, whether or not the
+  // initial read has finished.
+  useEffect(() => {
+    activeRef.current = enabled;
+    return () => {
+      activeRef.current = false;
+      if (intervalRef.current) {
+        clearTimeout(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+  }, [enabled]);
+
   // Initial load: one fast GET from cache. Deliberately NOT cancelled when
   // `enabled` changes (useMarketHours starts CLOSED and flips after its own
   // effect); the arming effect below decides when syncing starts.
@@ -185,12 +202,6 @@ export function useFutuPortfolio(enabled: boolean) {
         ? STALE_FIRST_SYNC_DELAY_MS
         : BASE_INTERVAL_MS,
     );
-    return () => {
-      if (intervalRef.current) {
-        clearTimeout(intervalRef.current);
-        intervalRef.current = null;
-      }
-    };
   }, [enabled, initialReadDone, scheduleNext]);
 
   // Reset backoff & force sync when tab becomes visible again.

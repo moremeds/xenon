@@ -374,3 +374,137 @@ describe("useFutuPortfolio arming order (enabled flips after mount)", () => {
     expect(calls).toEqual(["GET"]);
   });
 });
+
+describe("useFutuPortfolio lifecycle (no work after disable/unmount)", () => {
+  const NEVER = {
+    ok: false,
+    code: "never_synced",
+    positions: [],
+    count: 0,
+    account_summary: null,
+    fetched_at: null,
+    data_as_of: null,
+  };
+  const reply = () => new Response(JSON.stringify(NEVER));
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  async function flush(ms = 0) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  function gatedFirstPost(failFirst = false) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const state = { posts: 0 };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_u: unknown, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          state.posts++;
+          if (state.posts === 1) {
+            await gate;
+            if (failFirst) throw new Error("boom");
+          }
+        }
+        return reply();
+      }),
+    );
+    return { state, release: () => release() };
+  }
+
+  it("does not POST after disable while a POST is in flight", async () => {
+    const { state, release } = gatedFirstPost();
+    const { rerender } = renderHook(({ on }) => useFutuPortfolio(on), {
+      initialProps: { on: true },
+    });
+    await flush();
+    await flush(500);
+    expect(state.posts).toBe(1);
+    rerender({ on: false });
+    release();
+    await flush();
+    await flush(30_000);
+    expect(state.posts).toBe(1);
+  });
+
+  it("does not rearm after unmount while a POST is in flight", async () => {
+    const { state, release } = gatedFirstPost();
+    const { unmount } = renderHook(() => useFutuPortfolio(true));
+    await flush();
+    await flush(500);
+    unmount();
+    release();
+    await flush();
+    await flush(60_000);
+    expect(state.posts).toBe(1);
+  });
+
+  it("does not back off and retry after unmount when the in-flight POST fails", async () => {
+    const { state, release } = gatedFirstPost(true);
+    const { unmount } = renderHook(() => useFutuPortfolio(true));
+    await flush();
+    await flush(500);
+    unmount();
+    release();
+    await flush();
+    await flush(600_000);
+    expect(state.posts).toBe(1);
+  });
+
+  it("cleans a visibility timer on unmount before the GET settles", async () => {
+    let posts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_u: unknown, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          posts++;
+          return reply();
+        }
+        return new Promise<Response>(() => {});
+      }),
+    );
+    const { unmount } = renderHook(() => useFutuPortfolio(true));
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "visible",
+    });
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    unmount();
+    await flush(500);
+    expect(posts).toBe(0);
+  });
+
+  it("drops a visibility timer when disabled before the GET settles", async () => {
+    let posts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_u: unknown, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          posts++;
+          return reply();
+        }
+        return new Promise<Response>(() => {});
+      }),
+    );
+    const { rerender } = renderHook(({ on }) => useFutuPortfolio(on), {
+      initialProps: { on: true },
+    });
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    rerender({ on: false });
+    await flush(1_000);
+    expect(posts).toBe(0);
+  });
+});
