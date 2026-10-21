@@ -234,11 +234,11 @@ def get_broker_scope(request: Request, broker: str | None = None) -> AccountScop
     # matched account only if the client is ALREADY connected; otherwise serve the
     # last-synced scope from Postgres (DB-first). The connect happens on the write
     # path (orders_refresh / blotter sync), bounded + off the event loop.
-    # Importing here avoids a circular import with server.py.
-    from xenon.api import server as _server
+    # Importing here avoids a circular import with server.py / routes.
+    from xenon.api.routes import futu as futu_routes
     from xenon.execution.account_scope import env_from_trd_env
 
-    client = _server._get_futu_client()
+    client = futu_routes._get_futu_client()
     if client.is_connected():
         trd_env = client.trd_env_of_matched_account()
         acc_id = getattr(client, "_acc_id", None)

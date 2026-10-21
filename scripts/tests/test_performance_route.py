@@ -20,15 +20,16 @@ from fastapi.testclient import TestClient  # noqa: E402
 from xenon.api import server  # noqa: E402
 from xenon.api.services.futu_nav_persistence import NavAccountEnvConflict  # noqa: E402
 from xenon.execution.account_scope import AccountScope  # noqa: E402
+from xenon.api.routes import futu as futu_routes
 
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch) -> TestClient:
     """TestClient with a clean DATA_DIR + reset Futu singleton."""
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(server, "_futu_last_sync_monotonic", None, raising=False)
-    monkeypatch.setattr(server, "_futu_client", None, raising=False)
-    monkeypatch.setattr(server, "_futu_lock", None, raising=False)
+    monkeypatch.setattr(futu_routes, "_futu_last_sync_monotonic", None)
+    monkeypatch.setattr(futu_routes, "_futu_client", None)
+    monkeypatch.setattr(futu_routes, "_futu_lock", None)
     # Provide a sentinel db_engine so the route's None-check passes — we
     # patch cached_compute below, so the engine value is never used.
     server.app.state.db_engine = object()
@@ -148,7 +149,7 @@ def test_performance_futu_when_opend_unreachable_returns_503(client: TestClient)
     fake_client.is_connected.return_value = False
     fake_client.connect.side_effect = FutuConnectionError("no opend")
     with (
-        patch("xenon.api.server._get_futu_client", return_value=fake_client),
+        patch("xenon.api.routes.futu._get_futu_client", return_value=fake_client),
         # No synced Futu data — isolate from whatever the dev DB happens to hold.
         patch("xenon.api.guards._futu_scope_from_db", return_value=None),
     ):
@@ -173,7 +174,7 @@ def test_performance_futu_resolves_scope_from_matched_account(client: TestClient
         return {"status": "ok", "summary": {}, "series": [], "warnings": [], "scope": scope.as_dict()}
 
     with (
-        patch("xenon.api.server._get_futu_client", return_value=fake_client),
+        patch("xenon.api.routes.futu._get_futu_client", return_value=fake_client),
         patch("xenon.api.routes.performance.cached_compute", new=_fake),
     ):
         resp = client.get("/performance?broker=FUTU")
@@ -196,7 +197,7 @@ def test_performance_futu_simulate_maps_to_paper(client: TestClient) -> None:
         return {"status": "ok", "summary": {}, "series": [], "warnings": [], "scope": scope.as_dict()}
 
     with (
-        patch("xenon.api.server._get_futu_client", return_value=fake_client),
+        patch("xenon.api.routes.futu._get_futu_client", return_value=fake_client),
         patch("xenon.api.routes.performance.cached_compute", new=_fake),
     ):
         resp = client.get("/performance?broker=FUTU")
@@ -229,7 +230,7 @@ def test_futu_sync_calls_persist_futu_nav(client: TestClient) -> None:
 
     persist_mock = AsyncMock()
     with (
-        patch("xenon.api.server._get_futu_client", return_value=fake_client),
+        patch("xenon.api.routes.futu._get_futu_client", return_value=fake_client),
         patch("xenon.api.services.futu_nav_persistence.persist_futu_nav", new=persist_mock),
     ):
         resp = client.post("/futu/sync")
@@ -254,7 +255,7 @@ def test_futu_sync_persist_conflict_returns_409(client: TestClient) -> None:
     scope = AccountScope("FUTU", "live", "12345")
     conflict = NavAccountEnvConflict(scope, "paper", date(2026, 6, 1))
     with (
-        patch("xenon.api.server._get_futu_client", return_value=fake_client),
+        patch("xenon.api.routes.futu._get_futu_client", return_value=fake_client),
         patch(
             "xenon.api.services.futu_nav_persistence.persist_futu_nav",
             new=AsyncMock(side_effect=conflict),
@@ -280,7 +281,7 @@ def test_futu_sync_persist_other_failure_still_returns_200(client: TestClient) -
         "warnings": [],
     }
     with (
-        patch("xenon.api.server._get_futu_client", return_value=fake_client),
+        patch("xenon.api.routes.futu._get_futu_client", return_value=fake_client),
         patch(
             "xenon.api.services.futu_nav_persistence.persist_futu_nav",
             new=AsyncMock(side_effect=RuntimeError("transient db hiccup")),

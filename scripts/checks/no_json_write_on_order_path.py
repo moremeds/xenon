@@ -8,7 +8,7 @@ path; this guard blocks NEW JSON writes. Together they enforce the
 "everything writes to DB first; website reads from DB" invariant.
 
 Audit (2026-06-02, this guard's initial cut)
-- src/xenon/api/server.py — writes `data/futu_portfolio{,.error}.json`
+- src/xenon/api/routes/futu.py — writes `data/futu_portfolio{,.error}.json`
   (Futu sidecar; migration to PG in progress in a separate change)
 - src/xenon/execution/futu_sync.py — writes `data/futu_portfolio.json`
   (same)
@@ -60,7 +60,7 @@ _ALLOWLIST: frozenset[str] = frozenset(
     {
         # Futu sidecar — separate Futu→PG migration in flight (see CLAUDE.md
         # memory "Postgres read-side gap"). When that lands, drop these.
-        "src/xenon/api/server.py",
+        "src/xenon/api/routes/futu.py",
         "src/xenon/execution/futu_sync.py",
         # IB reconcile CLI artifact — `data/reconciliation.json` is a
         # report, not runtime state. Manual CLI invocation only.

@@ -22,6 +22,7 @@ import pytest
 os.environ["XENON_API_TEST_MODE"] = "1"
 
 from fastapi.testclient import TestClient  # noqa: E402
+from xenon.api.routes import futu as futu_routes
 
 
 @pytest.fixture()
@@ -31,9 +32,9 @@ def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
     # Reset module-global sync state between tests.
-    monkeypatch.setattr(server, "_futu_last_sync_monotonic", None, raising=False)
-    monkeypatch.setattr(server, "_futu_client", None, raising=False)
-    monkeypatch.setattr(server, "_futu_lock", None, raising=False)
+    monkeypatch.setattr(futu_routes, "_futu_last_sync_monotonic", None)
+    monkeypatch.setattr(futu_routes, "_futu_client", None)
+    monkeypatch.setattr(futu_routes, "_futu_lock", None)
     return tmp_path
 
 
@@ -128,7 +129,6 @@ def test_futu_sync_cooldown_sentinel_first_call_proceeds(
 ) -> None:
     """With _futu_last_sync_monotonic=None, first call MUST hit the client
     even if a cache file exists. Codex #3: 0.0 init would misfire here."""
-    from xenon.api import server  # type: ignore
 
     # Cache exists but should NOT be served — first call must fetch fresh.
     stale_cache = {
@@ -154,8 +154,8 @@ def test_futu_sync_cooldown_sentinel_first_call_proceeds(
     mock_client.is_connected.return_value = True
     mock_client.fetch_portfolio.return_value = fresh_result
 
-    monkeypatch.setattr(server, "_get_futu_client", lambda: mock_client)
-    monkeypatch.setattr(server, "_futu_last_sync_monotonic", None, raising=False)
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: mock_client)
+    monkeypatch.setattr(futu_routes, "_futu_last_sync_monotonic", None)
 
     resp = client.post("/futu/sync")
     assert resp.status_code == 200
@@ -174,7 +174,6 @@ def test_futu_sync_cooldown_sentinel_first_call_proceeds(
 def test_maybe_preserve_partial_failure_blocks_degraded_overwrite(
     isolated_data_dir: Path,
 ) -> None:
-    from xenon.api import server  # type: ignore
 
     # Existing snapshot: 27 positions, clean
     good_cache = {
@@ -193,7 +192,7 @@ def test_maybe_preserve_partial_failure_blocks_degraded_overwrite(
         "warnings": ["row US.ZZZ: parse error"],
     }
 
-    preserved = server._maybe_preserve_partial_failure(degraded)
+    preserved = futu_routes._maybe_preserve_partial_failure(degraded)
 
     # Previous cache returned, error sidecar written
     assert preserved is not None
@@ -210,13 +209,12 @@ def test_maybe_preserve_partial_failure_allows_clean_overwrite(
 ) -> None:
     """If the new snapshot has no warnings, let it overwrite even if count drops
     (e.g. user legitimately closed positions)."""
-    from xenon.api import server  # type: ignore
 
     good_cache = {"count": 27, "positions": [], "warnings": []}
     (isolated_data_dir / "futu_portfolio.json").write_text(json.dumps(good_cache))
 
     clean_new = {"count": 5, "positions": [], "warnings": []}
-    preserved = server._maybe_preserve_partial_failure(clean_new)
+    preserved = futu_routes._maybe_preserve_partial_failure(clean_new)
 
     assert preserved is None  # caller should proceed to normal save
 
@@ -225,7 +223,6 @@ def test_maybe_preserve_partial_failure_allows_larger_new_snapshot(
     isolated_data_dir: Path,
 ) -> None:
     """If warnings exist but new count >= prev count, allow overwrite."""
-    from xenon.api import server  # type: ignore
 
     good_cache = {"count": 10, "positions": [], "warnings": []}
     (isolated_data_dir / "futu_portfolio.json").write_text(json.dumps(good_cache))
@@ -235,6 +232,6 @@ def test_maybe_preserve_partial_failure_allows_larger_new_snapshot(
         "positions": [],
         "warnings": ["one bad row skipped"],
     }
-    preserved = server._maybe_preserve_partial_failure(new_with_warnings_but_same_count)
+    preserved = futu_routes._maybe_preserve_partial_failure(new_with_warnings_but_same_count)
 
     assert preserved is None
