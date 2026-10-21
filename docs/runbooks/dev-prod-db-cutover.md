@@ -161,11 +161,27 @@ source checkout. Edit `/opt/xenon/.env` and replace the `DATABASE_URL` line, and
 
 ```diff
 - DATABASE_URL=postgresql+asyncpg://xenon_app:xenon_dev@<lan-host>:5432/core_dev
-+ DATABASE_URL=postgresql+asyncpg://xenon_prod:<prod-pw>@localhost:5432/core_dev
++ DATABASE_URL=postgresql+asyncpg://xenon_prod:<prod-pw>@host.docker.internal:5432/core_dev
 ```
 
 Leave `DATABASE_URL_TEST` and `DATABASE_URL_PAPER` empty/commented in
 the prod `.env` — the Docker stack does not run paper mode.
+
+Before the restart (and before `stop`), check the URL the containers will really use. Postgres is
+host-native; containers reach it as `host.docker.internal` (`localhost` inside a container is the
+container itself). One-off containers read the edited env files; each line prints user, host and
+database only, never the password, and must print `xenon_prod host.docker.internal core_dev`.
+`alembic current` then connects with the migrator's URL and must print a revision, not an error:
+
+```bash
+export PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon
+CHK='import os,urllib.parse as u; p=u.urlsplit(os.environ["DATABASE_URL"]); print(p.username, p.hostname, p.path.lstrip("/"))'
+docker-compose run --rm --no-deps --pull never api python -c "$CHK"
+docker-compose --profile migrate run --rm --pull never migrator python -c "$CHK"
+docker-compose --profile migrate run --rm --pull never migrator alembic current
+```
+
+If any line differs, fix the env files and do not stop the api.
 
 Recreate the Docker stack so the new credentials take effect, with the controlled
 sequence from `docs/runbooks/remote-deploy.md` § Standard release flow (the mini uses the
@@ -181,8 +197,8 @@ docker-compose up -d --pull never api web realtime
 curl -s http://localhost:8321/health | jq '.ib_gateway, .ib_pool, .trading_mode'
 ```
 
-Before the restart, read the effective settings inside the container as in `deploy/README.md`
-§ Operator rollout checklist, section E (names and booleans only). Resume Watchtower only
+For the job settings, also run
+`deploy/README.md` § Operator rollout checklist, section E. Resume Watchtower only
 through `docs/runbooks/remote-deploy.md` § Standard release flow, step 10 (registry `:latest`
 must be the running release); on a mismatch or `RESTORE FAILED`, keep it stopped.
 
