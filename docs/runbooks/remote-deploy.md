@@ -70,8 +70,10 @@ container via `environment:`, and `env_file: ./.env` gives it to api/realtime/mi
 | `XENON_QUERY_API_KEY`      | Read-only key for external scripts (send as `X-API-Key`; GET-only query paths). MUST differ from the internal token — the api refuses to boot if equal.                       |
 
 Generate two distinct values with `openssl rand -hex 32`. `XENON_AUTH_ALLOW_DEV_OPEN`
-is NEVER set in prod. After editing, `docker-compose up -d` to recreate containers
-(env_file changes need a recreate, not a restart). Confirm the api startup log shows
+is NEVER set in prod. After editing, recreate the containers (env_file changes need a recreate,
+not a restart) with the controlled sequence: pause Watchtower, `docker-compose stop -t 60 api realtime`,
+the socket check (§ Standard release flow, step 7), then `docker-compose up -d --pull never api web realtime`
+and step 10 for Watchtower. Confirm the api startup log shows
 `auth: ENFORCED`.
 
 ## First-time bootstrap (one-shot)
@@ -198,7 +200,7 @@ plugin). Every remote command needs `PATH=/opt/homebrew/bin:$PATH`.
    `:latest` pull could be a different release. `VER` is the version without the `v`; `REV` is the
    commit from step 4. Add `migrator` to the list only when the release carries an Alembic migration.
    Each image must report `VER REV` (its `org.opencontainers.image.version` and `.revision` labels);
-   the loop stops on the first mismatch:
+   the loop stops on the first failed pull, label mismatch or tag. Continue only when every image printed `ok`:
 
    ```bash
    ssh moremeds@100.66.147.98 'VER=X.Y.Z REV=<full sha> PATH=/opt/homebrew/bin:$PATH bash -s' <<'EOF'
@@ -207,7 +209,8 @@ plugin). Every remote command needs `PATH=/opt/homebrew/bin:$PATH`.
      docker pull "$img:$VER" >/dev/null || { echo "PULL FAILED $s"; exit 1; }
      got=$(docker image inspect "$img:$VER" --format '{{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}}')
      [ "$got" = "$VER $REV" ] || { echo "MISMATCH $s: $got"; exit 1; }
-     docker tag "$img:$VER" "$img:latest" && echo "ok $s $got"
+     docker tag "$img:$VER" "$img:latest" || { echo "TAG FAILED $s"; exit 1; }
+     echo "ok $s $got"
    done
    EOF
    ```
@@ -230,11 +233,11 @@ plugin). Every remote command needs `PATH=/opt/homebrew/bin:$PATH`.
 
 8. **Start the stack on the aliased images.** If step 1 staged a new compose file, move it into place
    first: `cd /opt/xenon && mv compose.new.yml compose.yml` (the backup from section A step 4 stays).
-   `--pull never` keeps the images from step 5. `up -d` also recreates the stopped Watchtower
-   from the compose file:
+   `--pull never` keeps the images from step 5. Name the app services: a bare `up -d` also starts
+   Watchtower, which would replace the aliased images with whatever registry `:latest` is (step 10):
 
    ```bash
-   ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && docker-compose up -d --pull never'
+   ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && docker-compose up -d --pull never api web realtime'
    ```
 
    A transient `[health] realtime /status unreachable` traceback in the api log right after
@@ -250,7 +253,7 @@ plugin). Every remote command needs `PATH=/opt/homebrew/bin:$PATH`.
    ```
 
    Expected:
-   - `docker-compose ps` → `api` and `web` `Up (healthy)`, `realtime` and `watchtower` `Up`.
+   - `docker-compose ps` → `api` and `web` `Up (healthy)`, `realtime` `Up`; `watchtower` still stopped until step 10.
    - `/health` → 200 with valid JSON:
      - `status` is `ok` (not `orders_halted`).
      - `ib_pool.sync`, `ib_pool.orders`, `ib_pool.data` each `connected: true`
@@ -259,6 +262,30 @@ plugin). Every remote command needs `PATH=/opt/homebrew/bin:$PATH`.
      - `ib_gateway.port_listening: true` only when the configured Gateway
        (`IB_GATEWAY_HOST` plus the port derived from `XENON_TRADING_MODE`) is reachable.
    - `/` → 200.
+
+10. **Resume Watchtower only when registry `:latest` is this release.** Watchtower deploys whatever
+    registry `:latest` points at; `--pull never` does not constrain it. For a prerelease (no
+    `promote-latest`) or when a newer release moved `:latest`, the registry differs from the
+    selected release. Pulling `:latest` only moves the local alias; running containers keep their image.
+    Do not push another release tag while a cutover is in progress.
+
+    ```bash
+    ssh moremeds@100.66.147.98 'VER=X.Y.Z REV=<full sha> PATH=/opt/homebrew/bin:$PATH bash -s' <<'EOF'
+    for s in api web realtime; do
+      img=ghcr.io/moremeds/xenon-$s
+      docker pull "$img:latest" >/dev/null || { echo "PULL FAILED $s"; exit 1; }
+      got=$(docker image inspect "$img:latest" --format '{{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}}')
+      if [ "$got" != "$VER $REV" ]; then
+        docker tag "$img:$VER" "$img:latest"
+        echo "KEEP WATCHTOWER STOPPED: registry :latest of $s is $got"; exit 1
+      fi
+    done
+    cd /opt/xenon && docker-compose up -d --pull never watchtower && echo "watchtower resumed"
+    EOF
+    ```
+
+    If it prints `KEEP WATCHTOWER STOPPED`, leave Watchtower stopped (the local alias is restored to
+    `:VER`) until a stable release is promoted to `:latest`, then repeat this step.
 
    The full post-deploy checks are in `docs/runbooks/pr10-order-owner-cutover.md` § 5.
 
