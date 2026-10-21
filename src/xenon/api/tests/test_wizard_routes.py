@@ -1168,6 +1168,115 @@ def test_protect_cancelled_without_perm_id_is_refused(monkeypatch, client, fille
     _assert_broker_reached_refusal(client, filled_session, accepted, protect_owner, "CANCELLED")
 
 
+# --- explicit IB reject that carries IB ids (Astra R4 on PR #229) ----------
+# Real settlement: only the broker core's return value is faked; the ids
+# reach the row through order_entry._place_result, never seeded in the DB.
+
+
+def _ib_reject(ids: dict):
+    def core(ib_client, params):
+        ib_client.place_order("tp-contract", "tp-order")
+        return {
+            "status": "error", "outcome": "rejected", "code": 201, "message": "IB error 201: rejected",
+            "amend_outcome": "rejected", "filled": False, "fillCount": 0, **ids,
+        }
+
+    return core
+
+
+def _install_recording_accepted(monkeypatch) -> list:
+    from scripts.tests.order_owner_fakes import install_cores
+
+    accepted: list[dict] = []
+
+    def core(ib_client, params):
+        accepted.append(params)
+        return _accepted(ib_client, params)
+
+    install_cores(monkeypatch, place=core)
+    return accepted
+
+
+def test_protect_immediate_ib_reject_with_ids_keeps_claim_and_retry_is_refused(
+    monkeypatch, client, filled_session, protect_owner
+):
+    from scripts.tests.order_owner_fakes import install_cores
+
+    _real_place_path(monkeypatch)
+    install_cores(monkeypatch, place=_ib_reject({"orderId": 9301, "permId": 9302}))
+
+    resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
+    assert (resp.status_code, resp.json()["reason_code"]) == (502, "IB_REJECT"), resp.text
+    assert _session_state(filled_session) == "PROTECTION_PENDING"  # IB had it: claim kept
+    [row] = _tp_rows(filled_session)
+    assert (row["state"], row["ib_order_id"], row["perm_id"]) == ("REJECTED", "9301", "9302")
+
+    accepted = _install_recording_accepted(monkeypatch)
+    again = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+    assert (again.status_code, again.json()["reason_code"]) == (409, "PROTECT_TP_PARTIAL"), again.text
+    assert _sends(protect_owner) == 1 and accepted == []
+
+
+def test_protect_ib_reject_with_ids_settled_after_deadline_retry_is_refused(
+    monkeypatch, client, filled_session, protect_owner
+):
+    import threading
+    import time
+
+    from scripts.tests.order_owner_fakes import install_cores
+    from xenon.api.services import order_entry
+
+    _real_place_path(monkeypatch)
+    release = threading.Event()
+    reject = _ib_reject({"orderId": 9311, "permId": 9312})
+
+    def late_core(ib_client, params):
+        release.wait(5)
+        return reject(ib_client, params)
+
+    install_cores(monkeypatch, place=late_core)
+    monkeypatch.setattr(order_entry, "_PLACE_TIMEOUT_S", 0.3)
+
+    resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+    assert (resp.status_code, resp.json()["reason_code"]) == (502, "PLACE_OUTCOME_UNKNOWN"), resp.text
+    release.set()
+    for _ in range(60):
+        if _tp_rows(filled_session)[0]["state"] == "REJECTED":
+            break
+        time.sleep(0.05)
+    [row] = _tp_rows(filled_session)
+    assert (row["state"], row["ib_order_id"], row["perm_id"]) == ("REJECTED", "9311", "9312")
+    assert _session_state(filled_session) == "PROTECTION_PENDING"
+
+    accepted = _install_recording_accepted(monkeypatch)
+    again = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+    assert (again.status_code, again.json()["reason_code"]) == (409, "PROTECT_TP_PARTIAL"), again.text
+    assert _sends(protect_owner) == 1 and accepted == []
+
+
+def test_protect_ib_reject_without_ids_releases_and_retry_places_once(
+    monkeypatch, client, filled_session, protect_owner
+):
+    from scripts.tests.order_owner_fakes import install_cores
+
+    _real_place_path(monkeypatch)
+    install_cores(monkeypatch, place=_ib_reject({"orderId": 0, "permId": 0}))
+
+    resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
+    assert (resp.status_code, resp.json()["reason_code"]) == (502, "IB_REJECT"), resp.text
+    assert _session_state(filled_session) == "FILLED"  # never at IB: released
+    [row] = _tp_rows(filled_session)
+    assert (row["state"], row["ib_order_id"], row["perm_id"]) == ("REJECTED", None, None)
+
+    accepted = _install_recording_accepted(monkeypatch)
+    again = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+    assert again.status_code == 200, again.text
+    assert _sends(protect_owner) == 2
+    assert len(accepted) == 1 and accepted[0]["quantity"] == 1  # entry quantity
+
+
 # --- sessions claimed by an older build (no stored attempt) -----------------
 
 

@@ -507,3 +507,28 @@ async def test_dead_tp_never_at_ib_places_one_new_tp_at_entry_quantity(place, mo
     assert again["state"] == "PROTECTED"
     assert len(place.calls) == 2
     assert place.calls[1]["quantity"] == place.calls[0]["quantity"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("row_kind", ["rejected-with-ids", "lookup-raises"])
+async def test_immediate_ib_reject_keeps_claim_unless_row_proves_never_placed(place, monkeypatch, row_kind):
+    """A 502 IB_REJECT alone does not release: the stored row must prove IB
+    never had the TP (no row, or FAILED/REJECTED without ids)."""
+    from types import SimpleNamespace
+
+    from xenon.execution import orders_store
+
+    def _lookup(*_a, **_k):
+        if row_kind == "lookup-raises":
+            raise RuntimeError("db down")
+        return SimpleNamespace(submission_id="sub-1", state="REJECTED", ib_order_id="7", perm_id="77", quantity=1)
+
+    monkeypatch.setattr(orders_store, "lookup_by_attempt", _lookup)
+    sid = _init_session(state="FILLED")
+    place.replies[:] = [JSONResponse(status_code=502, content={"reason_code": "IB_REJECT"})]
+
+    result = await _protect(sid)
+
+    assert result.status_code == 502
+    assert _state(sid) == "PROTECTION_PENDING"
+    assert len(place.calls) == 1

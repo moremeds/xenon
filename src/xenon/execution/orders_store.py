@@ -1179,9 +1179,16 @@ def mark_terminal(
     filled_qty: int | None,
     avg_fill_price: Decimal | None,
     expected_states: tuple[str, ...],
+    ib_order_id: str | None = None,
+    perm_id: str | None = None,
 ) -> int:
     """Transition a submission to a terminal state. Returns the affected
     rowcount.
+
+    ``ib_order_id`` / ``perm_id``: IB ids a terminal result carried (an
+    explicit reject after the send). Stored when non-empty and not "0", so
+    the row shows the order may have reached IB (gate4._may_be_at_ib);
+    None keeps the stored ids.
 
     ``expected_states`` (required) is the optimistic-concurrency guard: the
     UPDATE only applies if the row is still in one of those states. A
@@ -1201,6 +1208,9 @@ def mark_terminal(
         # filled_qty=None keeps the stored fill state: a cancel releases only
         # the unfilled remainder and must never erase executed quantity.
         values.update(filled_qty=filled_qty, avg_fill_price=avg_fill_price)
+    for column, value in (("ib_order_id", ib_order_id), ("perm_id", perm_id)):
+        if value is not None and str(value).strip() not in ("", "0"):
+            values[column] = str(value).strip()
     with engine.begin() as conn:
         result = conn.execute(stmt.values(**values))
     if not result.rowcount:

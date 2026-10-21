@@ -344,6 +344,9 @@ def test_real_place_core_rejection_stays_terminal(client, fresh_quote, no_spawn_
     assert (resp.status_code, resp.json()["reason_code"]) == (502, "IB_REJECT"), resp.text
     row = _attempt("t4-rej")
     assert (row["state"], row["reason_code"]) == ("REJECTED", "IB_REJECT")
+    # The order reached IB (orderId 7 = the rejected reqId): the id is kept on
+    # the row so Gate 4 / wizard protect see it as possibly broker-held.
+    assert row["ib_order_id"] == "7"
 
 
 def test_place_sent_without_ack_is_unknown(client, fresh_quote, no_spawn_no_connect, monkeypatch):

@@ -365,8 +365,9 @@ async def _protect(
     if isinstance(result, Response):
         reason_code = _response_reason_code(result)
         detail = {"reason_code": reason_code, "status": result.status_code, "client_attempt_id": cid}
-        if not _proves_tp_not_at_ib(result.status_code, reason_code):
-            # PLACE_OUTCOME_UNKNOWN or anything unexpected: IB may hold the TP.
+        if not (_proves_tp_not_at_ib(result.status_code, reason_code) and _attempt_never_placed(cid)):
+            # PLACE_OUTCOME_UNKNOWN, anything unexpected, or a reject whose
+            # row carries IB ids (it reached IB): keep the claim.
             _record_event(session_id, "PROTECTION_PENDING", detail)
             return result
         _transition(session_id, "PROTECTION_PENDING", "FILLED")
@@ -434,6 +435,24 @@ def _resume_pending(session_id: str, *, requested_target: Decimal) -> dict[str, 
         session_id, "PROTECTION_PENDING", {"reason": "TP_UNRESOLVED", "client_attempt_id": cid, "row_state": state}
     )
     return _outcome_unknown_409(session_id, f"its order is {state}")
+
+
+def _attempt_never_placed(cid: str) -> bool:
+    """The stored attempt's row proves IB never had the TP: no reservation
+    row, or FAILED / REJECTED without IB ids. Same rule as _resume_pending.
+    A lookup error proves nothing (False: keep the claim)."""
+    from xenon.api.services import order_entry
+    from xenon.execution import orders_store
+
+    try:
+        row = orders_store.lookup_by_attempt("local", cid, **order_entry._resolve_scope_kwargs())
+    except Exception:  # noqa: BLE001
+        logger.exception("protect: could not read TP attempt %s; keeping the claim", cid)
+        return False
+    if row is None:
+        return True
+    state = str(row.state).upper()
+    return state in ("FAILED", "REJECTED") and not _tp_may_have_reached_ib(row, state)
 
 
 def _tp_may_have_reached_ib(row: Any, state: str) -> bool:
