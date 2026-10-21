@@ -180,11 +180,6 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.meta.outputs.revision }}
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-          # NEXT_PUBLIC_* vars must be present at `next build` time so they're baked
-          # into the client bundle. Web image only — api/realtime/migrator ignore it.
-          # Empty string for non-web images keeps the build-args block valid.
-          build-args: |
-            NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${{ matrix.image == 'web' && secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY || '' }}
           cache-from: type=gha,scope=xenon-${{ matrix.image }}
           cache-to: type=gha,scope=xenon-${{ matrix.image }},mode=max
 
