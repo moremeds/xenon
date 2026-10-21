@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from xenon.api.guards import get_broker_scope
+from xenon.api.routes import portfolio as portfolio_routes
 from xenon.api.subprocess import run_module
 from xenon.db.engine import get_sync_engine
 from xenon.db.queries.blotter import blotter_has_trades, fetch_blotter_pg, fetch_futu_blotter, merge_pg_and_flex
@@ -29,7 +30,7 @@ async def blotter_sync(scope=Depends(get_broker_scope)):
         # FUTU: best-effort rebuild closed trades from fills, then read them back
         # (no IB Flex). Bounded connect so a down OpenD can't wedge the loop.
         if not server._is_test_mode():
-            await server._futu_refresh_db_first(scope)
+            await portfolio_routes._futu_refresh_db_first(scope)
         engine = get_sync_engine()
         with engine.connect() as conn:
             return fetch_futu_blotter(conn, scope=scope, days=30)

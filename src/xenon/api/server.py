@@ -12,14 +12,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 # Project paths — file lives at src/xenon/api/server.py
@@ -36,12 +35,8 @@ from xenon.api.auth import (
 )
 from xenon.api.guards import (
     ReadOnlyDenied,
-    ensure_order_allowed,
-    get_account_scope,
-    get_broker_scope,
     is_read_only,
     read_only_403,
-    require_mode_verified,
 )
 from xenon.api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_mode, is_docker_mode, restart_ib_gateway
 from xenon.api.ib_pool import IBPool, check_client_id_base_mapping
@@ -49,22 +44,19 @@ from xenon.utils.ib_connection import TEST_BROKER_GUARD_ENV
 from xenon.api.order_owner import OrderOwner
 from xenon.api.routes.historical import router as historical_router
 from xenon.api.routes.journal import router as journal_router
-from xenon.api.routes.orders import orders_payload_for_scope
 from xenon.api.routes.orders import router as orders_router
 from xenon.api.routes.performance import router as performance_router
 from xenon.api.routes.trades import router as trades_router
 from xenon.api.routes.watchlist import router as watchlist_router
 from xenon.api.routes.wizard import router as wizard_router
-from xenon.api.services import audit_enforce
 from xenon.api.subprocess import ScriptResult, run_entry_point
 from xenon.api.routes.market import router as market_router
-from xenon.api.services import order_entry
 from xenon.api.routes.order_entry import router as order_entry_router
 from xenon.api.routes import futu as futu_routes
 from xenon.api.routes.futu import router as futu_router
 from xenon.api.routes.blotter import router as blotter_router
 from xenon.api.routes.system import router as system_router
-from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, pool_client_id
+from xenon.api.routes.portfolio import router as portfolio_router
 from xenon.db.engine import dispose_engine, init_engine
 from xenon.execution import orders_store
 from xenon.execution.account_scope import IBAccountSelectionError, select_ib_account
@@ -791,326 +783,7 @@ async def auth_middleware(request: Request, call_next):
 app.include_router(system_router)
 
 
-@app.get("/attribution")
-async def attribution():
-    """Run portfolio attribution (portfolio_attribution.py --json)."""
-    result = await run_entry_point("xenon-portfolio-attrib", ["--json"], timeout=15)
-    if not result.ok:
-        raise HTTPException(status_code=500, detail=result.error)
-    return result.data
-
-
-# ---------------------------------------------------------------------------
-# Phase 2: IB file-writer endpoints
-# ---------------------------------------------------------------------------
-
-
-async def _read_portfolio_payload(scope) -> dict:
-    """Load the latest structured portfolio payload from Postgres for the scope.
-
-    Phase 1 of the portfolio postgres read-path migration — replaces the prior
-    `data/portfolio.json` reader. The payload is stamped at sync time by
-    `_save_portfolio_to_postgres` in `xenon.execution.ib_sync`.
-    See docs/plans/2026-04-27-portfolio-postgres-read-path.md.
-    """
-    from xenon.db.engine import get_engine
-    from xenon.db.queries.portfolio import get_latest_portfolio_payload
-
-    engine = get_engine()
-    async with engine.connect() as conn:
-        return await get_latest_portfolio_payload(
-            conn,
-            broker=scope.broker,
-            account_env=scope.account_env,
-            broker_account=scope.broker_account,
-        )
-
-
-@app.get("/portfolio")
-async def portfolio_get(scope=Depends(get_account_scope)):
-    """Return the latest portfolio snapshot from Postgres, scoped to the
-    current broker account. Shape matches `web/lib/portfolioDataSchema.ts`.
-    Returns 404 when no snapshot exists yet — callers should POST
-    /portfolio/sync (or /portfolio/background-sync) to populate.
-    """
-    payload = await _read_portfolio_payload(scope)
-    if payload is None:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                f"No portfolio snapshot for scope "
-                f"{scope.broker}/{scope.account_env}/{scope.broker_account} — "
-                f"run POST /portfolio/sync to populate."
-            ),
-        )
-    return payload
-
-
-def _snapshot_age_seconds(payload: dict) -> Optional[float]:
-    """Age in seconds of a portfolio payload's `last_sync` stamp, or None when
-    absent/unparseable. `last_sync` is naive-local ISO from ib_sync (same host
-    as the API), so compare against naive `datetime.now()`."""
-    raw = payload.get("last_sync") if isinstance(payload, dict) else None
-    if not raw:
-        return None
-    try:
-        return (datetime.now() - datetime.fromisoformat(raw)).total_seconds()
-    except (ValueError, TypeError):
-        return None
-
-
-# A healthy /portfolio/sync rebuilds last_sync every run; a snapshot older than
-# this after a "successful" sync means the subprocess exited 0 but the PG write
-# never landed (e.g. a schema drift silently swallowed by save_portfolio). Loud,
-# not fatal — surfaced in the API log where it's actually visible.
-_STALE_SNAPSHOT_AFTER_SYNC_S = 300.0
-
-
-@app.post("/portfolio/sync")
-async def portfolio_sync(scope=Depends(get_account_scope)):
-    """Sync portfolio from IB via subprocess, then return the fresh payload.
-
-    Scripts auto-allocate client IDs from subprocess range (20-49).
-    Auto-restarts IB Gateway on ECONNREFUSED and retries once. Reads the
-    just-written snapshot from Postgres (no longer hits data/portfolio.json).
-
-    Single-flight: if a sync is already running (background or foreground),
-    this request waits for it and returns its result instead of starting a
-    second pass. `shield` keeps a client disconnect from cancelling the
-    shared sync.
-    """
-    result = await asyncio.shield(_start_or_join_sync())
-    if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
-    payload = await _read_portfolio_payload(scope)
-    if payload is None:
-        raise HTTPException(
-            status_code=502,
-            detail="ib_sync ran but no snapshot landed in Postgres — check ib_sync logs.",
-        )
-    # Subprocess exited 0 but the snapshot is stale → the PG write was swallowed
-    # (save_portfolio catches write errors). Don't fail the read, but make it loud.
-    age = _snapshot_age_seconds(payload)
-    if age is not None and age > _STALE_SNAPSHOT_AFTER_SYNC_S and not _is_test_mode():
-        logger.error(
-            "portfolio sync returned a stale snapshot (last_sync age %.0fs > %.0fs) for "
-            "%s/%s/%s — ib_sync exited 0 but the Postgres write likely failed; check ib_sync logs.",
-            age,
-            _STALE_SNAPSHOT_AFTER_SYNC_S,
-            scope.broker,
-            scope.account_env,
-            scope.broker_account,
-        )
-    return payload
-
-
-# Single-flight slot for every `xenon-ib-sync --sync` spawn in this process
-# (`/portfolio/sync` and `/portfolio/background-sync`): at most one sync pass
-# (and its post-sync audit) runs at a time. Also keeps a strong reference so
-# the task is not garbage-collected mid-run. Syncs started outside the API
-# process (reports, CLI, cron) do not share it.
-_sync_task: asyncio.Task | None = None
-
-
-def _start_or_join_sync() -> asyncio.Task:
-    """Return the running sync task, or start one. No await between the
-    check and the assignment, so it is atomic on the event loop."""
-    global _sync_task
-    if _sync_task is None or _sync_task.done():
-        _sync_task = asyncio.create_task(_sync_via_subprocess())
-    return _sync_task
-
-
-@app.post("/portfolio/background-sync", status_code=202)
-async def portfolio_background_sync():
-    """Fire-and-forget portfolio sync. Single-flight: while a sync runs, a new
-    trigger returns `in_progress` and spawns nothing."""
-    if _sync_task is not None and not _sync_task.done():
-        return {"status": "in_progress"}
-    _start_or_join_sync()
-    return {"status": "accepted"}
-
-
-async def _sync_via_subprocess() -> ScriptResult:
-    """One sync pass, then (XENON_AUDIT_CANCEL=1 only) naked-short audit
-    enforcement — both inside the single-flight task. Never raises: the
-    shared task may have no awaiter (background trigger)."""
-    result = await _run_sync_pass()
-    if result.ok and audit_enforce.enabled():
-        try:
-            await _enforce_naked_short_audit(result.data)
-        except Exception:  # noqa: BLE001 — enforcement must never fail the sync
-            logger.exception("naked short audit enforcement failed")
-    return result
-
-
-async def _run_sync_pass() -> ScriptResult:
-    """Run ib_sync.py as a subprocess with auto-recovery. Never raises."""
-    try:
-        result = await _run_ib_script_with_recovery(
-            "xenon-ib-sync", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
-        )
-    except Exception as exc:  # noqa: BLE001 — a detached task must log, not raise into the void
-        logger.exception("Portfolio sync failed")
-        return ScriptResult(ok=False, error=f"portfolio sync failed: {exc}")
-    if result.ok:
-        logger.info("Portfolio sync complete")
-    else:
-        logger.error("Portfolio sync failed: %s", result.error)
-    return result
-
-
-async def _enforce_naked_short_audit(data: dict | None):
-    """Enforce mode (spec §2.4 Phase B; `services/audit_enforce.py`).
-
-    Cancels go through `_cancel_order`, the core of POST /orders/cancel, on
-    the order owner. In-process: the route's read-only and order guards are
-    called explicitly (`_audit_cancel_blocked`) before every cancel."""
-    if is_read_only():
-        logger.warning("XENON_AUDIT_CANCEL=1 ignored: XENON_READ_ONLY=1 never cancels")
-        return None
-    scope = order_entry._resolve_scope_kwargs()
-    outcome = await audit_enforce.enforce(
-        audit_enforce.audit_from(data),
-        scope_account=scope.get("broker_account") or "",
-        owner_client_id=pool_client_id("orders"),
-        blocked=_audit_cancel_blocked,
-        cancel=_audit_cancel,
-        resync=_audit_resync,
-    )
-    audit_enforce.record_health(outcome, scope)
-    return outcome
-
-
-def _audit_cancel_blocked() -> str | None:
-    """Why the audit may not cancel now (None = it may)."""
-    if is_read_only():
-        return "read_only"
-    if order_owner is None:
-        return "owner_unavailable"
-    if order_owner.halted:
-        return "owner_halted"
-    try:
-        denial = ensure_order_allowed("naked-short audit cancel", app.state)
-    except HTTPException:
-        return "mode_unverified"
-    if denial is not None:
-        return f"order_denied:{order_entry._json_body(denial).get('reason_code')}"
-    return None
-
-
-# The cancel core's refusal for an order that is no longer working
-# (`ib_order_manage._cancel_body`), sent before any cancelOrder.
-_ALREADY_TERMINAL = re.compile(r"^Order already (Filled|Cancelled|ApiCancelled)\b")
-
-
-async def _audit_cancel(target: dict) -> str:
-    """Cancel one audit target by its full identity; permId is always set,
-    so the core never falls back to orderId."""
-    kind, resp = await order_entry._cancel_order(
-        {"orderId": target["order_id"], "permId": target["perm_id"], "clientId": target["client_id"]},
-        reason_code=audit_enforce.REASON_CODE,
-    )
-    if kind == "ok":
-        return audit_enforce.CONFIRMED
-    detail = order_entry._json_body(resp).get("detail") or {}
-    upstream = detail.get("upstream") if isinstance(detail, dict) else None
-    logger.warning("naked short audit cancel %s for %s: %s", kind, target, detail)
-    if kind == "failed" and isinstance(upstream, dict) and upstream.get("code") == 10147:
-        return audit_enforce.NOT_FOUND  # permId gone: nothing cancelled
-    message = str(detail.get("message") or "") if isinstance(detail, dict) else ""
-    if kind == "failed" and _ALREADY_TERMINAL.match(message):
-        return audit_enforce.GONE  # filled / cancelled before we got there: nothing sent
-    return audit_enforce.UNCERTAIN if kind == "uncertain" else audit_enforce.FAILED
-
-
-async def _audit_resync() -> dict | None:
-    result = await _run_sync_pass()
-    return audit_enforce.audit_from(result.data) if result.ok else None
-
-
-async def _futu_refresh_db_first(scope) -> None:
-    """Best-effort write path: connect OpenD + sync into Postgres for the scope.
-
-    Bounded + off the event loop: the futu SDK retries a refused OpenD forever, so
-    the connect runs in a worker thread under a hard timeout. On timeout/failure we
-    log and return — the GET read path serves the last-synced DB rows regardless
-    (DB-first). No-ops under XENON_READ_ONLY=1 (sync_futu_orders self-guards).
-    """
-    import asyncio
-
-    # Catch-up inception for a never-synced scope; thereafter the watermark
-    # (max filled_at − lookback) keeps the manual refresh's window tight.
-    from datetime import date as _date
-    from datetime import datetime, time, timezone
-
-    from xenon.api.services.futu_history_sync import resolve_incremental_since, sync_futu_orders
-    from xenon.db.engine import get_engine
-
-    _FUTU_INCEPTION = _date(2024, 1, 1)
-
-    client = futu_routes._get_futu_client()
-
-    def _connect() -> bool:
-        if not client.is_connected():
-            client.connect()
-        return client.is_connected()
-
-    try:
-        connected = await asyncio.wait_for(asyncio.to_thread(_connect), timeout=15)
-    except Exception as exc:  # TimeoutError, FutuError, etc.
-        logger.warning("futu refresh: OpenD connect skipped (%s); serving DB snapshot", exc)
-        return
-    if not connected:
-        return
-    try:
-        # A manual refresh catches up the gap since the last synced fill (minus a
-        # 7-day lookback for late-posted corrections), not just today — so a stack
-        # idle for days/weeks returns to current on one click.
-        since_date = await resolve_incremental_since(get_engine(), scope, inception=_FUTU_INCEPTION)
-        since_dt = datetime.combine(since_date, time.min, tzinfo=timezone.utc)
-        await sync_futu_orders(get_engine(), client, scope, since=since_dt)
-    except Exception as exc:
-        logger.warning("futu refresh: sync failed (%s); serving DB snapshot", exc)
-
-
-@app.post("/orders/refresh")
-async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
-    """Sync orders into Postgres, then return the scoped payload.
-
-    IB: subprocess pull (auto-allocated clientId 20-49, gateway auto-restart on
-    ECONNREFUSED), gated on IB mode verification.
-    FUTU: read-only pull from OpenD into futu_orders/trades/closed_trades + journal
-    via sync_futu_orders (DB-first; no-ops under XENON_READ_ONLY=1). The GET read
-    path stays Postgres-only.
-    """
-    # Read-only sessions get the PG view directly — no --sync subprocess, no
-    # OpenD connect, no writes. Placed before the mode check and the test-mode
-    # short-circuit so the single contract holds under every flag combination.
-    if is_read_only():
-        return orders_payload_for_scope(scope)
-
-    # IB requires a verified trading mode before any work — including the
-    # test-mode short-circuit — so a mode mismatch is refused even in test mode
-    # (preserves the /orders/refresh guard contract). FUTU is read-only and
-    # carries no IB trading mode to verify, so it is exempt.
-    if scope.broker != "FUTU":
-        require_mode_verified(request)
-
-    if _is_test_mode():
-        return {"status": "ok", "orders": []}
-
-    if scope.broker == "FUTU":
-        await _futu_refresh_db_first(scope)
-        return orders_payload_for_scope(scope)
-
-    # IB path — mode already verified above; touch the gateway.
-    result = await _run_ib_script_with_recovery(
-        "xenon-ib-orders", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
-    )
-    if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
-    return orders_payload_for_scope(scope)
+app.include_router(portfolio_router)
 
 
 app.include_router(order_entry_router)

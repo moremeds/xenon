@@ -22,6 +22,7 @@ from decimal import Decimal
 import pytest
 from fastapi.testclient import TestClient
 from xenon.api.services import order_entry
+from xenon.api.routes import portfolio as portfolio_routes
 
 
 @pytest.fixture
@@ -358,7 +359,7 @@ def test_orders_refresh_serves_pg_view_without_sync_in_read_only(read_only_clien
 
     monkeypatch.setattr(server, "_run_ib_script_with_recovery", _no_spawn)
     pg_view = {"open_orders": [], "executed_orders": [], "open_count": 0, "executed_count": 0}
-    monkeypatch.setattr(server, "orders_payload_for_scope", lambda scope: pg_view)
+    monkeypatch.setattr(portfolio_routes, "orders_payload_for_scope", lambda scope: pg_view)
 
     r = read_only_client.post("/orders/refresh")
     assert r.status_code == 200, r.text
