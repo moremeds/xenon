@@ -266,7 +266,9 @@ _INFO_CODES = frozenset(
     {
         2104,  # Market data farm connection is OK
         2106,  # HMDS data farm connection is OK
+        2107,  # HMDS data farm connection is inactive
         2108,  # Market data farm connection is inactive
+        2119,  # Market data farm is connecting
         2158,  # Sec-def data farm connection is OK
     }
 )
