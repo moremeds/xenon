@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -1391,6 +1392,10 @@ def main(argv=None):
         except Exception as exc:  # noqa: BLE001 — degrade: snapshot is not published
             logging.getLogger("ib_sync.pass").warning("pass_seq unavailable (%s)", exc)
 
+    # Audit summary handed to the API (PR-11): the last stdout line, parsed
+    # into ScriptResult.data by `run_entry_point`.
+    audit_summary = None
+
     # Connect
     client = connect_ib(args.host, args.port, args.client_id or "auto")
 
@@ -1603,14 +1608,18 @@ def main(argv=None):
             # IB read or accountless order skips it. The Postgres persist step
             # is left out of the audit's `complete`: the audit reads no PG,
             # so a read-only pass still audits what it saw.
+            # The summary is also handed to the API (PR-11): when
+            # XENON_AUDIT_CANCEL=1 the API's order owner — the only process
+            # that can cancel — enforces it. This subprocess never cancels.
             if not args.skip_audit:
                 audit_reads = {k: v for k, v in reads.items() if k != "persisted"}
-                naked_short_audit.run_shadow_audit(
+                audit_result = naked_short_audit.run_shadow_audit(
                     portfolio,
                     open_orders,
                     ib_account,
                     observation=_observation_stamp(pass_started, audit_reads, ib_account),
                 )
+                audit_summary = {**audit_result.summary(), "account": ib_account}
 
             print("\n⚠️  Note: kelly_optimal, target, and stop fields need manual evaluation")
         else:
@@ -1619,6 +1628,11 @@ def main(argv=None):
     finally:
         client.disconnect()
         print("✓ Disconnected from IB")
+
+    if audit_summary is not None:
+        # Must be the LAST stdout output: run_entry_point parses from the
+        # first "{" to the end. Unparseable output → no audit → no cancel.
+        print(json.dumps({"naked_short_audit": audit_summary}, default=str), flush=True)
 
 
 if __name__ == "__main__":

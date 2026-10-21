@@ -86,6 +86,17 @@ Runbook: `docs/runbooks/pr10-order-owner-cutover.md`. Incident rows 37–40.
 5. **Shutdown.** The lifespan's IB section runs first and cannot be skipped by later cleanup: owner stop (admission refused, queued jobs abandoned, supervisor cancelled), then `ib_pool.disconnect_all(timeout=35)`. The pool is marked closing first and a full close is terminal: a connect or reconnect that finishes later closes its own new socket instead of registering it, and a later `connect_all()` on the same pool connects nothing (one pool per api process; the gateway-restart path disconnects and reconnects role subsets and never closes the pool). Each role's disconnect is queued on its worker and is never cancelled: the 35 s bounds only the wait, and a disconnect behind a started order core runs when the core ends. Then the other cleanup steps (journal listener, poller, risk alert, Futu, engine) each run with a small bound (sum 10 s). Budget: uvicorn drain 10 s + 35 s + 10 s < 60 s compose `stop_grace_period` / `WATCHTOWER_TIMEOUT`. Limit: a core blocked on a broker call with no timeout of its own can outlive the budget; SIGKILL is then the backstop and its socket may stay open on the gateway (colima usernet, 2026-10-20; runbook stale-socket check).
 6. **Reason codes** (top-level `reason_code`, mapped in `web/lib/orderReasonCodes.ts`): `ORDER_NOT_OWNED` 409, `IB_BROKER_DISCONNECTED` 503, `ORDERS_HALTED` 503, `IB_CONNECTION` 503 (place refused before send, row FAILED), `PLACE_OUTCOME_UNKNOWN` 502 (may be at IB; do not resubmit). The web treats a 5xx with a known code as terminal, except `PLACE_OUTCOME_UNKNOWN`.
 
+## Naked-short audit enforce mode (PR-11)
+
+`XENON_AUDIT_CANCEL=1` (default off; a rollout switch). `services/audit_enforce.py` runs after a successful `xenon-ib-sync --sync` inside `_sync_via_subprocess`, the single-flight sync task, so a trigger during enforcement joins it. Input: `ScriptResult.data["naked_short_audit"]` (the subprocess's last stdout line); unparseable or missing → no cancel.
+
+- Never under `XENON_READ_ONLY`, an owner that is missing or halted, a denied `ensure_order_allowed` (called explicitly: the in-process path skips route Depends), or an audit that is not `ok`/`violations` for the scope account.
+- Cancels only orders this environment's owner placed (`client_id` = `pool_client_id("orders")`, positive `perm_id`) — exposure from TWS / mobile / other-client orders is reported, never cancelled. Identity (scope account, client_id, order_id, perm_id) goes to `_cancel_order` with the permId, so the core never falls back to orderId; a permId it cannot find (10147) is skipped and ends the trigger.
+- One cancel at a time, newest first; a confirmed cancel marks the row `CANCELLED` / `NAKED_SHORT_AUDIT` (`mark_terminal`, `expected_states=NON_TERMINAL_STATES`) and re-runs the sync before the next choice; uncertain / failed → stop, health `error`, nothing marked; max 5 cancels per trigger.
+- Health: `service_health("naked_short_audit")` with `mode: "enforce"`, `cancelled`, `skipped`, `stopped`.
+
+Tests: `scripts/tests/test_audit_enforce.py`.
+
 ## Cancel / Modify Semantics
 
 1. **Clear VOL fields before modify.**

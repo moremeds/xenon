@@ -5,6 +5,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+- **Naked-short audit enforce mode (PR-11), default off.** With `XENON_AUDIT_CANCEL=1` the API cancels audit violations after each sync: one order at a time, newest first, then a re-sync before the next, at most 5 per sync. It cancels only orders this environment's order owner placed, by permId (no orderId fallback), through the `POST /orders/cancel` core; a confirmed cancel marks the order `CANCELLED` with reason `NAKED_SHORT_AUDIT`. It never acts under `XENON_READ_ONLY`, with a halted owner, or on a skipped / stale / incomplete audit; an unconfirmed cancel stops it with a `service_health` error. Orders placed in TWS / IBKR Mobile are reported, not cancelled. `xenon-ib-sync --sync` now prints the audit summary as its last stdout line.
+
 ## [0.11.0] — 2026-10-20
 
 - **Single order owner (PR-10).** Every Xenon order is placed, cancelled and modified by one connection: the API pool `orders` role (clientId base+4) on its own worker. An order this environment's owner did not place answers 409 `ORDER_NOT_OWNED` (manage it in TWS / IBKR Mobile). The order-write CLIs are removed.

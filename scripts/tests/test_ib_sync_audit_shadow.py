@@ -145,3 +145,59 @@ def test_read_only_sync_still_audits_what_it_sees(monkeypatch, caplog):
     assert "NAKED SHORT AUDIT (shadow): 1 violation(s)" in caplog.text
     assert _health_row() is None
     assert fake.cancels == []
+
+
+# -- PR-11: machine-readable audit summary for the API -------------------------
+
+
+def _parsed_like_run_entry_point(out: str) -> dict | None:
+    """Same parse as `xenon.api.subprocess.run_entry_point` builds `data`."""
+    start = out.find("{")
+    if start == -1:
+        return None
+    try:
+        data = json.loads(out[start:])
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def test_sync_emits_audit_summary_as_script_result_data(monkeypatch, capsys):
+    fake = _naked_call_client()
+    _run(monkeypatch, fake)
+    data = _parsed_like_run_entry_point(capsys.readouterr().out)
+    assert data is not None, "ib_sync stdout does not parse into ScriptResult.data"
+    audit = data["naked_short_audit"]
+    assert audit["status"] == "violations"
+    assert audit["account"] == ACCOUNT
+    (v,) = audit["violations"]
+    assert (v["order_id"], v["perm_id"], v["account"]) == (9001, 990001, ACCOUNT)
+    assert fake.cancels == []
+
+
+def test_sync_emits_skipped_audit_summary(monkeypatch, capsys):
+    fake = _naked_call_client()
+
+    def _fail():
+        raise RuntimeError("socket closed")
+
+    fake.get_open_orders = _fail
+    _run(monkeypatch, fake)
+    audit = _parsed_like_run_entry_point(capsys.readouterr().out)["naked_short_audit"]
+    assert (audit["status"], audit["reason"]) == ("skipped", "observation_incomplete")
+
+
+def test_sync_skip_audit_emits_no_audit_summary(monkeypatch, capsys):
+    fake = _naked_call_client()
+    _run(monkeypatch, fake, "--skip-audit")
+    data = _parsed_like_run_entry_point(capsys.readouterr().out)
+    assert not (data or {}).get("naked_short_audit")
+
+
+def test_flag_on_sync_subprocess_still_cancels_nothing(monkeypatch):
+    """XENON_AUDIT_CANCEL is read by the API, never by the sync subprocess."""
+    monkeypatch.setenv("XENON_AUDIT_CANCEL", "1")
+    fake = _naked_call_client()
+    _run(monkeypatch, fake)
+    assert fake.cancels == []
+    assert json.loads(_health_row().detail)["mode"] == "shadow"
