@@ -115,7 +115,7 @@ Key rules:
 
 - `ib_place_order.py`, `ib_order_manage.py` — connected-client order cores (place / cancel / modify). They run only on the API's order owner (pool `orders`, clientId base+4); no CLI, no own connection. See `api/CLAUDE.md` § Order owner
 - `orders_store.py` — Postgres-backed public facade for `order_submissions` and `order_events`; preserve its function signatures
-- `single_leg_rehydrate.py` — three-source reconcile (orders DB, IB open orders, position monitor). Invoked in FastAPI lifespan on boot; exposed for testing via `POST /dev/rehydrate/synthetic`.
+- `single_leg_rehydrate.py` — three-source reconcile of unresolved orders against IB open orders, IB executions and a positions-change flag. Invoked in FastAPI lifespan on boot; exposed for testing via `POST /dev/rehydrate/synthetic`.
 - `naked_short_audit.py` — post-sync audit (log + service_health, no cancels; enforce mode runs in the API, see § Naked Short Protection)
 - `quote_guard.py`, `preflight.py` — order-path safety layers
 - `combo_wizard/` — combo order entry flow (plan/submit/reprice/abort/protect)

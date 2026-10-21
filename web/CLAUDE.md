@@ -84,8 +84,7 @@ Sum of legs = position P&L. Uses WS price, fallback IB sync. Impl: `LegRow` in `
 | Multi-leg spread       | Net from each leg's `prices[legPriceKey(...)]`                              |
 | BAG order last         | `resolveOrderLastPrice()` — net mid from legs                               |
 | BAG modify BID/MID/ASK | `resolveOrderPriceData()` in `ModifyOrderModal.tsx`                         |
-| Order form BID/MID/ASK | Same as PriceBar                                                            |
-| PriceBar in modal      | `resolvePriceBar()` — option-level for single-leg, underlying for multi-leg |
+| Order form BID/MID/ASK | `resolveOrderPriceData()` in `OrderTab.tsx`                                 |
 
 **Never show underlying price where user expects option/spread price. Show "---" if unavailable.**
 

@@ -15,7 +15,7 @@ Xenon places orders, tracks fills, surfaces P&L and Greeks attribution, and enfo
 ## Brokers
 
 - **Interactive Brokers** (primary) — quotes, chains, execution, portfolio. Never bypassed.
-- **Futu OpenD** (read-only) — positions snapshot from a local Futu OpenD instance. Surfaces as a separate account tab in the terminal. No orders, no fills, no quotes. Silent degrade when OpenD is unreachable.
+- **Futu OpenD** (read-only) — positions snapshot from a local Futu OpenD instance. Surfaces as a separate account tab in the terminal. No order execution and no quote feed; it reads positions and historical deals (`xenon-futu-history-sync`). Silent degrade when OpenD is unreachable.
 
 Every execution and portfolio row carries `broker`, `account_env`, and `broker_account` columns so paper and live data never blend in a shared Postgres. Scope resolves via `AccountScope` (`src/xenon/execution/account_scope.py`); FastAPI depends on `get_account_scope`; sync subprocesses read `XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`.
 
@@ -67,7 +67,10 @@ XENON_PAPER_ACCOUNT=DU0000000             # DU* prefix required for paper
 
 # dev.sh refuses to start when DATABASE_URL points at core_dev (prod)
 DATABASE_URL=postgresql+asyncpg://xenon_dev:<dev-pw>@<db-host>:5432/core_test
-DATABASE_URL_TEST=postgresql+asyncpg://xenon_dev:<dev-pw>@<db-host>:5432/core_test
+# pytest only: a separate, existing database whose name contains "test" (not core_dev,
+# not the same database as DATABASE_URL), e.g. xenon_test. pytest refuses to start otherwise
+# (src/xenon/_test_db.py); per-worker clones are made from it.
+DATABASE_URL_TEST=postgresql+asyncpg://xenon_dev:<dev-pw>@<db-host>:5432/xenon_test
 
 # Next -> FastAPI shared secret (required; FastAPI fails closed without a credential)
 XENON_INTERNAL_API_TOKEN=...

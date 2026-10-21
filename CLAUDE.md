@@ -38,7 +38,7 @@ Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` fi
 ## Brokers
 
 - **IB** (primary) — quotes, chains, execution, portfolio. Never bypassed.
-- **Futu** (read-only) — positions snapshot via local Futu OpenD. Surfaces as a separate account tab. No orders, no fills, no quotes. Silent degrade when OpenD unreachable.
+- **Futu** (read-only) — positions snapshot via local Futu OpenD. Surfaces as a separate account tab. No order execution and no quote feed; it reads positions and historical deals (`xenon-futu-history-sync`). Silent degrade when OpenD unreachable.
 
 Every execution/portfolio row carries `broker`, `account_env`, `broker_account` columns so paper and live data never blend in a shared Postgres. Resolve scope via `AccountScope` (`src/xenon/execution/account_scope.py`); FastAPI depends on `get_account_scope`, sync subprocesses read `XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`. Full policy: `docs/architecture/production-database-strategy.md` § Broker Account Scope.
 

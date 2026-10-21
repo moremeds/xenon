@@ -33,7 +33,7 @@ Next.js routes call FastAPI (`127.0.0.1:8321` in prod, `8421` under `dev.sh`) vi
 | FastAPI + IB up           | Normal                                                                       |
 | FastAPI up, IB down       | Auto-restart Gateway, retry once, else 503 + cached                          |
 | FastAPI up, IB CLOSE_WAIT | Detected at startup + script errors; auto-restart + kill lingering processes |
-| FastAPI down              | Cached from disk, `is_stale: true`                                           |
+| FastAPI down              | No disk fallback: `/api/portfolio` returns the upstream error (status from `xenonFetch`, default 502 `UPSTREAM_ERROR`; 404 triggers a background sync) |
 
 No spawn fallback. Always try FastAPI first.
 
@@ -123,7 +123,8 @@ Global service: `local.ibc-gateway`. Install: `~/ibc-install/`, config: `~/ibc/`
 | ----------------- | ----------- | ---------------------------------------------------- |
 | `IB_GATEWAY_MODE` | `docker`    | `docker`, `cloud` (remote, no restart), or `launchd` |
 | `IB_GATEWAY_HOST` | `127.0.0.1` | Gateway host (`ib-gateway` for cloud mode)           |
-| `IB_GATEWAY_PORT` | `4001`      | Gateway port                                         |
+
+The gateway port is not an env var: it comes from `XENON_TRADING_MODE` (`xenon.api.trading_mode.EXPECTED_PORT`: 4001 live, 4002 paper). The API (`ib_gateway.py`), `IBClient` and `ib_connection.py` all read it from there. `IB_GATEWAY_PORT` is not consulted by Python or by the realtime relay; `scripts/infra/dev.sh` still exports it but nothing reads it.
 
 ### Ports
 
@@ -160,7 +161,7 @@ Machine-to-machine endpoints for headless clients (e.g., market-data-warehouse):
 - `POST /historical/head-timestamp` — earliest available data date (ISO 8601)
 - `POST /historical/bars` — fetch OHLCV bars (ISO `YYYY-MM-DD` dates)
 
-Auth: `X-API-Key` header checked against `MDW_API_KEY` env var. Scoped to these 3 paths only — trading routes (orders, portfolio) accept only the internal token. Uses `hmac.compare_digest` for constant-time comparison.
+Auth: `X-API-Key` header checked against `MDW_API_KEY` env var. Scoped to these 3 paths only. Order-write endpoints (`/orders/place|cancel|modify`, `/portfolio/sync`, `POST /blotter`, `POST /futu/sync`) accept only the internal token; read endpoints such as `GET /portfolio` and `GET /orders` also accept the separate `XENON_QUERY_API_KEY` (next section). Uses `hmac.compare_digest` for constant-time comparison.
 
 Endpoints live in `src/xenon/api/routes/historical.py` and use the "data" pool role from `IBPool`.
 
@@ -182,5 +183,5 @@ Production is the Docker stack on the macmini (`deploy/README.md`, `docs/runbook
 - **Next.js `/api/**`**: `web/middleware.ts` is a browser Host/Origin guard (`XENON_ALLOWED_HOSTS`), not user auth. Prod is tailnet-only; server-to-server callers hit FastAPI directly with a credential.
 - **`NEXT_PUBLIC_*` env vars**: Baked at build time. After changing `.env`, rebuild Next.js: `cd web && npm run build`
 - **Root `node_modules`**: The root `package.json` has shared deps (`@sinclair/typebox`) used by `lib/tools/`. Must be installed before `web/` build.
-- **Python deps**: Managed by `uv` — `pyproject.toml` is the source of truth, `uv.lock` is the pinned graph. Includes `cryptography` (PyJWT RS256), `fastapi`, `uvicorn`, `httpx`, `python-dotenv`, `numpy`, `pytz`, `playwright`. Install via `uv sync --frozen --extra test`.
+- **Python deps**: Managed by `uv` — `pyproject.toml` is the source of truth, `uv.lock` is the pinned graph. Includes `fastapi`, `uvicorn`, `httpx`, `python-dotenv`, `numpy`, `pytz`. Install via `uv sync --frozen --extra test`.
 - **`@sinclair/typebox`**: Pinned to exact `0.34.48` in both root and web `package.json` to prevent version mismatch build failures.
