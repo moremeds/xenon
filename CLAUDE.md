@@ -157,7 +157,7 @@ Preserve these in all UI pricing / P&L work (full table + tests in `web/CLAUDE.m
 
 ## Identity
 
-**Xenon** — broker terminal for options portfolio management. Live IB + read-only Futu integration. Places orders, tracks fills, enforces position-close rules, surfaces P&L and Greeks attribution. **No signal generation, no scanner output — bring your own thesis.** The signal layer (scanners, fetchers, analysis, share-card generators) was removed in the pure-portfolio pivot (commit `cc568c36`); do not reintroduce scanner / evaluation / discovery surfaces.
+**Xenon** — broker terminal for options portfolio management. Live IB + read-only Futu integration. Places orders, tracks fills, enforces the naked-short guard, surfaces P&L and Greeks attribution. **No signal generation, no scanner output — bring your own thesis.** The signal layer (scanners, fetchers, analysis, share-card generators) was removed in the pure-portfolio pivot (commit `cc568c36`); do not reintroduce scanner / evaluation / discovery surfaces.
 
 Brand spec: `brand/CLAUDE.md` + `docs/reference/brand-identity.md`. Non-negotiables for any UI/asset work: `signal.core` teal is the flagship accent; all colors via design tokens — no raw hex; Inter for UI, IBM Plex Mono for numeric/telemetry, Sohne for display only; panels max out at 4px radius (badges may use capsule); no glassmorphism, decorative gradients, or soft shadows; empty states describe measurement conditions; voice is precise, calm, scientific.
 

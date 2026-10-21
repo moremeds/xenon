@@ -5,7 +5,7 @@ Python execution, broker integration, portfolio reports — the installable `xen
 ## Data Sources
 
 1. **Interactive Brokers (TWS/Gateway)** — real-time quotes, chains, execution, live portfolio. Primary.
-2. **Unusual Whales (`$UW_TOKEN`)** — dark-pool flow for the `xenon-portfolio-report` HTML report. Data-source role only — signal generation was removed in the pure-portfolio pivot.
+2. **Unusual Whales (`$UW_TOKEN`)** — dark-pool flow for the `xenon-portfolio-report` HTML report, and analyst ratings for the Ratings tab (`GET /ticker/ratings`, `src/xenon/api/routes/ratings.py`). Data-source role only — signal generation was removed in the pure-portfolio pivot.
 3. **Futu OpenD** — read-only positions snapshot.
 4. **IB Flex Query** — historical fills audit overlay.
 

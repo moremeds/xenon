@@ -8,7 +8,7 @@
 
 **Broker terminal for options portfolio management.**
 
-Xenon places orders, tracks fills, surfaces P&L and Greeks attribution, and enforces position-close rules against Interactive Brokers. **Bring your own thesis** — no scanners, no signal generation, no strategy recommendations.
+Xenon places orders, tracks fills, surfaces P&L and Greeks attribution, and enforces the naked-short guard against Interactive Brokers. **Bring your own thesis** — no scanners, no signal generation, no strategy recommendations.
 
 ---
 

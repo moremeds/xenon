@@ -6,30 +6,28 @@ FastAPI bridge between Next.js and IB Gateway / Futu OpenD. Root `CLAUDE.md` is 
 
 ## Core rule
 
-Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xenonApi.ts`). **Never `spawn()`**. No spawn fallback — always try FastAPI first.
+Next.js routes call FastAPI (`127.0.0.1:8321` in prod, `8421` under `dev.sh`) via `xenonFetch()` (`web/lib/xenonApi.ts`). **Never `spawn()`**. No spawn fallback — always try FastAPI first.
 
 ## Module Layout
 
 - `server.py` — app assembly: lifespan (IB pool, order owner, boot reconcile, background tasks, shutdown budget), auth + read-only middleware, router includes, process-wide state (`app`, `ib_pool`, `order_owner`, `uw_available`, test mode) and the IB script runner (`_run_ib_script_with_recovery`). Route and service modules read this state as `server.<name>` through an in-function `from xenon.api import server` (never a top-level import: `server` imports every router). No re-exports of moved names — patch the module that defines the name.
 - `routes/` — per-topic FastAPI routers, included from `server.py` (inclusion order = `app.routes` order):
   - `system.py` — `/health`, `/admin/operator`, `/dev/rehydrate/synthetic`, `/ws-ticket*`
-  - `portfolio.py` — `/attribution`, `/portfolio*`, `/orders/refresh`; owns the single-flight `_sync_task` and the PR-11 audit enforce hook
-  - `order_entry.py` — `/orders/{quote,place,cancel,replace,modify}` (thin handlers over `services/order_entry.py`)
+  - `routes/portfolio.py` — `/attribution`, `/portfolio*`, `/orders/refresh`; owns the single-flight `_sync_task` and the PR-11 audit enforce hook
+  - `routes/order_entry.py` — `/orders/{quote,place,cancel,replace,modify}` (thin handlers over `services/order_entry.py`)
   - `futu.py` — `/futu/sync`, `/futu/portfolio`; owns the Futu singleton
-  - `blotter.py` — `POST/GET /blotter`
+  - `routes/blotter.py` — `POST/GET /blotter`
   - `market.py` — `/options/{chain,expirations,greeks}`, `/market-depth`
   - `orders.py` — `GET /orders` (list) and `orders_payload_for_scope`
   - `historical.py` — historical bars / fills
-  - `journal.py` — trade journal entries
+  - `routes/journal.py` — trade journal entries
   - `trades.py` — closed trades
-  - `position_rules.py` — position-close rule CRUD
   - `wizard.py` — combo order wizard (plan/submit/reprice/abort/protect)
 - `services/` — business logic (stateful, testable without HTTP):
-  - `order_entry.py` — `place` / `cancel` / `modify` / `replace` cores (each starts with `ensure_order_allowed`), preflight, Gate 4, quote gate, owner-reply mapping (`order_error`). Callers: `routes/order_entry.py`, `combo_wizard/session.py` (submit/reprice/abort), the audit hook (`_cancel_order`). Wizard protect keeps its own guard in `routes/wizard.py`.
+  - `services/order_entry.py` — `place` / `cancel` / `modify` / `replace` cores (each starts with `ensure_order_allowed`), preflight, Gate 4, quote gate, owner-reply mapping (`order_error`). Callers: `routes/order_entry.py`, `combo_wizard/session.py` (submit/reprice/abort), the audit hook (`_cancel_order`). Wizard protect keeps its own guard in `routes/wizard.py`.
   - `advisory_lock.py` — Postgres advisory locks
   - `ib_activity_mirror.py` — IB→PG fills + open-orders mirror
   - `journal_auto_import.py` — PG-event-driven journal auto-import
-  - `position_rules_cancel.py`, `position_rules_health.py` — position-rule supervision
 - `ib_pool.py` — persistent IB connection pool: roles `sync` / `orders` / `data` = clientId base+3 / base+4 / base+5
 - `order_owner.py` — the single order owner: runs every place / cancel / modify / wizard protect on the `orders` connection (see § Order owner)
 - `ws_ticket.py` — 30s single-use WebSocket auth tickets
@@ -41,7 +39,7 @@ Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xeno
 ## Background Tasks
 
 - **Futu singleton** — lazy-initialized on first `/futu/sync` call so the server boots even when OpenD is down. asyncio singleflight lock collapses concurrent fetches. 10s cooldown gate. **Uses a `None` sentinel (not `0.0`) for last-sync** — near process start `time.monotonic() - 0.0` would look recently-synced and serve stale cache.
-- **Single-leg rehydrate on boot (F7)** — `_run_rehydrate_on_boot()` runs synchronously inside the FastAPI `lifespan` before the server begins serving. Calls `xenon.execution.single_leg_rehydrate.rehydrate_on_boot()` (three-source reconcile: orders DB, IB open orders, CRI monitor) with a 10s timeout; on timeout or failure we log a warning and continue. Skipped in test mode unless `XENON_ORDERS_DB_PATH` is set (prevents polluting the prod DuckDB during pytest). Observability readiness check: `POST /dev/rehydrate/synthetic`.
+- **Single-leg rehydrate on boot (F7)** — `_run_rehydrate_on_boot()` runs synchronously inside the FastAPI `lifespan` before the server begins serving. Calls `xenon.execution.single_leg_rehydrate.rehydrate_on_boot()` (three-source reconcile: orders DB, IB open orders, CRI monitor) with a 10s timeout; on timeout or failure we log a warning and continue. Skipped in test mode. Observability readiness check: `POST /dev/rehydrate/synthetic`.
 - **IB→Postgres activity mirror** — `xenon.api.services.ib_activity_mirror`. Two surfaces, one service:
   1. `_run_fills_replay_on_boot()` runs once at boot after rehydrate (30s timeout). Pulls `client.get_fills()` and inserts into `xenon.order_fills` via `record_external_fills`. Catches fills missed during downtime — without it, TWS-placed/modified orders that filled while FastAPI was down stay invisible to the blotter.
   2. `_maybe_start_activity_poller()` starts a forever-loop background task by default; set `XENON_IB_ACTIVITY_POLLER=0` only for special suppression. Cadence env: `XENON_IB_ACTIVITY_POLL_S` (default 60). Each tick runs `sync_open_orders_to_postgres` + `record_external_fills` independently — a hung get_fills() must not freeze the open-order side, and vice versa. Lifespan owns the task handle on `app.state.ib_activity_poller_task` and cancels + awaits it on shutdown.
@@ -151,26 +149,6 @@ Component map, files, ticket flow: `docs/architecture/api-infrastructure.md`.
 ## Dev probes (never enabled in production)
 
 - `POST /dev/rehydrate/synthetic` — injects a synthetic PENDING row, runs rehydrate, returns event count. Gated on `XENON_API_TEST_MODE=1` OR `DEV_PROBES=1`. Used for observability readiness check before burn-in. Hidden from `/openapi.json` (`include_in_schema=False`); the gate is the real protection.
-
-## DuckDB timestamp migration (one-time)
-
-Prior to PR-C/D the `orders_store` writer did not pin the DuckDB session `TimeZone`. On non-UTC hosts, aware `datetime.now(timezone.utc)` values were converted to local wall-clock before being stripped of tzinfo — so pre-patch rows in `orders_submissions` are stored as _local_ wall-clock timestamps, while the post-patch `_submitted_at_epoch` reader treats every naive value as UTC.
-
-Left unmigrated, the reader mis-ages those pre-patch PENDING rows by the host's UTC offset (e.g. +7h for America/Los_Angeles), which can cause fresh rows to be auto-`FAILED` with `PENDING_TIMEOUT`.
-
-Run the one-time migration once per orders DB. Dry-run first:
-
-```bash
-uv run python scripts/migrations/2026_04_21_orders_submitted_at_to_utc.py \
-    --from-tz America/Los_Angeles            # or whatever the host TZ was
-
-# Review the preview, then:
-cp data/orders.duckdb data/orders.duckdb.bak
-uv run python scripts/migrations/2026_04_21_orders_submitted_at_to_utc.py \
-    --from-tz America/Los_Angeles --apply
-```
-
-The script is **not idempotent** — it writes a sentinel `orders_events` row (`kind='MIGRATION_TZ_UTC_V1'`) on success and aborts on a second `--apply` run. Only servers deployed before the PR-C/D landing need this; new deploys start with the UTC-pinned writer.
 
 ## Health Check
 
