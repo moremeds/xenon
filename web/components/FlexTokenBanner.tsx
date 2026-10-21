@@ -11,7 +11,7 @@ interface FlexTokenStatus {
   should_warn: boolean;
   expired: boolean;
   active_threshold: number | null;
-  token_masked: string;
+  token_masked?: string | null;
 }
 
 /**
@@ -72,9 +72,9 @@ export default function FlexTokenBanner() {
         IB FLEX TOKEN {label}
       </span>
 
-      <span style={{ color: "var(--text-muted)" }}>
-        {token_masked}
-      </span>
+      {token_masked ? (
+        <span style={{ color: "var(--text-muted)" }}>{token_masked}</span>
+      ) : null}
 
       <a
         href={renewal_url}

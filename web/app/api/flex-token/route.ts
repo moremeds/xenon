@@ -1,65 +1,61 @@
 import { NextResponse } from "next/server";
-import { readFile } from "fs/promises";
-import { resolve } from "path";
+import { xenonFetch, XenonApiError } from "@/lib/xenonApi";
 
 export const runtime = "nodejs";
 
-const PROJECT_ROOT = resolve(process.cwd(), "..");
-const CONFIG_PATH = resolve(PROJECT_ROOT, "data", "flex_token_config.json");
+// FastAPI owns the Flex token expiry (`flex_token` on GET /health, see
+// src/xenon/api/services/flex_token.py). It reports expiry only; the static
+// renewal pointers below stay here because they are not part of that contract
+// and the auth-exempt /health must not carry them.
+const RENEWAL_URL =
+  "https://portal.interactivebrokers.com/AccountManagement/AmAuthentication?action=FlexQueries";
+const BREADCRUMB =
+  "Performance & Reports → Flex Queries → Flex Queries Delivery → Flex Queries → Configure Flex Web Service";
 
-interface FlexTokenConfig {
-  token_masked: string;
-  activated_at: string;
-  expires_at: string;
-  renewal_url: string;
-  breadcrumb: string;
-  reminder_days: number[];
-  reminders_sent: Record<string, string>;
-  notes: string;
+interface HealthFlexToken {
+  configured?: boolean;
+  expires_at?: string;
+  days_remaining?: number;
+  reminder_days?: number[];
+  active_threshold?: number | null;
+  should_warn?: boolean;
+  expired?: boolean;
+  error?: string;
 }
 
 export async function GET(): Promise<Response> {
   try {
-    const raw = await readFile(CONFIG_PATH, "utf-8");
-    const config: FlexTokenConfig = JSON.parse(raw);
-
-    const expiresAt = new Date(config.expires_at);
-    const now = new Date();
-    const diffMs = expiresAt.getTime() - now.getTime();
-    const days_remaining = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-
-    const thresholds = config.reminder_days ?? [30, 14, 7, 1];
-    const should_warn = thresholds.some((t) => days_remaining <= t);
-    const expired = days_remaining <= 0;
-
-    // Which threshold are we at?
-    let active_threshold: number | null = null;
-    for (const t of [...thresholds].sort((a, b) => b - a)) {
-      if (days_remaining <= t) {
-        active_threshold = t;
-        break;
-      }
+    const health = await xenonFetch<{ flex_token?: HealthFlexToken }>("/health", {
+      method: "GET",
+      timeout: 5_000,
+    });
+    const ft = health.flex_token;
+    if (!ft?.configured) {
+      // Not configured is not an error — the banner just has nothing to show.
+      return NextResponse.json({
+        days_remaining: null,
+        should_warn: false,
+        expired: false,
+        error: ft?.error ?? "flex token not configured",
+      });
     }
-
     return NextResponse.json({
-      days_remaining,
-      expires_at: config.expires_at,
-      activated_at: config.activated_at,
-      token_masked: config.token_masked,
-      renewal_url: config.renewal_url,
-      breadcrumb: config.breadcrumb,
-      should_warn,
-      expired,
-      active_threshold,
-      reminder_days: thresholds,
+      days_remaining: ft.days_remaining ?? null,
+      expires_at: ft.expires_at,
+      renewal_url: RENEWAL_URL,
+      breadcrumb: BREADCRUMB,
+      should_warn: ft.should_warn ?? false,
+      expired: ft.expired ?? false,
+      active_threshold: ft.active_threshold ?? null,
+      reminder_days: ft.reminder_days ?? [],
     });
-  } catch {
-    // Config not found or invalid — not an error, just no data
-    return NextResponse.json({
-      days_remaining: null,
-      should_warn: false,
-      expired: false,
-      error: "flex_token_config.json not found",
-    });
+  } catch (err) {
+    if (err instanceof XenonApiError) {
+      return NextResponse.json({ error: err.detail }, { status: err.status });
+    }
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Unknown error" },
+      { status: 502 },
+    );
   }
 }

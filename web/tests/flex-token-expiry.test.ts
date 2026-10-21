@@ -59,7 +59,7 @@ describe("GET /api/flex-token API route", () => {
     expect(content).toContain("GET");
   });
 
-  it("reads flex_token_config.json", async () => {
+  it("reads expiry from FastAPI /health, not the config file", async () => {
     const p = path.join(
       PROJECT_ROOT,
       "web",
@@ -69,7 +69,9 @@ describe("GET /api/flex-token API route", () => {
       "route.ts",
     );
     const content = await readFile(p, "utf-8");
-    expect(content).toContain("flex_token_config");
+    expect(content).toContain("xenonFetch");
+    expect(content).not.toContain("flex_token_config");
+    expect(content).not.toContain("readFile");
   });
 
   it("computes days_remaining", async () => {
