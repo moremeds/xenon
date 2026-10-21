@@ -25,6 +25,7 @@ Usage:
 """
 
 import argparse
+import logging
 import os
 import subprocess
 import webbrowser
@@ -44,6 +45,8 @@ from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 
 TEMPLATE_PATH = PROJECT_DIR / ".pi/skills/html-report/portfolio-template.html"
 REPORTS_DIR = PROJECT_DIR / "reports"
+
+logger = logging.getLogger(__name__)
 
 TODAY = date.today()
 TODAY_STR = TODAY.strftime("%Y-%m-%d")
@@ -731,6 +734,17 @@ def generate_report(grouped, account, flow_data, timestamp, market_open) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+def _detect_market_open() -> bool:
+    """Regular-session flag for the report; assume open (and log loudly) if the calendar fails."""
+    from xenon.utils import market_calendar
+
+    try:
+        return market_calendar.is_open(market_calendar.now_et())
+    except Exception:
+        logger.exception("market calendar failed; report assumes the market is open")
+        return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate portfolio HTML report with live IB data")
     parser.add_argument("--no-open", action="store_true", help="Don't open in browser")
@@ -744,13 +758,7 @@ def main():
     print(f"   {timestamp}")
     print()
 
-    # Detect market status
-    try:
-        from xenon.utils.market_hours import is_market_open
-
-        market_open = is_market_open()
-    except Exception:
-        market_open = True  # assume open if can't check
+    market_open = _detect_market_open()
 
     # 1. IB data
     print("[1/4] Connecting to IB — fetching positions + live prices...")

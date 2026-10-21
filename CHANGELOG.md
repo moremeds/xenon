@@ -7,6 +7,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 - **Ratings tab works again.** `GET /ticker/ratings?ticker=XYZ` on FastAPI returns the raw Unusual Whales analyst rows (`screener/analysts`) with `as_of` and `source`; it caches each ticker for 15 minutes and answers 502 with a top-level `reason_code` when UW fails. `/api/ticker/ratings` now calls it through `xenonFetch` instead of spawning the removed `xenon-fetch-analyst` CLI. The tab lists recent analyst actions with the price target of each; it no longer shows an aggregate recommendation or consensus counts.
 
+- **One market calendar (PR-21).** `xenon.utils.market_calendar` is the only "is the US market open" check: ET-aware, 09:30 to 16:00 (16:00 exclusive), weekdays minus `market_holidays.json`. Option order entry, the portfolio-snapshot stale thresholds (order preflight and gate4) and the performance cache TTL now treat market holidays as closed; before, they used a weekday-only rule. The snapshot stale checks keep the whole 16:00 minute open (`close_inclusive_minute`). A naive `datetime` is rejected; a year missing from, or malformed content in, the holiday file raises `CalendarYearMissing`, and the runtime callers above log an error and fall back to the weekday rule. The duplicate `utils/market_hours.py` and `execution/market_hours.py` are deleted; `xenon-market-hours` now lives in `market_calendar`. Early closes (13:00 ET) are still not modelled.
+
 ## [0.12.0] — 2026-10-21
 
 Summary: the Futu tab syncs again after page load; the naked-short audit gains an enforce mode that stays off unless `XENON_AUDIT_CANCEL=1`.

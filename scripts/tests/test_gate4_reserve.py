@@ -26,6 +26,7 @@ from xenon.db.engine import get_sync_engine
 from xenon.db.schema import account_snapshots, order_fills, order_submissions
 from xenon.execution import coverage, gate4
 from xenon.execution.orders_store import RequestRow
+from xenon.utils import market_calendar
 
 SCOPE = {"broker": "IB", "account_env": "paper", "broker_account": "DU0000000"}
 NOW = datetime.now(timezone.utc)
@@ -258,7 +259,7 @@ def _market_closed(monkeypatch):
     """Pin the staleness clock: gate4 uses a 300 s limit in RTH and 1800 s
     otherwise, so fixtures dated "5 minutes ago" passed only outside market
     hours. Tests that exercise staleness set the CLOSED limit explicitly."""
-    monkeypatch.setattr(gate4, "_market_open_now", lambda: False)
+    monkeypatch.setattr(market_calendar, "is_open", lambda *a, **k: False)
 
 
 def test_snapshot_missing_observation_fails_closed():

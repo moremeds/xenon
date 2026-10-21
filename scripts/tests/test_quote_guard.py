@@ -178,3 +178,57 @@ def test_sell_below_floor_rejects_with_LIMIT_OUT_OF_BAND():
     )
     assert v.accept is False
     assert v.reason_code == ReasonCode.LIMIT_OUT_OF_BAND
+
+
+def test_check_market_hours_opt_blocked_on_holiday_midday():
+    # Thanksgiving 2026, 13:00 ET: weekday + inside 09:30-16:00, but closed.
+    thanksgiving = datetime(2026, 11, 26, 13, 0, tzinfo=ZoneInfo("America/New_York"))
+    v = quote_guard.check_market_hours(security_type="OPT", now=thanksgiving)
+    assert v.accept is False
+    assert v.reason_code == ReasonCode.OPTION_MARKET_CLOSED
+
+
+def test_check_market_hours_opt_open_midday_trading_day():
+    v = quote_guard.check_market_hours(
+        security_type="OPT", now=datetime(2026, 11, 25, 13, 0, tzinfo=ZoneInfo("America/New_York"))
+    )
+    assert v.accept is True
+
+
+def test_check_market_hours_stock_not_gated_on_holiday():
+    thanksgiving = datetime(2026, 11, 26, 13, 0, tzinfo=ZoneInfo("America/New_York"))
+    assert quote_guard.check_market_hours(security_type="STK", now=thanksgiving).accept is True
+
+
+import pytest  # noqa: E402
+
+from xenon.utils import market_calendar  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        '{"2026": ["2026-11-XX"]}',  # bad date string
+        "[]",  # top-level list
+        '{"2026": 42}',  # non-list year value
+        '{"2026": ["2026-11-26", 7]}',  # non-string entry
+        '{"2026": ["2025-11-27"]}',  # date from another year
+        "{not json",
+    ],
+)
+def test_check_market_hours_survives_malformed_holiday_file(monkeypatch, tmp_path, caplog, contents):
+    bad = tmp_path / "market_holidays.json"
+    bad.write_text(contents)
+    monkeypatch.setattr(market_calendar, "_CONFIG_PATH", bad)
+    market_calendar._load_file.cache_clear()
+    try:
+        midday = datetime(2026, 11, 25, 13, 0, tzinfo=ZoneInfo("America/New_York"))
+        with caplog.at_level("ERROR"):
+            assert quote_guard.check_market_hours(security_type="OPT", now=midday).accept is True
+            # weekday fallback: the holiday is NOT known, so Thanksgiving passes (degraded mode)
+            weekend = datetime(2026, 11, 28, 13, 0, tzinfo=ZoneInfo("America/New_York"))
+            assert quote_guard.check_market_hours(security_type="OPT", now=weekend).accept is False
+        assert any("cannot read" in r.getMessage() for r in caplog.records)
+    finally:
+        monkeypatch.undo()
+        market_calendar._load_file.cache_clear()
