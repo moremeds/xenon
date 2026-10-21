@@ -1,0 +1,90 @@
+{
+  "_provenance": {
+    "ticker": "MSFT",
+    "captured_on": "2026-10-21",
+    "source": "Unusual Whales GET /api/screener/analysts?ticker=MSFT&limit=25, fetched once via the unusual-whales MCP get_analyst_ratings tool (MCP wraps rows in 'result'; re-wrapped here as the REST 'data' envelope). First 5 rows, the 2026-09-23 upgrade row, a 'hold' row and a 'reiterated' row of the 25 returned; row contents untouched.",
+    "no_network_at_test_time": true
+  },
+  "data": [
+    {
+      "timestamp": "2026-10-20T17:48:14.000000Z",
+      "ticker": "MSFT",
+      "action": "maintained",
+      "target": "600.0000",
+      "sector": "Technology",
+      "recommendation": "buy",
+      "analyst_name": "Keith Bachman",
+      "firm": "BMO Capital"
+    },
+    {
+      "timestamp": "2026-10-19T11:34:04.000000Z",
+      "ticker": "MSFT",
+      "action": "maintained",
+      "target": "662.0000",
+      "sector": "Technology",
+      "recommendation": "buy",
+      "analyst_name": "Mark Moerdler",
+      "firm": "Bernstein"
+    },
+    {
+      "timestamp": "2026-10-16T13:37:41.000000Z",
+      "ticker": "MSFT",
+      "action": "maintained",
+      "target": "600.0000",
+      "sector": "Technology",
+      "recommendation": "buy",
+      "analyst_name": "Yi Fu Lee",
+      "firm": "StoneX"
+    },
+    {
+      "timestamp": "2026-10-15T22:01:53.000000Z",
+      "ticker": "MSFT",
+      "action": "maintained",
+      "target": "675.0000",
+      "sector": "Technology",
+      "recommendation": "buy",
+      "analyst_name": "Karl Keirstead",
+      "firm": "UBS"
+    },
+    {
+      "timestamp": "2026-10-15T19:51:11.000000Z",
+      "ticker": "MSFT",
+      "action": "maintained",
+      "target": "636.0000",
+      "sector": "Technology",
+      "recommendation": "buy",
+      "analyst_name": "Tyler Radke",
+      "firm": "Citigroup"
+    },
+    {
+      "timestamp": "2026-09-23T09:52:30.000000Z",
+      "ticker": "MSFT",
+      "action": "upgraded",
+      "target": "575.0000",
+      "sector": "Technology",
+      "recommendation": "buy",
+      "analyst_name": "Brad Reback",
+      "firm": "Stifel"
+    },
+    {
+      "timestamp": "2026-09-04T17:05:24.000000Z",
+      "ticker": "MSFT",
+      "action": "maintained",
+      "target": "530",
+      "sector": "Technology",
+      "recommendation": "hold",
+      "analyst_name": "Brad Reback",
+      "firm": "Stifel"
+    },
+    {
+      "timestamp": "2026-07-30T18:24:51.000000Z",
+      "ticker": "MSFT",
+      "action": "reiterated",
+      "target": "640",
+      "sector": "Technology",
+      "recommendation": "buy",
+      "analyst_name": "Rishi Jaluria",
+      "firm": "RBC Capital"
+    }
+  ]
+}
