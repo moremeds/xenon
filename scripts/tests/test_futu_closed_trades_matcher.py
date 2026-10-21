@@ -53,15 +53,20 @@ def test_partial_close_across_two_open_lots_unique_ids():
     assert sum(l.realized_pnl for l in lots) == Decimal("100")  # (110-100)*10
 
 
-def test_close_with_no_open_lot_logs_info_and_emits_nothing(caplog):
-    """Pre-inception opens (deal history starts 2024-01-01) are expected, not a defect."""
+def test_close_with_no_open_lot_warns_once_per_deal_and_emits_nothing(caplog):
+    """The rebuild reruns on every sync: WARNING the first time, DEBUG after."""
     import logging
 
+    from xenon.api.services import futu_closed_trades as mod
+
+    mod._UNMATCHED_CLOSE_WARNED.clear()
+    trades = [_t("s1", "SELL", 5, 100, 1)]
     with caplog.at_level(logging.DEBUG, logger="xenon.api.services.futu_closed_trades"):
-        lots = match_closed_lots([_t("s1", "SELL", 5, 100, 1)])
-    assert lots == []
-    records = [r for r in caplog.records if "no open lot" in r.getMessage()]
-    assert records and all(r.levelno == logging.INFO for r in records)
+        assert match_closed_lots(trades) == []
+        assert match_closed_lots(trades) == []
+        assert match_closed_lots([_t("s2", "SELL", 5, 100, 2)]) == []
+    levels = [r.levelno for r in caplog.records if "no open lot" in r.getMessage()]
+    assert levels == [logging.WARNING, logging.DEBUG, logging.WARNING]
 
 
 def test_unknown_side_skipped(caplog):
