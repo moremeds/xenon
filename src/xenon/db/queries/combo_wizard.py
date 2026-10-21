@@ -212,6 +212,11 @@ def upsert_protection(conn: Connection, session_id: str, **fields) -> None:
         conn.execute(update(wizard_protection).where(wizard_protection.c.session_id == session_id).values(**fields))
 
 
+def get_protection_config(conn: Connection, session_id: str) -> dict | None:
+    row = conn.execute(select(wizard_protection.c.config).where(wizard_protection.c.session_id == session_id)).first()
+    return dict(row[0]) if row is not None and row[0] is not None else None
+
+
 def list_protected_sessions(
     conn: Connection,
     *,

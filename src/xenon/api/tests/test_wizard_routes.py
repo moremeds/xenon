@@ -710,8 +710,8 @@ def _tp_rows(session_id: str) -> list:
     with engine.connect() as conn:
         rows = conn.execute(
             text(
-                "SELECT action, security_type, tif, state, limit_price, legs, ib_order_id, perm_id "
-                "FROM xenon.order_submissions WHERE client_attempt_id LIKE :pat"
+                "SELECT submission_id, action, security_type, tif, state, limit_price, legs, ib_order_id, perm_id "
+                "FROM xenon.order_submissions WHERE client_attempt_id LIKE :pat ORDER BY submitted_at"
             ),
             {"pat": f"wiz:{session_id}:tp:%"},
         ).all()
@@ -948,21 +948,170 @@ def test_protect_broker_not_ready_at_send_sends_nothing(monkeypatch, client, fil
     assert protect_owner.pool.client.sent == []
 
 
-def test_protect_outcome_unknown_keeps_session_claimed(monkeypatch, client, filled_session, protect_owner):
-    """IB may hold the TP: the session must not return to FILLED, or a second
-    protect would place a duplicate TP."""
+# --------------------------------------------------------------------------
+# Re-entrant protect for PROTECTION_PENDING (Astra P2 on PR #229): the intent
+# is stored before the send; a retry resolves the stored attempt from its
+# order_submissions row: bind a live TP, re-place only after proof that no TP
+# is live, else keep the claim (409). Each test counts owner sends.
+# --------------------------------------------------------------------------
+
+
+def _died_after_send(ib_client, params):
+    ib_client.place_order("tp-contract", "tp-order")
+    return {"status": "uncertain", "message": "socket closed after send"}
+
+
+def _accepted(ib_client, params):
+    ib_client.place_order("tp-contract", "tp-order")
+    return {"status": "ok", "outcome": "accepted", "orderId": 9201, "permId": 9202, "initialStatus": "Submitted"}
+
+
+def _sends(protect_owner) -> int:
+    return len(protect_owner.pool.client.sent)
+
+
+def _protection_config(session_id: str) -> dict | None:
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT config FROM xenon.wizard_protection WHERE session_id = :sid"), {"sid": session_id}
+        ).fetchone()
+    engine.dispose()
+    return row[0] if row else None
+
+
+def _first_attempt_unknown(monkeypatch, client, session_id):
     from scripts.tests.order_owner_fakes import install_cores
 
-    _real_place_path(monkeypatch)
-
-    def died_after_send(ib_client, params):
-        ib_client.place_order("tp-contract", "tp-order")
-        return {"status": "uncertain", "message": "socket closed after send"}
-
-    install_cores(monkeypatch, place=died_after_send)
-    resp = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+    install_cores(monkeypatch, place=_died_after_send)
+    resp = client.post(f"/wizard/sessions/{session_id}/protect", json=_PROTECT_BODY)
     assert (resp.status_code, resp.json()["reason_code"]) == (502, "PLACE_OUTCOME_UNKNOWN")
-    assert _session_state(filled_session) == "PROTECTION_PENDING"
+    assert _session_state(session_id) == "PROTECTION_PENDING"
+    rows = _tp_rows(session_id)
+    assert [r["state"] for r in rows] == ["UNKNOWN"]
+    # The intent was stored before the send.
+    config = _protection_config(session_id)
+    assert config["tp_client_attempt_id"].startswith(f"wiz:{session_id}:tp:")
+    assert (config["tp_enabled"], config["alert_enabled"]) == (False, False)
+    assert config["alert_net_mid_threshold"] == "1.25" and config["alert_polarity"] == "DEBIT"
+    install_cores(monkeypatch, place=_accepted)
+    return rows[0]["submission_id"]
+
+
+def test_protect_still_unknown_retry_gets_409_and_sends_nothing(monkeypatch, client, filled_session, protect_owner):
+    _real_place_path(monkeypatch)
+    _first_attempt_unknown(monkeypatch, client, filled_session)
+
     again = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
     assert again.status_code == 409
+    assert again.json()["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
+    assert _sends(protect_owner) == 1
+    assert len(_tp_rows(filled_session)) == 1
+    assert _session_state(filled_session) == "PROTECTION_PENDING"
+
+
+def test_protect_late_refusal_retry_places_exactly_one_new_tp(monkeypatch, client, filled_session, protect_owner):
+    from xenon.execution import orders_store
+
+    _real_place_path(monkeypatch)
+    sub = _first_attempt_unknown(monkeypatch, client, filled_session)
+    assert orders_store.mark_terminal(
+        submission_id=sub, state="FAILED", reason_code="IB_CONNECTION", filled_qty=0,
+        avg_fill_price=None, expected_states=("UNKNOWN",),
+    )
+
+    again = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
+    assert again.status_code == 200, again.text
+    assert again.json()["state"] == "PROTECTED"
+    assert _sends(protect_owner) == 2  # the uncertain first send + exactly one new TP
+    assert [r["state"] for r in _tp_rows(filled_session)] == ["FAILED", "WORKING"]
+    config = _protection_config(filled_session)
+    assert config["tp_enabled"] is True and config["alert_enabled"] is True
+    assert config["tp_ib_order_id"] == "9202"
+
+
+def test_protect_late_acceptance_retry_binds_and_arms_without_sending(monkeypatch, client, filled_session, protect_owner):
+    from xenon.execution import orders_store
+
+    _real_place_path(monkeypatch)
+    sub = _first_attempt_unknown(monkeypatch, client, filled_session)
+    assert orders_store.mark_submitted(
+        submission_id=sub, ib_order_id="9301", perm_id="9302", placing_client_id=4, expected_states=("UNKNOWN",)
+    )
+
+    # A different target on the retry: the live TP keeps the stored price.
+    again = client.post(
+        f"/wizard/sessions/{filled_session}/protect",
+        json={**_PROTECT_BODY, "tp_target_price": "4.00", "alert_net_mid_threshold": "9.99"},
+    )
+
+    assert again.status_code == 200, again.text
+    body = again.json()
+    assert (body["state"], body["bound"], body["tp_order_id"]) == ("PROTECTED", True, "9302")
+    assert body["tp_target_price"] == "3.50" and body["requested_tp_target_price"] == "4.00"
+    assert _sends(protect_owner) == 1  # no new send
+    assert len(_tp_rows(filled_session)) == 1
+    config = _protection_config(filled_session)
+    assert (config["tp_enabled"], config["alert_enabled"], config["tp_ib_order_id"]) == (True, True, "9302")
+    assert config["tp_target_price"] == "3.50" and config["alert_net_mid_threshold"] == "1.25"  # stored values
+
+
+def test_protect_cancelled_after_claim_then_row_working_retry_binds(monkeypatch, client, filled_session, protect_owner):
+    import asyncio
+    from decimal import Decimal
+
+    from xenon.execution.combo_wizard import protect as protect_mod
+
+    _real_place_path(monkeypatch)
+    from scripts.tests.order_owner_fakes import install_cores
+
+    install_cores(monkeypatch, place=_accepted)
+    real_place = order_entry.place
+
+    async def place_then_cancelled(body):
+        await real_place(body)  # reserved + sent: row WORKING
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(order_entry, "place", place_then_cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            protect_mod.attach_protection(
+                filled_session, tp_target_price=Decimal("3.50"), alert_net_mid_threshold=Decimal("1.25"), polarity="DEBIT"
+            )
+        )
+    monkeypatch.setattr(order_entry, "place", real_place)
+    assert _session_state(filled_session) == "PROTECTION_PENDING"
+    assert [r["state"] for r in _tp_rows(filled_session)] == ["WORKING"]
+
+    again = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
+    assert again.status_code == 200, again.text
+    assert again.json()["state"] == "PROTECTED" and again.json()["bound"] is True
+    assert _sends(protect_owner) == 1
+    assert len(_tp_rows(filled_session)) == 1
+
+
+def test_protect_tp_placed_alert_failed_retry_arms_alert_only(monkeypatch, client, filled_session, protect_owner):
+    from xenon.execution.combo_wizard import protect as protect_mod
+
+    _real_place_path(monkeypatch)
+    real_register = protect_mod._register_risk_alert
+
+    def _fail(*_a, **_k):
+        raise RuntimeError("alert store unavailable")
+
+    monkeypatch.setattr(protect_mod, "_register_risk_alert", _fail)
+    first = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+    assert first.status_code == 200, first.text
+    assert (first.json()["state"], first.json()["alert_armed"]) == ("PROTECTION_PENDING", False)
+    assert _sends(protect_owner) == 1
+
+    monkeypatch.setattr(protect_mod, "_register_risk_alert", real_register)
+    again = client.post(f"/wizard/sessions/{filled_session}/protect", json=_PROTECT_BODY)
+
+    assert again.status_code == 200, again.text
+    assert (again.json()["state"], again.json()["alert_armed"], again.json()["bound"]) == ("PROTECTED", True, True)
+    assert _sends(protect_owner) == 1  # alert only, no second TP
     assert len(_tp_rows(filled_session)) == 1

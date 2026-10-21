@@ -290,7 +290,9 @@ async def test_refused_place_returns_response_and_session_back_to_filled(place):
     assert json.loads(result.body)["reason_code"] == "ETF_CALL_UNCOVERED"
     assert _state(sid) == "FILLED"
     assert "PROTECTION_TP_REFUSED" in _event_kinds(sid)
-    assert _config(sid) is None
+    # Only the stored intent remains; nothing enabled.
+    config = _config(sid)
+    assert (config["tp_enabled"], config["alert_enabled"]) == (False, False)
 
 
 @pytest.mark.asyncio
@@ -314,7 +316,11 @@ async def test_only_proven_not_sent_responses_release_the_claim(place, status, r
 
 
 @pytest.mark.asyncio
-async def test_place_outcome_unknown_keeps_session_protection_pending(place):
+async def test_place_outcome_unknown_keeps_session_protection_pending(place, monkeypatch):
+    from types import SimpleNamespace
+
+    from xenon.execution import orders_store
+
     sid = _init_session(state="FILLED")
     place.replies[:] = [JSONResponse(status_code=502, content={"reason_code": "PLACE_OUTCOME_UNKNOWN"})]
 
@@ -322,9 +328,21 @@ async def test_place_outcome_unknown_keeps_session_protection_pending(place):
 
     assert result.status_code == 502
     assert _state(sid) == "PROTECTION_PENDING"
-    with pytest.raises(ValueError, match="cannot protect from state PROTECTION_PENDING"):
-        await _protect(sid)
+    stored_cid = _config(sid)["tp_client_attempt_id"]
+    assert stored_cid == place.calls[0]["client_attempt_id"]
+    # The stored attempt's row is still UNKNOWN: a retry keeps the claim (409), no send.
+    seen = []
+
+    def _lookup(user_id, cid, **scope):
+        seen.append(cid)
+        return SimpleNamespace(state="UNKNOWN", perm_id=None, ib_order_id=None)
+
+    monkeypatch.setattr(orders_store, "lookup_by_attempt", _lookup)
+    again = await _protect(sid)
+    assert (again.status_code, json.loads(again.body)["reason_code"]) == (409, "PLACE_OUTCOME_UNKNOWN")
+    assert seen == [stored_cid]
     assert len(place.calls) == 1
+    assert _state(sid) == "PROTECTION_PENDING"
 
 
 @pytest.mark.asyncio
@@ -413,3 +431,30 @@ async def test_signed_combo_pricing_preserved_for_credit(place):
     assert Decimal(config["tp_target_price"]) == Decimal("-0.10")
     assert Decimal(config["alert_net_mid_threshold"]) == Decimal("-0.45")
     assert "RISK_ALERT_REGISTERED" in _event_kinds(sid)
+
+
+@pytest.mark.asyncio
+async def test_retry_while_first_protect_is_in_flight_gets_409_without_send(monkeypatch):
+    """Between the claim and the reservation insert no order_submissions row
+    exists; a concurrent retry must not read "no row" as "nothing sent"."""
+    sid = _init_session(state="FILLED")
+    gate = asyncio.Event()
+    calls: list[dict] = []
+
+    async def slow_place(body):
+        calls.append(body)
+        await gate.wait()
+        return {"status": "ok", "orderId": 1, "permId": 2}
+
+    monkeypatch.setattr(order_entry, "place", slow_place)
+    first = asyncio.ensure_future(_protect(sid))
+    await asyncio.sleep(0)
+    while not calls:
+        await asyncio.sleep(0.01)
+
+    second = await _protect(sid)
+    assert (second.status_code, json.loads(second.body)["reason_code"]) == (409, "PLACE_OUTCOME_UNKNOWN")
+
+    gate.set()
+    assert (await first)["state"] == "PROTECTED"
+    assert len(calls) == 1

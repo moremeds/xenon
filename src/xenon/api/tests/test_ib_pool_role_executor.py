@@ -252,7 +252,7 @@ def test_acquire_callers_dispatch_via_run_sync_not_to_thread():
     assert ".acquire(" not in protect_src
     from xenon.execution.combo_wizard import protect as protect_mod
 
-    attach_src = inspect.getsource(protect_mod.attach_protection)
+    attach_src = inspect.getsource(protect_mod)
     assert "order_entry.place(" in attach_src
     assert "owner.run(" not in attach_src
     for fn, role in targets:
