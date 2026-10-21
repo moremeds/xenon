@@ -84,8 +84,7 @@ Sum of legs = position P&L. Uses WS price, fallback IB sync. Impl: `LegRow` in `
 | Multi-leg spread       | Net from each leg's `prices[legPriceKey(...)]`                              |
 | BAG order last         | `resolveOrderLastPrice()` — net mid from legs                               |
 | BAG modify BID/MID/ASK | `resolveOrderPriceData()` in `ModifyOrderModal.tsx`                         |
-| Order form BID/MID/ASK | Same as PriceBar                                                            |
-| PriceBar in modal      | `resolvePriceBar()` — option-level for single-leg, underlying for multi-leg |
+| Order form BID/MID/ASK | `resolveOrderPriceData()` in `OrderTab.tsx`                                 |
 
 **Never show underlying price where user expects option/spread price. Show "---" if unavailable.**
 
@@ -129,7 +128,7 @@ npm run test:e2e      # Playwright (no-server config)
 ```
 
 Dev ports are **3200 / 8421 / 8866** (next / FastAPI / realtime WS) — offset from the
-legacy 3000 / 8321 / 8765 (still used by production launchd and the local radon stack).
+legacy 3000 / 8321 / 8765 (the ports the production Docker stack publishes on 127.0.0.1, `deploy/compose.prod.yml`, and the local radon stack).
 Override the API port with `XENON_API_PORT`; Next with `-p`; realtime with `--port`.
 
 ## ⛔ Brand Identity — Mandatory for UI Work

@@ -580,3 +580,33 @@ for ${sym}"`) survives, but the wrapping prefix is gone.
     `2026_06_13_fill_qty_numeric` migration was applied to `core_test` via raw DDL as a
     workaround; resolve the divergence (restore the missing file or `alembic stamp`
     core_dev to a known-good rev) before the macmini migrator can apply new migrations.
+
+- 2026-10-21 — **Futu realized P&L gap: closes with no open lot** —
+  `futu_closed_trades` sees closes that have no matching open lot, so the realized
+  P&L of those closes is incomplete (omitted for the unmatched quantity).
+  - **Notes:** Suspected causes, none proven: option assignment / exercise (the resulting
+    shares have no BUY deal), deals before the history start (`inception`, passed to
+    the sync in `futu_history_sync.py`), and deals outside the US market (the sync keeps
+    only `market == "US"` deals: `futu_history_sync.py:150`, `:249`). The matcher
+    already warns once per (code, side, deal_id) per process, then logs at DEBUG
+    (`src/xenon/api/services/futu_closed_trades.py`, `_UNMATCHED_CLOSE_WARNED`). To size the gap,
+    collect those warnings after a full rebuild and group them by code. A fix needs a
+    deal-less open source (assignment records or statement lots), so it depends on the
+    Futu statement ingestion path (`futu_statement_sync.py`). CHANGELOG 0.12.0 lists the
+    warn-once change; the cause stays unverified.
+
+- 2026-10-21 — **Wizard protect has no Gate-4 coverage / reserve check** —
+  `POST /wizard/sessions/{id}/protect` runs only `ensure_order_allowed` and
+  `require_writable` before it hands the TP placement to the order owner.
+  - **Notes:** Verified in `src/xenon/api/routes/wizard.py` (`wizard_protect`): no call
+    to the Gate-4 path that place uses (`gate4.reserve_with_coverage` in
+    `src/xenon/api/services/order_entry.py`). The only naked-short check on protect is
+    leg-level and portfolio-blind: `_tp_would_naked_short` in
+    `src/xenon/execution/combo_wizard/protect.py` and the same rule in
+    `combo_wizard/ib_adapter.py` (`NakedShortGuardError`), which count SELL calls
+    against BUY calls in the session legs only. The TP is a closing order, so it may be
+    safe by construction; that is a design decision, not a verified fact. Decide:
+    (a) accept and document it in `src/xenon/api/CLAUDE.md`, or (b) route protect
+    through the shared Gate-4 reserve so the TP is checked against the live snapshot
+    and working-order reservations. Option (b) touches the order path: read
+    `docs/reference/order-path-incident-history.md` first and add a route test plus a browser test.

@@ -154,31 +154,57 @@ DML succeeds on the right DB and fails on the other.)
 
 ## Step 5 — Update the macmini's `.env`
 
-Edit `~/projects/xenon/.env` on the macmini and replace the
-`DATABASE_URL` line:
+The production stack reads `/opt/xenon/.env` and, for the api, also `/opt/xenon/web.env`
+(`deploy/compose.prod.yml`; `web.env` overrides `.env` for the api). The macmini has no
+source checkout. Edit `/opt/xenon/.env` and replace the `DATABASE_URL` line, and make sure
+`/opt/xenon/web.env` does not set `DATABASE_URL`:
 
 ```diff
 - DATABASE_URL=postgresql+asyncpg://xenon_app:xenon_dev@<lan-host>:5432/core_dev
-+ DATABASE_URL=postgresql+asyncpg://xenon_prod:<prod-pw>@localhost:5432/core_dev
++ DATABASE_URL=postgresql+asyncpg://xenon_prod:<prod-pw>@host.docker.internal:5432/core_dev
 ```
 
 Leave `DATABASE_URL_TEST` and `DATABASE_URL_PAPER` empty/commented in
 the prod `.env` — the Docker stack does not run paper mode.
 
-Restart the Docker stack so the new credentials take effect:
+Before the restart (and before `stop`), check the URL the containers will really use. Postgres is
+host-native; containers reach it as `host.docker.internal` (`localhost` inside a container is the
+container itself). One-off containers read the edited env files; each line prints user, host and
+database only, never the password, and must print `xenon_prod host.docker.internal core_dev`.
+`alembic current` then connects with the migrator's URL and must print a revision, not an error:
 
 ```bash
-cd ~/projects/xenon
-docker compose down
-docker compose run --rm migrator       # alembic upgrade against core_dev as xenon_prod
-docker compose up -d
+export PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon
+CHK='import os,urllib.parse as u; p=u.urlsplit(os.environ["DATABASE_URL"]); print(p.username, p.hostname, p.path.lstrip("/"))'
+docker-compose run --rm --no-deps --pull never api python -c "$CHK"
+docker-compose --profile migrate run --rm --pull never migrator python -c "$CHK"
+docker-compose --profile migrate run --rm --pull never migrator alembic current
+```
+
+If any line differs, fix the env files and do not stop the api.
+
+Recreate the Docker stack so the new credentials take effect, with the controlled
+sequence from `docs/runbooks/remote-deploy.md` § Standard release flow (the mini uses the
+hyphenated `docker-compose`; run `export PATH=/opt/homebrew/bin:$PATH` first):
+
+```bash
+cd /opt/xenon
+docker stop xenon-watchtower-1
+docker-compose stop -t 60 api realtime
+lsof -nP -iTCP:4001 -sTCP:ESTABLISHED 2>/dev/null | grep -c limactl   # must print 0; else pr10-order-owner-cutover.md § 4
+docker-compose --profile migrate run --rm --pull never migrator      # alembic upgrade against core_dev
+docker-compose up -d --pull never api web realtime
 curl -s http://localhost:8321/health | jq '.ib_gateway, .ib_pool, .trading_mode'
 ```
 
-The migrator container needs `xenon_migrator` credentials, NOT
-`xenon_prod`. Add a `DATABASE_URL_MIGRATOR` to `.env` if your compose
-file doesn't already split this — see
-[`docker-compose.yml`](../../docker-compose.yml).
+For the job settings, also run
+`deploy/README.md` § Operator rollout checklist, section E. Resume Watchtower only
+through `docs/runbooks/remote-deploy.md` § Standard release flow, step 10 (registry `:latest`
+must be the running release); on a mismatch or `RESTORE FAILED`, keep it stopped.
+
+The migrator reads `DATABASE_URL` from the same `/opt/xenon/.env` (`migrator.env_file` in
+`deploy/compose.prod.yml`); no code reads a separate migrator URL. The role in that URL needs
+DDL rights on `core_dev` for a release that carries a migration.
 
 ## Step 6 — Install the nightly refresh LaunchAgent
 

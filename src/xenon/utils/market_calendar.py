@@ -3,8 +3,10 @@
 Regular session only: 09:30 (inclusive) to 16:00 (exclusive), America/New_York,
 Monday to Friday, minus the holidays in ``src/xenon/config/market_holidays.json``.
 
-Every "is the market open" question in the codebase goes through ``is_open`` so
-that holiday and timezone behaviour cannot drift between callers.
+Every Python "is the market open" question goes through ``is_open`` so that
+holiday and timezone behaviour cannot drift between Python callers. The web
+``useMarketHours`` hook and ``scripts/infra/ib_realtime/ib_realtime_server.js``
+have their own checks.
 
 * Times are always ET-aware. A naive ``datetime`` is rejected (``ValueError``);
   the host timezone is never consulted.

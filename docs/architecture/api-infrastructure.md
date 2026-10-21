@@ -1,26 +1,26 @@
 # API Infrastructure Reference
 
-FastAPI bridge between Next.js and IB/UW/MenthorQ. Policy rules live in `scripts/api/CLAUDE.md`; this file is reference.
+FastAPI bridge between Next.js and IB/UW/MenthorQ. Policy rules live in `src/xenon/api/CLAUDE.md`; this file is reference.
 
 ## FastAPI Server Architecture
 
-Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xenonApi.ts`). No `spawn()`.
+Next.js routes call FastAPI (`127.0.0.1:8321` in prod, `8421` under `dev.sh`) via `xenonFetch()` (`web/lib/xenonApi.ts`). No `spawn()`.
 
-### Three-Service Dev Stack (`npm run dev`)
+### Three-Service Dev Stack (`scripts/infra/dev.sh`, `npm run dev` from `web/`)
 
-| Service     | Port |
-| ----------- | ---- |
-| Next.js     | 3000 |
-| IB WS relay | 8765 |
-| FastAPI     | 8321 |
+| Service     | Dev port | Prod port (Docker, 127.0.0.1) |
+| ----------- | -------- | ----------------------------- |
+| Next.js     | 3200     | 3000                          |
+| IB WS relay | 8866     | 8765                          |
+| FastAPI     | 8421     | 8321                          |
 
 ### Files
 
 | File                   | Purpose                                                                                                                                    |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `server.py`            | Endpoints, Clerk JWT auth middleware, IB pool, health, auto-restart. Server-to-server only: no CORS middleware |
-| `auth.py`              | Clerk JWT verification — JWKS validation, single-tenant allowlist (`ALLOWED_USER_IDS`), graceful bypass when unconfigured                  |
-| `ws_ticket.py`         | Short-lived single-use WS tickets (30s TTL) — avoids passing JWTs in WebSocket URLs                                                        |
+| `server.py`            | App assembly: lifespan, auth middleware, IB pool, order owner, router includes. Endpoints live in `routes/`. Server-to-server only: no CORS middleware |
+| `auth.py`              | Credential-only, fail-closed auth: `X-Internal-Token` (`XENON_INTERNAL_API_TOKEN`) or a path-scoped `X-API-Key` (`XENON_QUERY_API_KEY`, `MDW_API_KEY`) |
+| `ws_ticket.py`         | Short-lived single-use WS tickets (30s TTL) — avoids passing credentials in WebSocket URLs                                                 |
 | `ib_pool.py`           | Role-based IB pool (sync/orders/data), auto-reconnect                                                                                      |
 | `ib_gateway.py`        | Health check + auto-restart via IBC launchd. Detects CLOSE_WAIT (upstream dead)                                                            |
 | `subprocess.py`        | Async `run_script()`, `run_module()` — uses `sys.executable` (not `python3`) to match server interpreter                                   |
@@ -33,29 +33,24 @@ Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xeno
 | FastAPI + IB up           | Normal                                                                       |
 | FastAPI up, IB down       | Auto-restart Gateway, retry once, else 503 + cached                          |
 | FastAPI up, IB CLOSE_WAIT | Detected at startup + script errors; auto-restart + kill lingering processes |
-| FastAPI down              | Cached from disk, `is_stale: true`                                           |
+| FastAPI down              | No disk fallback: `/api/portfolio` returns the upstream error (status from `xenonFetch`, default 502 `UPSTREAM_ERROR`; 404 triggers a background sync) |
 
 No spawn fallback. Always try FastAPI first.
 
-## Authentication (Clerk)
+## Authentication
 
-All FastAPI routes are protected by Clerk JWT middleware. Next.js routes are protected by Clerk middleware (`web/middleware.ts`). WebSocket connections use a ticket-based flow to avoid leaking JWTs in URLs.
+There is no Clerk and no user login. Prod is tailnet-only. FastAPI is credential-only and fail-closed (`src/xenon/api/CLAUDE.md` § Auth): a request passes only with a valid `X-Internal-Token` or a scoped `X-API-Key`; `/health` is the only exempt path. Next.js `/api/**` has a browser-origin guard, not user auth. WebSocket connections use a ticket-based flow so no credential appears in the URL.
 
-| Component               | File                                | Purpose                                                              |
-| ----------------------- | ----------------------------------- | -------------------------------------------------------------------- |
-| FastAPI auth middleware | `src/xenon/api/auth.py`             | Validates Clerk JWTs via JWKS, enforces `ALLOWED_USER_IDS` allowlist |
-| FastAPI auth dependency | `src/xenon/api/auth.py`             | `verify_clerk_jwt` — used by `/ws-ticket` endpoint via `Depends()`   |
-| WS ticket service       | `src/xenon/api/ws_ticket.py`        | Issues 30s single-use tickets for WS auth                            |
-| WS ticket proxy         | `web/app/api/ib/ws-ticket/route.ts` | Next.js route proxies to FastAPI (same-origin for browser)           |
-| Next.js middleware      | `web/middleware.ts`                 | Clerk `auth.protect()` on all routes except public share pages       |
-| WS ticket client        | `web/lib/wsTicket.ts`               | Browser calls `/api/ib/ws-ticket` (same-origin) before WS connect    |
-| `xenonApi.ts`           | `web/lib/xenonApi.ts`               | Attaches Clerk Bearer token to all `xenonFetch()` calls              |
+| Component               | File                                | Purpose                                                                                   |
+| ----------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------- |
+| FastAPI auth middleware | `src/xenon/api/auth.py`             | `classify_auth`: internal token, then scoped API keys, else 401 (`XENON_AUTH_ALLOW_DEV_OPEN=1` is dev only) |
+| WS ticket service       | `src/xenon/api/ws_ticket.py`        | Issues 30s single-use tickets for WS auth                                                 |
+| WS ticket proxy         | `web/app/api/ib/ws-ticket/route.ts` | Next.js route proxies to FastAPI (same-origin for browser)                                |
+| Next.js middleware      | `web/middleware.ts`                 | Host allowlist (`XENON_ALLOWED_HOSTS`) and Origin / fetch-metadata checks on `/api/**`    |
+| WS ticket client        | `web/lib/wsTicket.ts`               | Browser calls `/api/ib/ws-ticket` (same-origin) before WS connect                         |
+| `xenonApi.ts`           | `web/lib/xenonApi.ts`               | Attaches `X-Internal-Token` to all `xenonFetch()` calls                                   |
 
-**Public share routes:** `/api/regime/share`, `/api/vcg/share`, `/api/internals/share`, `/api/menthorq/cta/share` are public (no auth).
-
-**Graceful fallback:** When `CLERK_JWKS_URL` is not set, auth middleware passes all requests through (local dev without Clerk).
-
-**Tests:** `scripts/api/tests/test_auth.py` (Python), `web/tests/auth-integration.test.ts`, `web/tests/ws-ticket-local.test.ts` (TS).
+**Tests:** `src/xenon/api/tests/test_auth.py`, `src/xenon/api/tests/test_query_api_key.py` (Python), `web/tests/auth-integration.test.ts`, `web/tests/ws-ticket-local.test.ts` (TS).
 
 ## IB Gateway Auto-Recovery
 
@@ -64,8 +59,8 @@ Startup: check port 4001 + CLOSE_WAIT detection (`lsof`), restart if needed, pol
 ### Health Check
 
 ```bash
-curl http://localhost:8321/health
-# Returns: ib_gateway, ib_pool (sync/orders/data), uw
+curl http://localhost:8421/health   # dev; prod 127.0.0.1:8321
+# Returns: status, ib_gateway, ib_pool (sync/orders/data), orders_owner, uw, ...
 ```
 
 ## IB Gateway Modes
@@ -128,7 +123,8 @@ Global service: `local.ibc-gateway`. Install: `~/ibc-install/`, config: `~/ibc/`
 | ----------------- | ----------- | ---------------------------------------------------- |
 | `IB_GATEWAY_MODE` | `docker`    | `docker`, `cloud` (remote, no restart), or `launchd` |
 | `IB_GATEWAY_HOST` | `127.0.0.1` | Gateway host (`ib-gateway` for cloud mode)           |
-| `IB_GATEWAY_PORT` | `4001`      | Gateway port                                         |
+
+The gateway port is not an env var: it comes from `XENON_TRADING_MODE` (`xenon.api.trading_mode.EXPECTED_PORT`: 4001 live, 4002 paper). The API (`ib_gateway.py`), `IBClient` and `ib_connection.py` all read it from there. `IB_GATEWAY_PORT` is not consulted by Python or by the realtime relay; `scripts/infra/dev.sh` still exports it but nothing reads it.
 
 ### Ports
 
@@ -165,9 +161,9 @@ Machine-to-machine endpoints for headless clients (e.g., market-data-warehouse):
 - `POST /historical/head-timestamp` — earliest available data date (ISO 8601)
 - `POST /historical/bars` — fetch OHLCV bars (ISO `YYYY-MM-DD` dates)
 
-Auth: `X-API-Key` header checked against `MDW_API_KEY` env var. Scoped to these 3 paths only — trading routes (orders, portfolio) remain Clerk JWT-only. Uses `hmac.compare_digest` for constant-time comparison.
+Auth: `X-API-Key` header checked against `MDW_API_KEY` env var. Scoped to these 3 paths only. Order-write endpoints (`/orders/place|cancel|modify`, `/portfolio/sync`, `POST /blotter`, `POST /futu/sync`) accept only the internal token; read endpoints such as `GET /portfolio` and `GET /orders` also accept the separate `XENON_QUERY_API_KEY` (next section). Uses `hmac.compare_digest` for constant-time comparison.
 
-Endpoints live in `scripts/api/routes/historical.py` and use the "data" pool role from `IBPool`.
+Endpoints live in `src/xenon/api/routes/historical.py` and use the "data" pool role from `IBPool`.
 
 ## Read-only Query API (`XENON_QUERY_API_KEY`)
 
@@ -187,5 +183,5 @@ Production is the Docker stack on the macmini (`deploy/README.md`, `docs/runbook
 - **Next.js `/api/**`**: `web/middleware.ts` is a browser Host/Origin guard (`XENON_ALLOWED_HOSTS`), not user auth. Prod is tailnet-only; server-to-server callers hit FastAPI directly with a credential.
 - **`NEXT_PUBLIC_*` env vars**: Baked at build time. After changing `.env`, rebuild Next.js: `cd web && npm run build`
 - **Root `node_modules`**: The root `package.json` has shared deps (`@sinclair/typebox`) used by `lib/tools/`. Must be installed before `web/` build.
-- **Python deps**: Managed by `uv` — `pyproject.toml` is the source of truth, `uv.lock` is the pinned graph. Includes `cryptography` (PyJWT RS256), `fastapi`, `uvicorn`, `httpx`, `python-dotenv`, `numpy`, `pytz`, `playwright`. Install via `uv sync --frozen --extra test`.
+- **Python deps**: Managed by `uv` — `pyproject.toml` is the source of truth, `uv.lock` is the pinned graph. Includes `fastapi`, `uvicorn`, `httpx`, `python-dotenv`, `numpy`, `pytz`. Install via `uv sync --frozen --extra test`.
 - **`@sinclair/typebox`**: Pinned to exact `0.34.48` in both root and web `package.json` to prevent version mismatch build failures.

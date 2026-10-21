@@ -6,7 +6,7 @@ Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` fi
 | ------------------------------------------------ | ------------------------- |
 | Frontend, pricing, P&L                           | `web/CLAUDE.md`           |
 | Python execution, reports, IB/Futu CLIs          | `src/xenon/CLAUDE.md`     |
-| FastAPI, Clerk auth, IB Gateway, order lifecycle | `src/xenon/api/CLAUDE.md` |
+| FastAPI, auth, IB Gateway, order lifecycle       | `src/xenon/api/CLAUDE.md` |
 | Brand tokens, typography, spectrum, UI rules     | `brand/CLAUDE.md`         |
 
 ## Directory layout
@@ -15,12 +15,10 @@ Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` fi
 | ----------------- | ------------------------------------------------------ | ----------------------------------------- |
 | `src/xenon/`      | Python package — API, execution, sync, models          | no                                        |
 | `web/`            | Next.js frontend                                       | no (`.next/`, `node_modules/` yes)        |
-| `site/`           | Marketing / Vercel landing site                        | no (`.next/`, `node_modules/` yes)        |
-| `lib/tools/`      | Shared TypeScript analytics tools (Kelly, GEX readers) | no                                        |
+| `lib/tools/`      | Shared TypeScript script runner (`runner.ts`)          | no                                        |
 | `scripts/`        | Infra, release, CI helpers                             | no                                        |
 | `docs/`           | Architecture, runbooks, research, references           | no                                        |
 | `context/memory/` | Agent memory store (episodic + fact)                   | partially (see `context/.gitignore`)      |
-| `config/`         | Static config files                                    | no                                        |
 | `data/`           | Runtime data files (JSON payloads, caches)             | yes                                       |
 | `logs/`           | Runtime logs                                           | yes (`logs/*`, keep `.gitkeep`)           |
 | `tmp/`            | Scratch / temp files                                   | yes                                       |
@@ -40,7 +38,7 @@ Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` fi
 ## Brokers
 
 - **IB** (primary) — quotes, chains, execution, portfolio. Never bypassed.
-- **Futu** (read-only) — positions snapshot via local Futu OpenD. Surfaces as a separate account tab. No orders, no fills, no quotes. Silent degrade when OpenD unreachable.
+- **Futu** (read-only) — positions snapshot via local Futu OpenD. Surfaces as a separate account tab. No order execution and no quote feed; it reads positions and historical deals (`xenon-futu-history-sync`). Silent degrade when OpenD unreachable.
 
 Every execution/portfolio row carries `broker`, `account_env`, `broker_account` columns so paper and live data never blend in a shared Postgres. Resolve scope via `AccountScope` (`src/xenon/execution/account_scope.py`); FastAPI depends on `get_account_scope`, sync subprocesses read `XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`. Full policy: `docs/architecture/production-database-strategy.md` § Broker Account Scope.
 
@@ -55,7 +53,7 @@ Every execution/portfolio row carries `broker`, `account_env`, `broker_account` 
 
 1. **Interactive Brokers** — real-time quotes, chains, execution, live portfolio. Primary.
 2. **Futu OpenD** — read-only positions snapshot for the Futu account tab.
-3. **Unusual Whales (`$UW_TOKEN`)** — historic OHLC + option contract history for `xenon-portfolio-perf` and `xenon-portfolio-report`. Not used for signal generation (removed in the pure-portfolio pivot).
+3. **Unusual Whales (`$UW_TOKEN`)** — dark-pool flow for `xenon-portfolio-report`, analyst ratings for the Ratings tab (FastAPI `GET /ticker/ratings`, `src/xenon/api/routes/ratings.py`), and ticker info / news / seasonality / previous-close routes in Next.js. Not used for signal generation (removed in the pure-portfolio pivot).
 4. **IB Flex Query** — historical fills audit overlay (`xenon-blotter-history`).
 
 **Never use Yahoo Finance.**
@@ -97,16 +95,17 @@ Real live trading must go through the macmini Docker stack, which writes `core_d
 
 **Read first:** `docs/reference/order-path-incident-history.md` — chronological log of every non-trivial order-path bug, root cause, fix, and regression test. Append a row when you ship a similar fix.
 
-Three automated guards lock in regression patterns. Original two from PR #61; the write-side guard ships with the dev/prod DB split. Full design: `docs/superpowers/plans/_archive/2026-04-28-order-path-regression-prevention.md`.
+Automated guards lock in regression patterns. The first two came from PR #61; the write-side guard shipped with the dev/prod DB split. Full design: `docs/superpowers/plans/_archive/2026-04-28-order-path-regression-prevention.md`.
 
-- **Edit-time reminder** (`.claude/hooks/order-path-reminder.sh`) — PreToolUse hook prints an order-path checklist when Claude edits files under `src/xenon/execution/`, `src/xenon/api/server.py`, `web/app/api/orders/`, or `web/lib/order/`. Advisory, never blocks.
+- **Edit-time reminder** (`.claude/hooks/order-path-reminder.sh`) — PreToolUse hook prints an order-path checklist when Claude edits files under `src/xenon/execution/`, `src/xenon/api/server.py`, `src/xenon/api/services/order_entry.py`, `src/xenon/api/routes/order_entry.py`, `src/xenon/api/routes/portfolio.py`, `src/xenon/api/routes/orders*`, `web/app/api/orders/`, `web/lib/order/`, `web/lib/nakedShortGuard.ts`, `web/lib/placeOrderBodySchema.ts`, or `web/lib/orderReasonCodes.ts`. Advisory, never blocks.
 - **CI guards** (`.github/workflows/ci.yml::order-path-guards`):
-  - `scripts/checks/no_json_fallback_on_order_path.py` — fails new `readDataFile`/`json.load` against `data/*.json` in `web/app/api/` or `src/xenon/api/`. Existing legacy reads are pinned in `_ALLOWLIST`; the list is intended to shrink to zero.
+  - `scripts/checks/no_json_fallback_on_order_path.py` — fails new `readDataFile`/`json.load` against `data/*.json` in `web/app/api/` or `src/xenon/api/`. `_ALLOWLIST` is empty; a new entry is a regression, so fix the read.
   - `scripts/checks/no_json_write_on_order_path.py` — write-side mirror. Fails new `writeFile` / `Path(...).write_text` / `_atomic_save` against `data/*.json` in `web/app/api/`, `web/lib/order/`, `src/xenon/api/`, `src/xenon/execution/`. Enforces the DB-first principle from § Dev/Prod DB Split.
-  - `scripts/checks/order_path_caller_allowlist.py` — fails imports/CLI invocations of `xenon.execution.ib_place_order` outside the allowlist (`server.py`, the module itself, tests). Locks down [In-process route bypass].
-- **Local pre-commit** (optional): `scripts/checks/install-pre-commit.sh` drops a managed `.git/hooks/pre-commit` that runs all three guards.
+  - `scripts/checks/order_path_caller_allowlist.py` — fails imports of `xenon.execution.ib_place_order` / `ib_order_manage` outside `_ALLOWLIST` (the two modules, `src/xenon/api/services/order_entry.py`, the guard itself; test files are exempt), and any mention of the removed CLIs `xenon-ib-place-order` / `xenon-ib-order-manage`. Locks down [In-process route bypass].
+  - The same job also runs `no_ib_insync.py`, `no_pg_insert_nav_history.py` and `no_yahoo_finance.py`.
+- **Local pre-commit** (optional): `scripts/checks/install-pre-commit.sh` drops a managed `.git/hooks/pre-commit` that runs all six guards.
 
-To audit the current allowlists: `python3 scripts/checks/no_json_fallback_on_order_path.py --show-allowlist` (and the corresponding flags on the write-side and caller guards).
+To audit the current allowlists: `uv run python scripts/checks/no_json_fallback_on_order_path.py --show-allowlist` (the write-side and caller guards take the same flag).
 
 ## Combo / BAG Order Guardrails
 
@@ -118,9 +117,9 @@ To audit the current allowlists: `python3 scripts/checks/no_json_fallback_on_ord
 
 ## Cancel / Modify Semantics
 
-Read `src/xenon/api/CLAUDE.md` before touching cancel / modify code. Critical rules:
+Read `src/xenon/api/CLAUDE.md` (§ Order owner, § Cancel / Modify Semantics) before touching cancel / modify code. Critical rules:
 
-1. Cancel and modify use subprocesses with the original client ID.
+1. Place, cancel and modify run in-process on the API pool `orders` connection (clientId `base + 4`), the single order owner (`src/xenon/api/order_owner.py`). No subprocess, no second IB connection, no reconnect as another clientId. IB scopes cancel and modify by clientId, so an order the owner did not place gets 409 `ORDER_NOT_OWNED` with no broker work.
 2. Do not trust the original `Trade` object as the only confirmation source.
 3. Order disappearance from refreshed open orders counts as cancel success.
 4. Preserve upstream status codes and human-readable error detail end-to-end.
@@ -128,7 +127,7 @@ Read `src/xenon/api/CLAUDE.md` before touching cancel / modify code. Critical ru
 
 ## Client IDs
 
-On-demand IB scripts must use `client_id="auto"` so they stay in the subprocess range rather than colliding with the persistent pool.
+Each environment owns a clientId block, `XENON_IB_CLIENT_ID_BASE` (0-800, step 100; prod `0`, `dev.sh` `100`). Inside the block: pool `sync` / `orders` / `data` = base+3 / 4 / 5, realtime relay base+10..19, `client_id="auto"` base+20..49. On-demand read/data IB scripts must use `client_id="auto"` (no order writes there). Never hardcode an id. Contract: `deploy/README.md` § IB clientId blocks and `docs/runbooks/pr10-order-owner-cutover.md`.
 
 ## Frontend Calculation Invariants
 
@@ -158,42 +157,48 @@ Preserve these in all UI pricing / P&L work (full table + tests in `web/CLAUDE.m
 
 ## Identity
 
-**Xenon** — broker terminal for options portfolio management. Live IB + read-only Futu integration. Places orders, tracks fills, enforces position-close rules, surfaces P&L and Greeks attribution. **No signal generation, no scanner output — bring your own thesis.** The signal layer (scanners, fetchers, analysis, share-card generators) was removed in the pure-portfolio pivot (commit `cc568c36`); do not reintroduce scanner / evaluation / discovery surfaces.
+**Xenon** — broker terminal for options portfolio management. Live IB + read-only Futu integration. Places orders, tracks fills, enforces the naked-short guard, surfaces P&L and Greeks attribution. **No signal generation, no scanner output — bring your own thesis.** The signal layer (scanners, fetchers, analysis, share-card generators) was removed in the pure-portfolio pivot (commit `cc568c36`); do not reintroduce scanner / evaluation / discovery surfaces.
 
 Brand spec: `brand/CLAUDE.md` + `docs/reference/brand-identity.md`. Non-negotiables for any UI/asset work: `signal.core` teal is the flagship accent; all colors via design tokens — no raw hex; Inter for UI, IBM Plex Mono for numeric/telemetry, Sohne for display only; panels max out at 4px radius (badges may use capsule); no glassmorphism, decorative gradients, or soft shadows; empty states describe measurement conditions; voice is precise, calm, scientific.
 
 ## ⛔ Naked-Short Guard — Mandatory, No Exceptions
 
-The system must never allow naked short exposure. Every short call must be covered by long shares (1 contract = 100 shares) or by long calls at the same expiry. Cash-secured puts are allowed. Combos that net to uncovered short calls are blocked at two layers: UI pre-submission (`web/lib/nakedShortGuard.ts`) and API gate (`/api/orders/place` returns 403). A third layer, the post-sync audit (`naked_short_audit.py`, **shadow mode**), only observes: after every `ib_sync` it logs violations and records `service_health`; it blocks and cancels nothing until enforce mode ships behind `XENON_AUDIT_CANCEL`.
+The system must never allow naked short exposure. Every short call must be covered by long shares (1 contract = 100 shares) or by long calls at the same expiry. Cash-secured puts are allowed. Combos that net to uncovered short calls are blocked at two layers: UI pre-submission (`web/lib/nakedShortGuard.ts`) and API gate (`/api/orders/place` returns 403). A third layer, the post-sync audit (`naked_short_audit.py`), runs after every `ib_sync` and logs violations and records `service_health`. By default (shadow mode) it cancels nothing. Enforce mode is opt-in: `XENON_AUDIT_CANCEL=1` on the API process (default off) makes the API cancel eligible violating orders, and only orders the order owner placed (`src/xenon/api/services/audit_enforce.py`). Exposure from TWS / mobile / other-client orders is reported, never cancelled.
 
 Full enforcement matrix and combo logic: `src/xenon/CLAUDE.md` § Naked Short Protection.
 
 ## Credentials
 
-| File          | Loader          | Contains                                                                                                                                                                                                                     |
-| ------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `.env` (root) | `python-dotenv` | `DATABASE_URL`, `DATABASE_URL_TEST`, `CLERK_JWKS_URL`, `CLERK_ISSUER`, `ALLOWED_USER_IDS`, `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `IB_FLEX_TOKEN` (optional), `IB_FLEX_QUERY_ID` (optional) |
-| `web/.env`    | Next.js         | `ANTHROPIC_API_KEY` (chat), `UW_TOKEN` (portfolio reports), `EXA_API_KEY` (optional ticker-page enrichment), `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`                                                         |
+| File          | Loader                                             | Contains                                                                                                                                                                                                                                                  |
+| ------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.env` (root) | `python-dotenv`; `dev.sh`; prod `env_file`         | `DATABASE_URL`, `DATABASE_URL_TEST`, `XENON_INTERNAL_API_TOKEN` (required: Next→FastAPI auth), `XENON_QUERY_API_KEY` / `MDW_API_KEY` (optional read-only keys), `IB_FLEX_TOKEN` / `IB_FLEX_QUERY_ID` / `IB_FLEX_NAV_QUERY_ID` (optional)                      |
+| `web/.env`    | Next.js; also loaded by `api/server.py` in dev     | `ANTHROPIC_API_KEY` (chat), `UW_TOKEN` (Unusual Whales), `EXA_API_KEY` (optional ticker-page enrichment)                                                                                                                                                   |
 
 `IB_FLEX_TOKEN` + `IB_FLEX_QUERY_ID` are optional. When unset, the Historical Trades panel renders an empty state with a setup hint instead of erroring; `xenon-blotter-history` and `POST /blotter` exit gracefully with `configured=false`. Set both to enable IB Flex Query as an audit overlay (see `uv run python -m xenon.trade_blotter.flex_query --setup`).
+
+`UW_TOKEN` is read by Next.js routes (`web/.env`) and by FastAPI (`UWClient`, `xenon-portfolio-report`). `api/server.py` loads both `.env` files in dev. Prod: the api and web containers both load `/opt/xenon/web.env` (`deploy/compose.prod.yml`), so the one file feeds both.
+
+**Auth model.** There is no Clerk and no user login. Prod is tailnet-only. `web/middleware.ts` guards `/api/**` against cross-site browser requests (Host allowlist `XENON_ALLOWED_HOSTS`, fetch-metadata and Origin checks). FastAPI is fail-closed and credential-only (`src/xenon/api/auth.py`): `X-Internal-Token` = `XENON_INTERNAL_API_TOKEN` (Next→API, full access), or a path-scoped `X-API-Key` (`XENON_QUERY_API_KEY`, `MDW_API_KEY`), else 401. `/health` is the only exempt path. `XENON_AUTH_ALLOW_DEV_OPEN=1` opens the API for dev debugging only; `dev.sh` does not set it and prod never does. Details: `src/xenon/api/CLAUDE.md` § Auth.
 
 ## Market Hours
 
 ```bash
-TZ=America/New_York date +"%A %H:%M"   # 9:30–16:00 ET, Mon–Fri
+uv run xenon-market-hours   # market-hours helper (xenon.utils.market_calendar)
 ```
+
+`xenon.utils.market_calendar` is the only Python market-open check: regular session 09:30–16:00 ET, Mon–Fri, ET-aware (a naive `datetime` raises), full-day holidays from `src/xenon/config/market_holidays.json`. Early closes (13:00 ET) are not modelled. The web `useMarketHours` hook and `scripts/infra/ib_realtime/ib_realtime_server.js` keep their own checks.
 
 Quotes, fills, and position updates flow whenever IB Gateway is connected. Outside RTH the portfolio still renders from the last `account_snapshots.payload`; flag stale data in the UI rather than swap to a different source.
 
 ## Startup Checklist
 
-`scripts/infra/dev.sh paper|live` derives the IB Gateway port (4001 live / 4002 paper), exports `XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`, runs Alembic migrations, and starts FastAPI + Next dev. It does **not** edit `.env` and does **not** start IB Gateway (manual). `--no-auth` bypasses Clerk for the session.
+`scripts/infra/dev.sh paper|live` derives the IB Gateway port (4001 live / 4002 paper), exports `XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`, runs Alembic migrations, and starts FastAPI + Next dev. It does **not** edit `.env` and does **not** start IB Gateway (manual). It refuses to start without `XENON_INTERNAL_API_TOKEN` (env or `.env`); the only argument is the mode.
 
 - [ ] `scripts/infra/dev.sh paper` (paper IB on local `127.0.0.1:4002`, writes `core_test`) — OR `scripts/infra/dev.sh live` (live IB on macmini `100.66.147.98:4001`, **read-only — `XENON_READ_ONLY=1`**)
-- [ ] Dev stack binds **3200** (Next), **8421** (FastAPI), **8866** (realtime WS). Production launchd keeps 3000/8321/8765; the dev ports are offset so the xenon dev stack coexists with the local radon stack.
+- [ ] Dev stack binds **3200** (Next), **8421** (FastAPI), **8866** (realtime WS). Prod is the Docker stack on the macmini (`deploy/compose.prod.yml`, published on 127.0.0.1:3000 / 8321 / 8765); the dev ports are offset so the xenon dev stack coexists with the local radon stack.
 - [ ] If cold start: approve 2FA on IBKR mobile
 - [ ] `psql -h 100.66.147.98 -U xenon_dev core_test -c "SELECT 1"` — verify Postgres reachable. `dev.sh` refuses to start if `DATABASE_URL` points at `core_dev` (prod).
-- [ ] `curl http://localhost:8421/health` — verify `ib_gateway.port_listening: true`
+- [ ] `curl http://localhost:8421/health` — verify `ib_gateway.port_listening: true` and `status: ok` (`orders_halted` means the order owner latched; see `src/xenon/api/CLAUDE.md` § Order owner)
 - [ ] Reconciliation auto-runs on lifespan boot (single-leg rehydrate + fills replay) — **skipped under `XENON_READ_ONLY=1`**
 - [ ] IB activity poller running (60s default — TWS-side edits + fills mirrored into Postgres) — **skipped under `XENON_READ_ONLY=1`**
 - [ ] Check market hours
@@ -270,7 +275,7 @@ The full Python suite is intentionally cheap to run locally. Don't disable or by
 
 Two escape hatches:
 
-- **`@pytest.mark.committed_db`** — when a test forks a subprocess CLI (e.g. `ib_sync`, `xenon-ib-place-order`) or builds its own `create_engine()`, that opens a _second physical connection_ that cannot see the outer transaction. Marker switches that test back to Phase 1 TRUNCATE pre+post semantics. Use sparingly — most new tests should leave the marker off.
+- **`@pytest.mark.committed_db`** — when a test forks a subprocess CLI (e.g. `xenon-ib-sync`, `xenon-ib-orders`) or builds its own `create_engine()`, that opens a _second physical connection_ that cannot see the outer transaction. Marker switches that test back to Phase 1 TRUNCATE pre+post semantics. Use sparingly — most new tests should leave the marker off.
 - **Offline dev** — when Postgres isn't reachable, the autouse fixture silently no-ops (it still clears the cached app engines). Only connection errors count as offline, in the initial reachability probe and in TRUNCATE (psycopg engines: SQLSTATE 08/57P0x, connect failures without SQLSTATE, or an InterfaceError that names a closed/lost connection); any other error (missing schema, deadlock, permission denied, a closed cursor) fails loudly. Tests that genuinely require PG depend on the `pg_test_engine` fixture, which skips explicitly when offline.
 
 `DATABASE_URL` and `DATABASE_URL_TEST` are both rewritten to the per-worker DB so subprocess CLIs and helpers that build their own engine from those env vars land on the same database as the parent test.
@@ -279,20 +284,21 @@ Two escape hatches:
 
 `.github/workflows/`:
 
-- `ci.yml` — PR + master push. Runs `web-typecheck`, `web-lint`, `web-tests` (full Vitest against real `.venv` CLIs), `python-tests` (affected on PR, full on master), `version-sync` (VERSION ↔ `package.json`).
-- `release.yml` — triggered on tag `v*`. Full verify (pytest + vitest + typecheck + lint) → publish GitHub Release from `CHANGELOG.md`.
-- `nightly.yml` — 9 AM UTC Playwright E2E, auto-comments failures on a tracking issue.
+- `ci.yml` — PR + master push. Jobs: `web-typecheck`, `web-lint`, `web-tests` (full Vitest against real `.venv` CLIs), `python-tests` (affected on PR, full on master; needs Postgres), `version-sync` (VERSION ↔ `package.json`), `ruff-pyflakes` (`ruff check --select F src scripts`), `order-path-guards` (the six `scripts/checks` guards), `relay-tests` (`node:test` suite for the IB realtime relay).
+- `release.yml` — triggered on tag `v*`. Jobs: `verify` (pytest + vitest + typecheck + lint + version sync) → `publish` (GitHub Release from `CHANGELOG.md`) and `ghcr-push` (builds and pushes the api / web / realtime / migrator images to GHCR as `:X.Y.Z`) → `promote-latest` (moves `:latest`; skipped for prerelease tags). There is no nightly workflow.
 
-**Release cut** (operator-run, does NOT push):
+**Release cut** (never push `master`):
 
-```bash
-./scripts/release/cut.sh            # interactive: patch/minor/major/custom
-                                    # rewrites VERSION + package.json + CHANGELOG, commits, tags
-git push origin master --follow-tags   # operator pushes manually → release.yml fires
-```
+1. `./scripts/release/cut.sh` from a clean, synced `master` (interactive: patch / minor / major / custom). It rewrites `VERSION`, `package.json`, `web/package.json` and `CHANGELOG.md`, commits `release: vX.Y.Z` and creates a local tag. Ignore any hint to push `master`.
+2. Move the release commit to a branch: `git switch -c release/vX.Y.Z`, `git tag -d vX.Y.Z`, `git branch -f master origin/master`. Push the branch and open a PR.
+3. After CI is green, merge the PR.
+4. **Pause Watchtower on the mini and confirm it is stopped** before any tag push (`docker stop xenon-watchtower-1`, then `docker inspect -f '{{.State.Running}}' xenon-watchtower-1` must print `false`; command in `docs/runbooks/remote-deploy.md` § Standard release flow, step 2). The tag push moves `:latest`, and a running Watchtower recreates the api on its own, with no socket check.
+5. Tag the merge commit: `git fetch origin && git tag -a vX.Y.Z -m vX.Y.Z $(gh pr view <PR> --json mergeCommit --jq .mergeCommit.oid)`.
+6. Push the tag alone: `git push origin refs/tags/vX.Y.Z`. `release.yml` fires.
+7. Deploy is the tag push building the images, then the operator cutover on the mini: `docs/runbooks/remote-deploy.md` § Standard release flow, steps 4-9. A merge alone never deploys.
 
 `VERSION` (root) is the source of truth; `scripts/release/version_sync_check.py` enforces parity with `package.json` in CI.
 
 ## Strategy Registry Sync
 
-If `docs/trading/strategies.md` changes, update `data/strategies.json` in the same change and validate with `uv run python -m json.tool data/strategies.json`. The registry is documentation only — the signal layer that consumed it was removed in the pure-portfolio pivot — but the docs still reference it, so keep them in sync.
+`docs/trading/strategies.md` is the source of truth. `data/strategies.json` is gitignored local data (read by `src/xenon/reports/portfolio_attribution.py`). If `strategies.md` changes, update your local `data/strategies.json` and validate it with `uv run python -m json.tool data/strategies.json`. The signal layer that consumed the registry was removed in the pure-portfolio pivot.

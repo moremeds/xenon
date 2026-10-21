@@ -15,16 +15,16 @@ Also implements the Evaluator stage (--save-facts):
 
 Usage:
     # Constructor: load context at session start
-    python3 scripts/context_constructor.py
+    uv run python scripts/infra/dev/context_constructor.py
 
     # Constructor: JSON output for programmatic use
-    python3 scripts/context_constructor.py --json
+    uv run python scripts/infra/dev/context_constructor.py --json
 
     # Evaluator: save a fact
-    python3 scripts/context_constructor.py --save-fact "key" "value" --confidence 0.9 --source "session"
+    uv run python scripts/infra/dev/context_constructor.py --save-fact "key" "value" --confidence 0.9 --source "session"
 
     # Evaluator: save session summary
-    python3 scripts/context_constructor.py --save-episode "Session summary text" --session-id "abc"
+    uv run python scripts/infra/dev/context_constructor.py --save-episode "Session summary text" --session-id "abc"
 """
 
 from __future__ import annotations

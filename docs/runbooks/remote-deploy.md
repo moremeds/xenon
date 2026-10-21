@@ -2,8 +2,8 @@
 
 The authoritative runbook for shipping Xenon to the remote Mac mini
 (`moremeds@100.66.147.98`). Covers first-time bootstrap, tagged
-releases via GHCR, smoke checks, rollback, and the open follow-ups for
-mini-side automation (Stage C).
+releases via GHCR, the controlled release cutover, smoke checks, rollback,
+and known follow-ups.
 
 > **Host address:** the mini is reached over **Tailscale** at
 > `100.66.147.98` (it was previously the LAN IP `192.168.50.47`; all
@@ -21,7 +21,7 @@ The old launchd path is no longer the deploy mechanism.
 
 | Host                                                      | Where things live                                                                                                                                                                                                                                                                |
 | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Mac mini                                                  | Colima (Linux/arm64 VM running Docker), 4 containers (api / web / realtime / migrator), Postgres 17 (`:5432`, host-native, schemas `xenon` / `apex` / `events`). IB Gateway may be host-native on the mini or reachable on another machine; see "IB Gateway reachability" below. |
+| Mac mini                                                  | Colima (Linux/arm64 VM running Docker), 4 app containers (api / web / realtime / migrator) plus Watchtower, Postgres 17 (`:5432`, host-native, schemas `xenon` / `apex` / `events`). IB Gateway may be host-native on the mini or reachable on another machine; see "IB Gateway reachability" below. |
 | This dev Mac                                              | Source of truth for builds + tag cuts. Paper IB Gateway local (`127.0.0.1:4002`).                                                                                                                                                                                                |
 | GHCR `ghcr.io/moremeds/xenon-{api,web,realtime,migrator}` | Owned by user `moremeds`; tags `:X.Y.Z` (no `v` prefix — see "Tag convention" below) and `:latest`. Visibility "private". Each package has `moremeds/xenon` linked under **Manage Actions access** with role **Write**; without that link, `release.yml::ghcr-push` is denied.   |
 
@@ -50,7 +50,7 @@ container, `127.0.0.1` is the container itself.
 /opt/xenon/
 ├── compose.yml      # image refs to ghcr.io/moremeds/xenon-*; no build:
 ├── .env             # api/realtime/migrator env_file
-├── web.env          # web env_file (CLERK_SECRET_KEY, UW_TOKEN, etc.)
+├── web.env          # web env_file, also loaded by api (ANTHROPIC_API_KEY, UW_TOKEN, EXA_API_KEY, XENON_ALLOWED_HOSTS)
 └── data/            # bind-mount target for /app/data (mostly empty post-PG migration)
 ```
 
@@ -70,8 +70,10 @@ container via `environment:`, and `env_file: ./.env` gives it to api/realtime/mi
 | `XENON_QUERY_API_KEY`      | Read-only key for external scripts (send as `X-API-Key`; GET-only query paths). MUST differ from the internal token — the api refuses to boot if equal.                       |
 
 Generate two distinct values with `openssl rand -hex 32`. `XENON_AUTH_ALLOW_DEV_OPEN`
-is NEVER set in prod. After editing, `docker-compose up -d` to recreate containers
-(env_file changes need a recreate, not a restart). Confirm the api startup log shows
+is NEVER set in prod. After editing, recreate the containers (env_file changes need a recreate,
+not a restart) with the controlled sequence: pause Watchtower, `docker-compose stop -t 60 api realtime`,
+the socket check (§ Standard release flow, step 7), then `docker-compose up -d --pull never api web realtime`
+and step 10 for Watchtower. Confirm the api startup log shows
 `auth: ENFORCED`.
 
 ## First-time bootstrap (one-shot)
@@ -108,8 +110,8 @@ ssh moremeds@100.66.147.98 'vim /opt/xenon/.env'
 # Set XENON_BROKER_ACCOUNT to your real account ID.
 # Set IB_GATEWAY_HOST per "IB Gateway reachability" above.
 
-# 5. compose.yml (image: refs only — see template at the bottom of this doc)
-scp <local-compose.yml-template> moremeds@100.66.147.98:/opt/xenon/compose.yml
+# 5. compose.yml (image: refs only — the reviewed source is deploy/compose.prod.yml)
+scp deploy/compose.prod.yml moremeds@100.66.147.98:/opt/xenon/compose.yml
 ssh moremeds@100.66.147.98 'mkdir -p /opt/xenon/data'
 ```
 
@@ -139,61 +141,109 @@ follows the convention above.
 
 ## Standard release flow
 
-1. **Cut + tag** on this Mac via the release script (operator-run; does
-   not push):
+Deploy happens only on a `v*` tag push (merging a PR never deploys). The api, web and
+realtime services track `:latest` and Watchtower polls GHCR every 60 s, so an
+uncontrolled tag push lets Watchtower recreate the api on its own, with no
+stale-socket check. Use this controlled cutover (it was used for v0.11.0 and v0.12.0).
+`docker-compose` below is the hyphenated v5 binary from brew (the mini has no `docker compose`
+plugin). Every remote command needs `PATH=/opt/homebrew/bin:$PATH`.
+
+1. **Cut and merge.** Follow root `CLAUDE.md` § CI / Release: `scripts/release/cut.sh`
+   makes the `release: vX.Y.Z` commit, the commit moves to a `release/vX.Y.Z` branch,
+   and the release PR merges when CI is green. Never push `master`. If the release
+   changes `deploy/compose.prod.yml`, stage and validate the new file now with
+   `deploy/README.md` § Operator rollout checklist, section A. Do not apply it yet:
+   Watchtower recreates containers with their old config and never reads `compose.yml`,
+   and `docker-compose up -d` would recreate the api before the socket check. Step 8
+   applies it.
+
+2. **Pause Watchtower on the mini and confirm it is stopped, BEFORE the tag push**, so it
+   cannot race the cutover:
 
    ```bash
-   ./scripts/release/cut.sh        # interactive: patch / minor / major / custom
-                                   # rewrites VERSION + package.json + CHANGELOG,
-                                   # commits, tags vX.Y.Z
-   git push origin master --follow-tags
+   ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; docker stop xenon-watchtower-1 && \
+     docker inspect -f "{{.State.Running}}" xenon-watchtower-1'   # must print false
+   ```
+
+   Do not continue to step 3 until it prints `false`.
+
+3. **Tag the merge commit and push the tag alone** (never `git push origin master`):
+
+   ```bash
+   git fetch origin
+   git tag -a vX.Y.Z -m vX.Y.Z <merge-commit-sha>
+   git push origin refs/tags/vX.Y.Z
    ```
 
    The tag push fires `.github/workflows/release.yml`.
 
-2. **`release.yml` runs end-to-end** with no operator intervention:
+4. **Wait for the `Release` run of this tag's commit** and check its conclusion. Do not look at
+   "the latest run": another release or a prerelease can be newer. `--commit` filters runs by SHA:
+
+   ```bash
+   REV=$(git rev-parse vX.Y.Z^{commit})
+   gh run list --repo moremeds/xenon --workflow Release --commit "$REV" --json databaseId,status,conclusion
+   gh run watch <databaseId> --repo moremeds/xenon      # then list again
+   ```
+
+   The run must show `"conclusion":"success"`. Its jobs:
    - `verify` — full pytest + npm test + typecheck + lint + version-sync
      against an ephemeral Postgres service container.
-   - `publish` — GitHub Release at `vX.Y.Z`, body extracted from
-     `CHANGELOG.md`.
+   - `publish` — GitHub Release at `vX.Y.Z`, body extracted from `CHANGELOG.md`.
    - `ghcr-push` (matrix × 4) — builds + pushes each image at
-     `ghcr.io/moremeds/xenon-{api,web,realtime,migrator}:X.Y.Z` and
-     `:latest`.
+     `ghcr.io/moremeds/xenon-{api,web,realtime,migrator}:X.Y.Z` (immutable version tag).
+   - `promote-latest` — after every `ghcr-push` leg passed, moves `:latest` of all four
+     images to `:X.Y.Z` (skipped for prerelease tags). The cutover below does not depend on it.
 
-   Tail the run while it's in flight:
+5. **Pull the release images by version tag, verify them, and alias them to `:latest` locally.**
+   Compose uses `:latest` and `--pull never`, so the alias is what runs. A floating
+   `:latest` pull could be a different release. `VER` is the version without the `v`; `REV` is the
+   commit from step 4. Add `migrator` to the list only when the release carries an Alembic migration.
+   Each image must report `VER REV` (its `org.opencontainers.image.version` and `.revision` labels);
+   the loop stops on the first failed pull, label mismatch or tag. Continue only when every image printed `ok`:
 
    ```bash
-   gh run watch --repo moremeds/xenon
+   ssh moremeds@100.66.147.98 'VER=X.Y.Z REV=<full sha> PATH=/opt/homebrew/bin:$PATH bash -s' <<'EOF'
+   for s in api web realtime; do          # add: migrator
+     img=ghcr.io/moremeds/xenon-$s
+     docker pull "$img:$VER" >/dev/null || { echo "PULL FAILED $s"; exit 1; }
+     got=$(docker image inspect "$img:$VER" --format '{{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}}')
+     [ "$got" = "$VER $REV" ] || { echo "MISMATCH $s: $got"; exit 1; }
+     docker tag "$img:$VER" "$img:latest" || { echo "TAG FAILED $s"; exit 1; }
+     echo "ok $s $got"
+   done
+   EOF
    ```
 
-3. **Pull + restart on the mini**:
+6. **Migrate, only when the release carries an Alembic migration.** Watchtower never runs the
+   migrator. Run it once, on the image aliased in step 5, with the gate in
+   `deploy/README.md` § D step 3 (`alembic current`, `alembic heads`, one
+   `docker-compose --profile migrate run --rm --pull never migrator`). Do not pull or run any other migrator image.
+
+7. **Stop api and realtime with the full grace period, then confirm no leftover gateway sockets.**
+   The api disconnects its IB connections on SIGTERM; 60 s matches `stop_grace_period`.
+   The socket count must be `0` (`grep -c` prints `0` and exits 1 when nothing matches; that is fine):
 
    ```bash
-   XV=0.3.5   # the version you just released (no `v` prefix)
-   ssh moremeds@100.66.147.98 "PATH=/opt/homebrew/bin:\$PATH; cd /opt/xenon && \
-     cp compose.yml compose.yml.bak.predeploy-${XV} && \
-     sed -i '' -E 's|xenon-([a-z]+):[^[:space:]]+|xenon-\\1:${XV}|' compose.yml && \
-     docker-compose --profile migrate pull && \
-     docker-compose --profile migrate run --rm migrator && \
-     docker-compose up -d"
+   ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && docker-compose stop -t 60 api realtime'
+   ssh moremeds@100.66.147.98 'lsof -nP -iTCP:4001 -sTCP:ESTABLISHED 2>/dev/null | grep -c limactl'
    ```
 
-   The `sed` rewrites every `xenon-*:<old>` literal in compose.yml in
-   one pass, so all 4 services bump together; the `cp` keeps a
-   per-deploy `compose.yml.bak.predeploy-<ver>` for a fast rollback.
-   `--profile migrate pull` pulls all 4 images **including the migrator**
-   up-front, so a bad tag fails at pull instead of mid-migrate (plain
-   `docker-compose pull` skips profile-gated services). The migrator runs
-   `alembic upgrade head` against the prod DB; on a release with no new
-   migration it is a clean no-op. Once Stage C item 3 (Watchtower +
-   `compose.yml` on `:latest`) lands, this step becomes redundant — the
-   mini auto-pulls within 60s of `ghcr-push` finishing.
+   If the count is not `0`, do not start the api. Follow `docs/runbooks/pr10-order-owner-cutover.md` § 4.
 
-   Note: the mini uses **`docker-compose`** (hyphenated v5.1.3 from brew),
-   not the `docker compose` plugin. Use the hyphenated form on the mini;
-   the dev Mac's `docker compose` plugin works equivalently.
+8. **Start the stack on the aliased images.** If step 1 staged a new compose file, move it into place
+   first: `cd /opt/xenon && mv compose.new.yml compose.yml` (the backup from section A step 4 stays).
+   `--pull never` keeps the images from step 5. Name the app services: a bare `up -d` also starts
+   Watchtower, which would replace the aliased images with whatever registry `:latest` is (step 10):
 
-4. **Smoke** (from the mini):
+   ```bash
+   ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && docker-compose up -d --pull never api web realtime'
+   ```
+
+   A transient `[health] realtime /status unreachable` traceback in the api log right after
+   `up` is expected: the api starts before realtime.
+
+9. **Smoke** (from the mini):
 
    ```bash
    ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; \
@@ -203,11 +253,43 @@ follows the convention above.
    ```
 
    Expected:
-   - `docker-compose ps` → `api` and `web` `Up (healthy)`, `realtime` `Up`.
-   - `/health` → 200 with valid JSON.
+   - `docker-compose ps` → `api` and `web` `Up (healthy)`, `realtime` `Up`; `watchtower` still stopped until step 10.
+   - `/health` → 200 with valid JSON:
+     - `status` is `ok` (not `orders_halted`).
+     - `ib_pool.sync`, `ib_pool.orders`, `ib_pool.data` each `connected: true`
+       (`broker_readiness` is `unknown` until the first open-orders round trip, then `ready`).
+     - `orders_owner.client_id` is `4`, `halted` is `false`.
      - `ib_gateway.port_listening: true` only when the configured Gateway
        (`IB_GATEWAY_HOST` plus the port derived from `XENON_TRADING_MODE`) is reachable.
    - `/` → 200.
+
+10. **Resume Watchtower only when registry `:latest` is this release.** Watchtower deploys whatever
+    registry `:latest` points at; `--pull never` does not constrain it. For a prerelease (no
+    `promote-latest`) or when a newer release moved `:latest`, the registry differs from the
+    selected release. Pulling `:latest` only moves the local alias; running containers keep their image.
+    Do not push another release tag while a cutover is in progress.
+
+    ```bash
+    ssh moremeds@100.66.147.98 'VER=X.Y.Z REV=<full sha> PATH=/opt/homebrew/bin:$PATH bash -s' <<'EOF'
+    for s in api web realtime; do
+      img=ghcr.io/moremeds/xenon-$s
+      docker pull "$img:latest" >/dev/null || { echo "PULL FAILED $s"; exit 1; }
+      got=$(docker image inspect "$img:latest" --format '{{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}}')
+      if [ "$got" != "$VER $REV" ]; then
+        docker tag "$img:$VER" "$img:latest" || { echo "RESTORE FAILED $s: local :latest is NOT $VER; do not recreate any service"; exit 2; }
+        echo "KEEP WATCHTOWER STOPPED: registry :latest of $s is $got (local :latest restored to $VER)"; exit 1
+      fi
+    done
+    cd /opt/xenon && docker-compose up -d --pull never watchtower && echo "watchtower resumed"
+    EOF
+    ```
+
+    If it prints `KEEP WATCHTOWER STOPPED`, leave Watchtower stopped (the local alias is restored to
+    `:VER`) until a stable release is promoted to `:latest`, then repeat this step. If it prints
+    `RESTORE FAILED`, do not recreate any service: rerun step 5 for that image (it re-tags `:VER` and
+    must print `ok`) before anything else.
+
+   The full post-deploy checks are in `docs/runbooks/pr10-order-owner-cutover.md` § 5.
 
 ## Auto-start on mini boot
 
@@ -231,26 +313,28 @@ To disable Colima auto-start later: `brew services stop colima`.
 
 ## Rollback
 
-Bump the version literal in `/opt/xenon/compose.yml` to the previous tag,
-pull, and restart. The `<prev-tag>` is whatever GHCR has — for any
-release v0.0.4 onwards, that's `X.Y.Z` (no `v`). For the legacy v0.0.3
-rollback target, use `v0.0.3` (see "Tag convention" → legacy exception).
+The services run on `:latest`, so a rollback re-points `:latest` at the previous version
+on the mini and restarts. Migrations are not reverted. Every release tag keeps its
+immutable `:X.Y.Z` image (`PREV` below is the previous version without the `v`; for the legacy
+v0.0.3 target use `v0.0.3`, see "Tag convention").
 
-```bash
-ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && \
-  sed -i "" -E "s|xenon-([a-z]+):[^[:space:]]+|xenon-\1:<prev-tag>|" compose.yml && \
-  docker-compose pull && \
-  docker-compose up -d'
-```
+1. Pause Watchtower, or it pulls the bad `:latest` again: `docker stop xenon-watchtower-1`.
+2. Pull and verify the previous image (labels and digest as in `deploy/README.md` § D step 2),
+   then re-point the local alias for each service that changed:
 
-Replace `<prev-tag>` with the actual tag (e.g. `0.0.4` or, for the
-legacy bootstrap, `v0.0.3`). The `sed` rewrites every `xenon-*:<old>`
-literal in compose.yml in one pass.
+   ```bash
+   docker pull ghcr.io/moremeds/xenon-api:PREV
+   docker tag ghcr.io/moremeds/xenon-api:PREV ghcr.io/moremeds/xenon-api:latest   # same for web / realtime
+   ```
 
-**Cleaner long-term option** (deferred follow-up): switch compose.yml
-to `image: ghcr.io/.../xenon-${SVC}:${XENON_VERSION:-latest}` and put
-`XENON_VERSION=0.0.4` in `.env`. Rollback then becomes a one-line `.env`
-edit + `docker-compose up -d`. Captured as a follow-up; not blocking.
+3. `docker-compose stop -t 60 api realtime`, run the stale-socket check (step 7 of the
+   release flow), then `docker-compose up -d --pull never api web realtime`. Name the
+   services: a bare `up -d` also recreates Watchtower, which would pull the bad `:latest` again.
+4. Resume Watchtower (`docker start xenon-watchtower-1`) only after the registry `:latest`
+   is no longer the bad release (publish a fixed release first).
+
+Rolling back across PR-10 (single order owner) has extra steps (order inventory, ownership):
+`docs/runbooks/pr10-order-owner-cutover.md` § 7.
 
 ## Logs + diagnostics
 
@@ -268,8 +352,8 @@ ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; docker stats --no-stre
 ## Known follow-ups
 
 Open items as of v0.0.4. Items resolved during the v0.0.4 cut have been
-removed (`release.yml::verify` Postgres service, `NEXT_PUBLIC_*`
-build-args, GHCR per-package ACL — all landed via PR #91 + PR #94).
+removed (`release.yml::verify` Postgres service, GHCR per-package ACL —
+landed via PR #91 + PR #94).
 
 1. **Mini's GHCR auth is on this Mac's classic PAT.** Worked for
    bootstrap but isn't durable. The mini's own fine-grained PAT
@@ -289,12 +373,6 @@ build-args, GHCR per-package ACL — all landed via PR #91 + PR #94).
 4. **`/opt/xenon/logs/`** isn't mounted yet. Container stdout still works
    (`docker-compose logs`), but persistent file logs go nowhere. Add a
    `./logs:/app/logs` bind-mount once persistent logging is needed.
-
-5. **Full live promotion (Phase 1.11)** still waits on a 24h burn-in. Today
-   we shipped _half-live_: live trading mode + live IB pointing, but
-   `DATABASE_URL=core_dev`. To flip to full prod: edit `/opt/xenon/.env`
-   `DATABASE_URL` from `core_dev` to `core`, restart, and stop this Mac's
-   API to avoid double-writers.
 
 6. **Compose plugin parity.** Mini uses `docker-compose` (hyphen, v5.1.3
    via brew) because the docker plugin's compose subcommand isn't
@@ -317,29 +395,6 @@ build-args, GHCR per-package ACL — all landed via PR #91 + PR #94).
      with profile-based overrides for paper. Less robust because compose
      can't pick the mode-specific key cleanly without a profile per mode.
 
-8. **Clerk dev origin only allows `localhost:3000`.** The `pk_test_*` key
-   in `web/.env` is bound to a Clerk Development instance which is
-   **hardcoded to `localhost`**. Clerk dev instances do not support adding
-   arbitrary hosts via the dashboard — the "Domains" UI for a dev instance
-   is read-only or limited to localhost variants. Visiting the web app at
-   `http://100.66.147.98:3000` triggers Clerk's dev-browser handshake to
-   redirect back to `localhost:3000`, breaking sign-in from the LAN.
-   Workarounds:
-   - **Quick (current state):** append `XENON_DISABLE_AUTH=1` to
-     `/opt/xenon/web.env` and `docker-compose up -d --force-recreate web`.
-     Bypasses Clerk middleware entirely; combine with default-private
-     route gating (PR #90) so portfolio/orders/journal still gate at the
-     app layer (you'd need a logged-in session — but with auth bypassed
-     that's not enforced; effectively all routes serve while bypass is on).
-   - **Network-level auth:** put the deploy on a Tailscale tailnet so
-     only your devices can reach it. Drop the public-internet attack
-     surface entirely; auth bypass becomes safe again. Does not need a
-     domain or Clerk Production.
-   - **Real fix:** buy any cheap domain (`.xyz`, `.click` ~ $1-2/yr),
-     create a Clerk Production instance, verify the domain via TXT
-     record, swap `pk_test_*` → `pk_live_*` in the `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
-     GHA secret, redeploy. Public domain + real auth.
-
 ## Resolved during v0.0.4
 
 Kept here as institutional memory — these are no longer open.
@@ -347,10 +402,6 @@ Kept here as institutional memory — these are no longer open.
 - **`release.yml::verify` had no Postgres service** → fixed in PR #91:
   ephemeral `postgres:16-alpine` service container + alembic step
   precede pytest in the verify job.
-- **`release.yml::ghcr-push` did not pass `NEXT_PUBLIC_*` build-args** →
-  fixed in PR #91: `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` is now plumbed
-  via `secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` and a `matrix.image
-== 'web'` ternary so the build-arg is empty for the other 3 images.
 - **GHCR packages need explicit per-repo ACL — not auto-linked when
   bootstrapped manually.** Hit during the first v0.0.4 attempt
   ([run 25296418217](https://github.com/moremeds/xenon/actions/runs/25296418217)):
@@ -367,64 +418,8 @@ Kept here as institutional memory — these are no longer open.
   so GHCR auto-links on success, or link the repo immediately after
   any manual bootstrap.
 
-## Reference: `/opt/xenon/compose.yml` template
+## Reference: `/opt/xenon/compose.yml`
 
-```yaml
-# Pulls 4 images from ghcr.io/moremeds/xenon-* (no build steps).
-# Postgres is host-native on the mini; containers reach it via
-# host.docker.internal. IB_GATEWAY_HOST comes from .env and must match where
-# IB Gateway actually runs.
-
-services:
-  migrator:
-    image: ghcr.io/moremeds/xenon-migrator:0.0.4
-    profiles: ["migrate"]
-    env_file: [./.env]
-    volumes: [./.env:/app/.env:ro]
-    extra_hosts: ["host.docker.internal:host-gateway"]
-    restart: "no"
-
-  api:
-    image: ghcr.io/moremeds/xenon-api:0.0.4
-    env_file: [./.env]
-    environment:
-      FUTU_OPEND_HOST: host.docker.internal
-    ports: ["8321:8321"]
-    volumes: [./.env:/app/.env:ro, ./data:/app/data]
-    extra_hosts: ["host.docker.internal:host-gateway"]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8321/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
-    restart: unless-stopped
-
-  web:
-    image: ghcr.io/moremeds/xenon-web:0.0.4
-    env_file: [./web.env]
-    environment:
-      XENON_API_URL: http://api:8321
-    ports: ["3000:3000"]
-    extra_hosts: ["host.docker.internal:host-gateway"]
-    depends_on: { api: { condition: service_healthy } }
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 45s
-    restart: unless-stopped
-
-  realtime:
-    image: ghcr.io/moremeds/xenon-realtime:0.0.4
-    env_file: [./.env]
-    ports: ["8765:8765"]
-    volumes: [./.env:/app/.env:ro]
-    extra_hosts: ["host.docker.internal:host-gateway"]
-    depends_on: { api: { condition: service_healthy } }
-    restart: unless-stopped
-```
-
-Bump the `0.0.4` literal to the current release tag at deploy time —
-or use the `sed` one-liner from the "Standard release flow" step 3.
+The reviewed source is `deploy/compose.prod.yml`; `/opt/xenon/compose.yml` must match it
+(`diff deploy/compose.prod.yml /opt/xenon/compose.yml`). Change prod by changing that file in a
+PR first, then stage it with `deploy/README.md` § Operator rollout checklist, section A.

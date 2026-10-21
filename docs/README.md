@@ -37,9 +37,17 @@ Authoritative reference material. Policy rules live in `CLAUDE.md` files in the 
 - `reference/unusual_whales_api.md` — UW endpoint quick reference
 - `reference/unusual_whales_api_spec.yaml` — full OpenAPI spec
 - `reference/ib_tws_api.md` — IB TWS API reference
+- `reference/order-path-incident-history.md` — every non-trivial order-path bug, root cause, fix and regression test
+- `reference/readonly-query-api.md` — read-only query API for external clients (`X-API-Key`)
 
 ## Runbooks
 
+- `runbooks/remote-deploy.md` — Mac mini Docker stack, release cutover, rollback
+- `runbooks/release.md` — cut a release (release PR, tag-only push)
+- `runbooks/pr10-order-owner-cutover.md` — single order owner: clientId blocks, stale sockets, `ORDERS_HALTED`
+- `runbooks/dev-prod-db-cutover.md` — `core_dev` / `core_test` split
+- `runbooks/nav-flex-refresh.md` — daily IB Flex NAV refresh
+- `runbooks/combo-wizard.md` — combo order wizard
 - `runbooks/ib-connection-troubleshooting.md`
 - `runbooks/ib-gateway-docker.md`
 - `runbooks/ibc-remote-access.md`
@@ -49,7 +57,10 @@ Authoritative reference material. Policy rules live in `CLAUDE.md` files in the 
 
 ## Subdirectories
 
-- `autoresearch/` — research notes and ideas
-- `note/` — ad-hoc research notes
-- `reference/apex-futu/` — Apex/Futu broker reference
+- `decisions/` — dated design decisions
+- `handovers/` — operator and session handovers (`_archive/` holds finished ones)
+- `research/` — research notes
+- `reviews/` — dated code reviews (history, not current guidance)
+- `fable/` — 2026-07 architecture review
+- `archive/` — old progress logs and task notes
 - `superpowers/archive/` — historical plans and specs for shipped work (reference only, do not execute)

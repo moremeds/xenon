@@ -3,10 +3,10 @@
 Tests for IB Real-Time Price Server connectivity.
 
 Usage:
-  python3 scripts/test_ib_realtime.py
-  python3 scripts/test_ib_realtime.py --ib-only      # Test IB connection only
-  python3 scripts/test_ib_realtime.py --ws-only      # Test WebSocket server only
-  python3 scripts/test_ib_realtime.py --server-url ws://localhost:8765
+  uv run python scripts/infra/ib_realtime/test_ib_realtime.py
+  uv run python scripts/infra/ib_realtime/test_ib_realtime.py --ib-only      # Test IB connection only
+  uv run python scripts/infra/ib_realtime/test_ib_realtime.py --ws-only      # Test WebSocket server only
+  uv run python scripts/infra/ib_realtime/test_ib_realtime.py --server-url ws://localhost:8765
 """
 
 import argparse

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Interactive release cut: preflight → bump → CHANGELOG rewrite → commit → tag.
-# Does NOT push. Operator reviews and pushes manually.
+# Does NOT push. The commit lands on local master: move it to a release/vX.Y.Z
+# branch and open a PR (docs/runbooks/release.md). Tag the merge commit later.
 
 set -euo pipefail
 
@@ -128,7 +129,10 @@ git tag -a "v$next" -m "v$next
 
 $section"
 
-say "Tagged v$next. To publish:"
-echo "  git push origin master --follow-tags"
+say "Tagged v$next locally. Do NOT push master. To publish (docs/runbooks/release.md):"
+echo "  git switch -c release/v$next && git tag -d v$next && git branch -f master origin/master"
+echo "  git push -u origin release/v$next   # open the PR, merge when CI is green"
+echo "  # then stop Watchtower on the mini and confirm it is stopped (docs/runbooks/remote-deploy.md step 2)"
+echo "  git tag -a v$next -m v$next <merge-commit-sha> && git push origin refs/tags/v$next"
 say "Or to undo:"
 echo "  git tag -d v$next && git reset --hard HEAD~1"

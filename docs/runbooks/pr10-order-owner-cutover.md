@@ -26,7 +26,7 @@ Zones inside a block (absolute id = base + offset):
 
 ## 2. Before the deploy
 
-1. **Apply the compose change first.** Watchtower stops containers with its own timeout (default 10s), not with the service's grace period. Stage the new `deploy/compose.prod.yml` with `deploy/README.md` § Operator rollout checklist, section A, **before** the PR-10 image is published. Otherwise Watchtower replaces the old api with a 10s stop and can leave stale sockets (§ 4). Section A checks, in this order:
+1. **Apply the compose change first.** Watchtower stops containers with its own timeout (default 10s), not with the service's grace period. Stage the new `deploy/compose.prod.yml` with `deploy/README.md` § Operator rollout checklist, section A, **before** the PR-10 image is published, and apply it with the controlled sequence from section A step 6 (stop `api realtime` with `-t 60`, socket check, then `mv` and `docker-compose up -d --pull never api web realtime`); a bare `up -d` would recreate the api before the check. Otherwise Watchtower replaces the old api with a 10s stop and can leave stale sockets (§ 4). Section A checks, in this order:
    - `WATCHTOWER_NOTIFICATION_URL` is defined in `/opt/xenon/.env` (`grep -c`, never print the value);
    - `docker-compose config` renders the PR-10 values: `XENON_IB_CLIENT_ID_BASE` `"0"` on `api` and `realtime`, `IB_REALTIME_STATUS_URL`, `api` `stop_grace_period` 60s, `WATCHTOWER_TIMEOUT` `60s`, and a non-empty webhook;
    - the diff against the live file shows only those changes plus `WATCHTOWER_NOTIFICATION_URL` becoming `${WATCHTOWER_NOTIFICATION_URL}` interpolation and comment lines. Explain any other difference before you apply; if you cannot, stop.
@@ -58,10 +58,9 @@ Zones inside a block (absolute id = base + offset):
 
 ## 3. Deploy
 
-Watchtower replaces `api` when the new `:latest` image appears. The steps are the same for a manual `docker-compose pull api && docker-compose up -d api`.
+Use the controlled cutover in `docs/runbooks/remote-deploy.md` § Standard release flow: stop Watchtower before the tag push, pull after `release.yml` finishes, `docker-compose stop -t 60 api realtime`, run the stale-socket check (§ 4) **before** the new api connects, then `docker-compose up -d --pull never api web realtime`, and resume Watchtower only at step 10. Left running, Watchtower would replace `api` on its own when the new `:latest` image appears, with no socket check in between.
 
-1. When the old api has stopped, check the gateway for stale sockets (§ 4) **before** the new api connects. With Watchtower the gap is short. To control it, stop `api` by hand first (`docker-compose stop api`, which waits 60s), check, then `docker-compose up -d api`.
-2. Wait for `healthy`, then run the post-deploy checks.
+1. Wait for `healthy`, then run the post-deploy checks (§ 5).
 
 ## 4. Stale gateway sockets (colima usernet)
 
