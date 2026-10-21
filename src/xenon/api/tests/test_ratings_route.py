@@ -7,7 +7,10 @@ No network at test time: `UWClient` is replaced with a fake.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -53,6 +56,11 @@ def client(monkeypatch, uw_payload):
     app = FastAPI()
     app.include_router(ratings.router)
     yield TestClient(app)
+    # abandoned (timed-out) fetches keep their slot until the thread returns
+    deadline = time.monotonic() + 5
+    while ratings._in_flight and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ratings._in_flight == 0
     ratings._cache.clear()
 
 
@@ -243,11 +251,9 @@ def test_rate_limited_upstream_is_one_attempt_and_never_sleeps(client, monkeypat
     assert clients[0]._max_retries == 0
 
 
-def test_client_budget_is_below_the_overall_deadline_and_the_web_proxy_timeout():
-    # worst case for the blocking call: connect + read, one attempt, no retries
+def test_route_deadline_is_below_the_web_proxy_timeout_and_retries_are_off():
     assert ratings.UW_MAX_RETRIES == 0
-    assert 2 * ratings.UW_TIMEOUT_S < 20  # web proxy xenonFetch timeout is 20 s
-    assert ratings.REQUEST_DEADLINE_S < 20
+    assert ratings.REQUEST_DEADLINE_S < 20  # web proxy xenonFetch timeout is 20 s
 
 
 def test_overall_deadline_returns_504_and_is_not_cached(client, monkeypatch):
@@ -267,3 +273,92 @@ def test_overall_deadline_returns_504_and_is_not_cached(client, monkeypatch):
     monkeypatch.setattr(FakeUW, "get_analyst_ratings_by_ticker", orig)
     monkeypatch.setattr(ratings, "REQUEST_DEADLINE_S", 5)
     assert client.get("/ticker/ratings", params={"ticker": "MSFT"}).status_code == 200
+
+
+class _OkResp:
+    status_code = 200
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def test_rejected_payload_does_not_survive_in_the_shared_uw_cache(client, monkeypatch, uw_payload):
+    """Real UWClient + real uw_cache; only requests.Session.get is patched."""
+    import requests
+
+    from xenon.utils import uw_cache
+
+    uw_cache.clear_cache()
+    responses = [_OkResp({"data": [None]}), _OkResp(uw_payload)]
+    calls: list[tuple] = []
+
+    def fake_get(self, url, params=None, timeout=None):
+        calls.append((url, params))
+        return responses[len(calls) - 1]
+
+    monkeypatch.setattr(ratings, "UWClient", UWClient)
+    monkeypatch.setenv("UW_TOKEN", "test-token")
+    monkeypatch.setattr(requests.Session, "get", fake_get)
+    try:
+        first = client.get("/ticker/ratings", params={"ticker": "MSFT"})
+        assert first.status_code == 502
+        second = client.get("/ticker/ratings", params={"ticker": "MSFT"})
+        assert second.status_code == 200
+        assert len(calls) == 2  # the 200-but-malformed body was not served from uw_cache
+        assert second.json()["ratings"] == uw_payload["data"]
+    finally:
+        uw_cache.clear_cache()
+
+
+class BlockingUW(FakeUW):
+    gate = threading.Event()
+    started = threading.Semaphore(0)
+
+    def get_analyst_ratings_by_ticker(self, ticker, **kwargs):
+        BlockingUW.started.release()
+        BlockingUW.gate.wait(timeout=10)
+        return FakeUW.payload
+
+
+def test_stuck_fetches_hold_a_bounded_private_pool(client, monkeypatch):
+    """Caller gets 504 at the deadline, the worker stays busy, a request beyond
+    the bound gets 503 immediately, and the default executor stays free."""
+    BlockingUW.gate = threading.Event()
+    BlockingUW.started = threading.Semaphore(0)
+    monkeypatch.setattr(ratings, "UWClient", BlockingUW)
+    monkeypatch.setattr(ratings, "REQUEST_DEADLINE_S", 0.1)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        a, b = await asyncio.gather(ratings.ticker_ratings("AAA"), ratings.ticker_ratings("BBB"))
+        assert (a.status_code, b.status_code) == (504, 504)
+        assert loop.time() - t0 < 2
+        # both workers are still blocked inside the fake fetch
+        assert BlockingUW.started.acquire(timeout=1) and BlockingUW.started.acquire(timeout=1)
+        assert ratings._in_flight == ratings.MAX_IN_FLIGHT
+        # a further request is refused at once, without queueing
+        t1 = loop.time()
+        c = await ratings.ticker_ratings("CCC")
+        assert c.status_code == 503
+        assert json.loads(c.body)["reason_code"] == "RATINGS_BUSY"
+        assert loop.time() - t1 < 0.05
+        # the default executor is not occupied by the stuck UW reads
+        assert await asyncio.wait_for(asyncio.to_thread(lambda: "free"), timeout=1) == "free"
+        return loop
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        BlockingUW.gate.set()
+    # workers finish, slots return, and the route serves again (504s were not cached)
+    deadline = time.monotonic() + 5
+    while ratings._in_flight and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ratings._in_flight == 0
+    monkeypatch.setattr(ratings, "UWClient", FakeUW)
+    monkeypatch.setattr(ratings, "REQUEST_DEADLINE_S", 5)
+    assert client.get("/ticker/ratings", params={"ticker": "AAA"}).status_code == 200

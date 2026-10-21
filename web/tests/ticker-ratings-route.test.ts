@@ -134,6 +134,21 @@ describe("GET /api/ticker/ratings", () => {
     });
   });
 
+  it("maps FastAPI 503 RATINGS_BUSY to 503 RATINGS_BUSY", async () => {
+    const { GET, XenonApiError } = await loadRoute();
+    mockXenonFetch.mockRejectedValue(
+      new XenonApiError(503, "Analyst ratings fetch is busy; retry shortly", {
+        reason_code: "RATINGS_BUSY",
+      }),
+    );
+    const res = await GET(req("?ticker=MSFT"));
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      error: "Ratings busy, retry shortly",
+      reason_code: "RATINGS_BUSY",
+    });
+  });
+
   it("propagates a FastAPI 400 (invalid ticker) as 400", async () => {
     const { GET, XenonApiError } = await loadRoute();
     mockXenonFetch.mockRejectedValue(

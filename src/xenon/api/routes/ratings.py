@@ -14,12 +14,14 @@ import math
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from xenon.clients.uw_client import UWClient
+from xenon.utils import uw_cache
 
 logger = logging.getLogger(__name__)
 
@@ -33,15 +35,26 @@ _cache_lock = threading.Lock()
 
 _TICKER_RE = re.compile(r"^[A-Z0-9.\-]{1,10}$")
 _ROW_LIMIT = 50
+_UW_ENDPOINT = "screener/analysts"  # UWClient.get_analyst_ratings; keeps the uw_cache key in sync (tested)
 
-# Deadline budget (web proxy `xenonFetch` aborts at 20 s):
+# Deadline and resource limits (web proxy `xenonFetch` aborts at 20 s):
 #   - one UW attempt, no retries, so no Retry-After / backoff sleeps;
-#   - requests applies UW_TIMEOUT_S to connect and to each read, so the worker
-#     thread lives at most 2 * 8 = 16 s;
-#   - the route stops waiting after REQUEST_DEADLINE_S = 12 s and answers 504.
+#   - UW_TIMEOUT_S is the requests connect/read timeout. It measures socket
+#     inactivity, not total duration, and does not cover DNS, so it does NOT
+#     bound how long a worker thread runs;
+#   - the route stops waiting after REQUEST_DEADLINE_S and answers 504;
+#   - the blocking fetch runs on a private pool of MAX_IN_FLIGHT threads. A
+#     worker stuck past the deadline keeps its slot until it returns, so stuck
+#     UW reads can never use more than MAX_IN_FLIGHT threads or touch the
+#     default executor. When every slot is busy the route answers 503 at once.
 UW_TIMEOUT_S = 8
 UW_MAX_RETRIES = 0
 REQUEST_DEADLINE_S = 12
+MAX_IN_FLIGHT = 2
+
+_executor = ThreadPoolExecutor(max_workers=MAX_IN_FLIGHT, thread_name_prefix="uw_ratings")
+_in_flight = 0
+_in_flight_lock = threading.Lock()
 
 _TEXT_FIELDS = ("timestamp", "firm", "analyst_name", "action", "recommendation")
 
@@ -76,17 +89,46 @@ def _validate_rows(rows: list) -> None:
             raise ValueError("analyst row target is not numeric")
 
 
+def _acquire_slot() -> bool:
+    global _in_flight
+    with _in_flight_lock:
+        if _in_flight >= MAX_IN_FLIGHT:
+            return False
+        _in_flight += 1
+        return True
+
+
+def _release_slot() -> None:
+    global _in_flight
+    with _in_flight_lock:
+        _in_flight -= 1
+
+
+def _run_in_slot(ticker: str) -> list[dict]:
+    """Worker body: the slot is held until the blocking fetch really returns."""
+    try:
+        return _fetch_rows(ticker)
+    finally:
+        _release_slot()
+
+
 def _fetch_rows(ticker: str) -> list[dict]:
-    """Blocking UW call — run via asyncio.to_thread."""
+    """Blocking UW call — runs on the private `_executor`."""
     client = UWClient(timeout=UW_TIMEOUT_S, max_retries=UW_MAX_RETRIES)
     try:
         payload = client.get_analyst_ratings_by_ticker(ticker, limit=_ROW_LIMIT)
     finally:
         client.close()
-    rows = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(rows, list):
-        raise ValueError("unexpected UW analysts payload shape")
-    _validate_rows(rows)
+    try:
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            raise ValueError("unexpected UW analysts payload shape")
+        _validate_rows(rows)
+    except ValueError:
+        # UWClient._get already put this HTTP-200 body in the shared 60 s uw_cache;
+        # a rejected payload must not be served again once upstream recovers.
+        uw_cache.evict(uw_cache.make_key(_UW_ENDPOINT, {"ticker": ticker, "limit": _ROW_LIMIT}))
+        raise
     return rows
 
 
@@ -101,8 +143,16 @@ async def ticker_ratings(ticker: str | None = None):
     if hit is not None and _now() - hit[0] < CACHE_TTL_SECONDS:
         return hit[1]
 
+    if not _acquire_slot():
+        logger.warning("UW analyst ratings: all %d workers busy, refusing %s", MAX_IN_FLIGHT, symbol)
+        return _error(503, "RATINGS_BUSY", "Analyst ratings fetch is busy; retry shortly")
     try:
-        rows = await asyncio.wait_for(asyncio.to_thread(_fetch_rows, symbol), timeout=REQUEST_DEADLINE_S)
+        fut = asyncio.get_running_loop().run_in_executor(_executor, _run_in_slot, symbol)
+    except BaseException:
+        _release_slot()
+        raise
+    try:
+        rows = await asyncio.wait_for(fut, timeout=REQUEST_DEADLINE_S)
     except asyncio.TimeoutError:
         logger.warning("UW analyst ratings fetch for %s exceeded %ss", symbol, REQUEST_DEADLINE_S)
         return _error(504, "UW_TIMEOUT", "Unusual Whales analyst ratings timed out")

@@ -40,6 +40,12 @@ def set_cached(key: str, data: Any) -> None:
         _cache[key] = (time.time(), data)
 
 
+def evict(key: str) -> None:
+    """Drop one cached entry (no-op when absent)."""
+    with _lock:
+        _cache.pop(key, None)
+
+
 def make_key(endpoint: str, params: Optional[Dict] = None) -> str:
     """Create a cache key from endpoint and params."""
     if params:

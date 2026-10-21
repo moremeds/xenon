@@ -54,6 +54,12 @@ function failure(error: unknown): Response {
         { status: 400 },
       );
     }
+    if (error.status === 503 && code === "RATINGS_BUSY") {
+      return NextResponse.json(
+        { error: "Ratings busy, retry shortly", reason_code: "RATINGS_BUSY" },
+        { status: 503 },
+      );
+    }
     if (error.status === 504 || code === "UW_TIMEOUT") {
       return NextResponse.json(TIMEOUT_BODY, { status: 504 });
     }
