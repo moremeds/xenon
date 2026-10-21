@@ -59,16 +59,19 @@ export function useFutuPortfolio(enabled: boolean) {
   const [lastSync, setLastSync] = useState<string | null>(null);
   const [neverSynced, setNeverSynced] = useState(false);
   const [initialRead, setInitialRead] = useState<FutuInitialRead>("pending");
+  // True once the mount-time cache GET has settled (any outcome).
+  const [initialReadDone, setInitialReadDone] = useState(false);
 
   const syncingRef = useRef(false);
   const intervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const backoffRef = useRef(BASE_INTERVAL_MS);
-  const didInitialReadRef = useRef(false);
   const initialLoadStartedRef = useRef(false);
-  const syncLoopArmedRef = useRef(false);
+  // `fetched_at` of the newest snapshot we hold; drives the first-sync delay.
+  const latestFetchedAtRef = useRef<string | null>(null);
   const doSyncRef = useRef<() => Promise<void>>(async () => {});
 
   const applyResponse = useCallback((body: FutuPortfolioResponse) => {
+    latestFetchedAtRef.current = isFutuNeverSynced(body) ? null : body.fetched_at;
     if (isFutuNeverSynced(body)) {
       setEnvelope(null);
       setData(null);
@@ -86,8 +89,7 @@ export function useFutuPortfolio(enabled: boolean) {
     setError(null);
   }, []);
 
-  /** Returns the cached snapshot's `fetched_at`, or null when there is none. */
-  const loadFromCache = useCallback(async (): Promise<string | null> => {
+  const loadFromCache = useCallback(async () => {
     try {
       const res = await fetch("/api/futu/portfolio", { cache: "no-store" });
       if (res.status === 404) {
@@ -99,20 +101,18 @@ export function useFutuPortfolio(enabled: boolean) {
         setNeverSynced(true);
         setInitialRead("never_synced");
         setError(null);
-        return null;
+        return;
       }
       if (!res.ok) {
         throw new Error(`GET /api/futu/portfolio: ${res.status}`);
       }
       const body: FutuPortfolioResponse = await res.json();
       applyResponse(body);
-      return isFutuNeverSynced(body) ? null : body.fetched_at;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setInitialRead("unavailable");
-      return null;
     } finally {
-      didInitialReadRef.current = true;
+      setInitialReadDone(true);
     }
   }, [applyResponse]);
 
@@ -162,56 +162,36 @@ export function useFutuPortfolio(enabled: boolean) {
 
   const syncNow = useCallback(() => {
     backoffRef.current = BASE_INTERVAL_MS;
-    syncLoopArmedRef.current = true;
     void doSync();
   }, [doSync]);
 
-  // Initial load: fast GET from cache, then arm the POST sync loop.
+  // Initial load: one fast GET from cache. Deliberately NOT cancelled when
+  // `enabled` changes (useMarketHours starts CLOSED and flips after its own
+  // effect); the arming effect below decides when syncing starts.
   useEffect(() => {
     if (initialLoadStartedRef.current) return;
     initialLoadStartedRef.current = true;
+    void loadFromCache();
+  }, [loadFromCache]);
 
-    let cancelled = false;
-
-    const init = async () => {
-      const cachedFetchedAt = await loadFromCache();
-      if (cancelled) return;
-      if (enabled) {
-        syncLoopArmedRef.current = true;
-        scheduleNext(
-          isStaleSnapshot(cachedFetchedAt)
-            ? STALE_FIRST_SYNC_DELAY_MS
-            : BASE_INTERVAL_MS,
-        );
-      }
-    };
-
-    void init();
-
-    return () => {
-      cancelled = true;
-      if (intervalRef.current) {
-        clearTimeout(intervalRef.current);
-        intervalRef.current = null;
-      }
-    };
-  }, [enabled, loadFromCache, scheduleNext]);
-
-  // Start syncing when `enabled` transitions to true after mount.
+  // Single place that starts the POST loop: needs BOTH the initial read done
+  // AND `enabled`, in either order. First sync is quick (500ms) when we hold
+  // no snapshot or it is stale, else one normal interval.
   useEffect(() => {
-    if (!enabled) {
+    if (!enabled || !initialReadDone) return;
+    const fetchedAt = latestFetchedAtRef.current;
+    scheduleNext(
+      fetchedAt === null || isStaleSnapshot(fetchedAt)
+        ? STALE_FIRST_SYNC_DELAY_MS
+        : BASE_INTERVAL_MS,
+    );
+    return () => {
       if (intervalRef.current) {
         clearTimeout(intervalRef.current);
         intervalRef.current = null;
       }
-      syncLoopArmedRef.current = false;
-      return;
-    }
-
-    if (!didInitialReadRef.current || syncLoopArmedRef.current) return;
-    syncLoopArmedRef.current = true;
-    void doSync();
-  }, [enabled, doSync]);
+    };
+  }, [enabled, initialReadDone, scheduleNext]);
 
   // Reset backoff & force sync when tab becomes visible again.
   useEffect(() => {
@@ -219,7 +199,6 @@ export function useFutuPortfolio(enabled: boolean) {
       if (document.visibilityState === "visible" && enabled) {
         backoffRef.current = BASE_INTERVAL_MS;
         if (!syncingRef.current) {
-          syncLoopArmedRef.current = true;
           scheduleNext(500);
         }
       }

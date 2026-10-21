@@ -1,6 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
+import { StrictMode, createElement, type ReactNode } from "react";
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { renderHook, waitFor, cleanup, act } from "@testing-library/react";
 import { useFutuPortfolio } from "@/lib/useFutuPortfolio";
@@ -248,6 +249,128 @@ describe("useFutuPortfolio first sync scheduling", () => {
     renderHook(() => useFutuPortfolio(false));
     await flush(0);
     await flush(60_000);
+    expect(calls).toEqual(["GET"]);
+  });
+});
+
+describe("useFutuPortfolio arming order (enabled flips after mount)", () => {
+  const NOW = new Date("2026-10-21T14:30:00.000Z");
+  const STALE = new Date(NOW.getTime() - 600_000).toISOString();
+  const FRESH = new Date(NOW.getTime() - 10_000).toISOString();
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** GET resolves only when `release()` is called; POST resolves at once. */
+  function installGatedFetch(cachedFetchedAt: string) {
+    const calls: string[] = [];
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    global.fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      calls.push(method);
+      if (method === "GET") await gate;
+      const fetched_at = method === "POST" ? NOW.toISOString() : cachedFetchedAt;
+      return new Response(JSON.stringify({ ...FIXTURE_ENVELOPE, fetched_at }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof global.fetch;
+    return { calls, release: () => release() };
+  }
+
+  async function flush(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  it("enabled flips true BEFORE the GET resolves: stale cache -> POST within ~0.5 s", async () => {
+    const { calls, release } = installGatedFetch(STALE);
+    const { rerender } = renderHook(({ on }) => useFutuPortfolio(on), {
+      initialProps: { on: false },
+    });
+    await flush(0);
+    rerender({ on: true });
+    await flush(1_000);
+    expect(calls).toEqual(["GET"]); // GET still pending, nothing armed yet
+    release();
+    await flush(0);
+    await flush(600);
+    expect(calls).toEqual(["GET", "POST"]);
+  });
+
+  it("enabled true from the start: stale cache -> POST within ~0.5 s of the GET", async () => {
+    const { calls, release } = installGatedFetch(STALE);
+    renderHook(() => useFutuPortfolio(true));
+    await flush(0);
+    release();
+    await flush(0);
+    await flush(600);
+    expect(calls).toEqual(["GET", "POST"]);
+  });
+
+  it("GET resolves first, then enabled flips -> POST follows", async () => {
+    const { calls, release } = installGatedFetch(STALE);
+    const { rerender } = renderHook(({ on }) => useFutuPortfolio(on), {
+      initialProps: { on: false },
+    });
+    await flush(0);
+    release();
+    await flush(0);
+    await flush(60_000);
+    expect(calls).toEqual(["GET"]);
+    rerender({ on: true });
+    await flush(600);
+    expect(calls).toEqual(["GET", "POST"]);
+  });
+
+  it("works under StrictMode double effects (one GET, one POST)", async () => {
+    const { calls, release } = installGatedFetch(STALE);
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(StrictMode, null, children);
+    const { rerender } = renderHook(({ on }) => useFutuPortfolio(on), {
+      wrapper,
+      initialProps: { on: false },
+    });
+    await flush(0);
+    rerender({ on: true });
+    release();
+    await flush(0);
+    await flush(600);
+    expect(calls.filter((c) => c === "GET")).toHaveLength(1);
+    expect(calls.filter((c) => c === "POST")).toHaveLength(1);
+  });
+
+  it("fresh cache and enabled flips late: first POST at 30 s, not earlier", async () => {
+    const { calls, release } = installGatedFetch(FRESH);
+    const { rerender } = renderHook(({ on }) => useFutuPortfolio(on), {
+      initialProps: { on: false },
+    });
+    await flush(0);
+    rerender({ on: true });
+    release();
+    await flush(0);
+    await flush(20_000);
+    expect(calls).toEqual(["GET"]);
+    await flush(11_000);
+    expect(calls).toEqual(["GET", "POST"]);
+  });
+
+  it("stays disabled: no POST ever", async () => {
+    const { calls, release } = installGatedFetch(STALE);
+    renderHook(() => useFutuPortfolio(false));
+    await flush(0);
+    release();
+    await flush(0);
+    await flush(120_000);
     expect(calls).toEqual(["GET"]);
   });
 });
