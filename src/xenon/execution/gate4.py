@@ -68,6 +68,7 @@ from xenon.execution.orders_store import (
     ensure_writable,
 )
 from xenon.execution.universe import UNIVERSE, get_multiplier
+from xenon.utils import market_calendar
 
 TERMINAL_STATES = frozenset({"FILLED", "CANCELLED", "REJECTED", "FAILED"})
 
@@ -120,20 +121,11 @@ def _as_utc(dt: Any) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def _market_open_now() -> bool:
-    from zoneinfo import ZoneInfo
-
-    et = datetime.now(tz=ZoneInfo("America/New_York"))
-    if et.weekday() >= 5:
-        return False
-    return 9 * 60 + 30 <= et.hour * 60 + et.minute <= 16 * 60
-
-
 def _snapshot_stale(as_of: datetime | None) -> bool:
     """Same thresholds as the legacy route-level check."""
     if as_of is None:
         return False
-    market_open = _market_open_now()
+    market_open = market_calendar.is_open(market_calendar.now_et(), strict=False)
     env = "XENON_PORTFOLIO_SNAPSHOT_STALE_S" if market_open else "XENON_PORTFOLIO_SNAPSHOT_STALE_CLOSED_S"
     default = 300 if market_open else 1800
     try:

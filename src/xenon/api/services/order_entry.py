@@ -31,6 +31,7 @@ from xenon.execution import gate4, ib_order_manage, ib_place_order, orders_store
 from xenon.execution.account_scope import resolve_from_app_state
 from xenon.execution.preflight import PortfolioView, PreflightRequest, ReasonCode, Verdict
 from xenon.execution.quote_tokens import QuotePayload
+from xenon.utils import market_calendar
 
 logger = logging.getLogger("xenon.api")
 
@@ -81,7 +82,7 @@ def _portfolio_snapshot_stale_response(snapshot_at: datetime | None) -> Verdict 
         return None
     if snapshot_at.tzinfo is None:
         snapshot_at = snapshot_at.replace(tzinfo=timezone.utc)
-    market_open = _is_market_open_now()
+    market_open = market_calendar.is_open(market_calendar.now_et(), strict=False)
     threshold_env = "XENON_PORTFOLIO_SNAPSHOT_STALE_S" if market_open else "XENON_PORTFOLIO_SNAPSHOT_STALE_CLOSED_S"
     default_seconds = "300" if market_open else "1800"
     try:
@@ -2010,18 +2011,6 @@ async def modify(body: dict):
     )
     # Echo the applied sequence so the UI can anchor its per-order counter.
     return {**data, "applied_sequence": modify_sequence}
-
-
-def _is_market_open_now() -> bool:
-    """Live ET market-hours check — used to override stamped market_open at read time."""
-    from datetime import datetime as _dt
-    from zoneinfo import ZoneInfo
-
-    et = _dt.now(tz=ZoneInfo("America/New_York"))
-    if et.weekday() >= 5:
-        return False
-    minutes = et.hour * 60 + et.minute
-    return 9 * 60 + 30 <= minutes <= 16 * 60
 
 
 # The order owner's wait for one place: readiness round trip + qualify + ack

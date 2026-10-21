@@ -178,3 +178,23 @@ def test_sell_below_floor_rejects_with_LIMIT_OUT_OF_BAND():
     )
     assert v.accept is False
     assert v.reason_code == ReasonCode.LIMIT_OUT_OF_BAND
+
+
+def test_check_market_hours_opt_blocked_on_holiday_midday():
+    # Thanksgiving 2026, 13:00 ET: weekday + inside 09:30-16:00, but closed.
+    thanksgiving = datetime(2026, 11, 26, 13, 0, tzinfo=ZoneInfo("America/New_York"))
+    v = quote_guard.check_market_hours(security_type="OPT", now=thanksgiving)
+    assert v.accept is False
+    assert v.reason_code == ReasonCode.OPTION_MARKET_CLOSED
+
+
+def test_check_market_hours_opt_open_midday_trading_day():
+    v = quote_guard.check_market_hours(
+        security_type="OPT", now=datetime(2026, 11, 25, 13, 0, tzinfo=ZoneInfo("America/New_York"))
+    )
+    assert v.accept is True
+
+
+def test_check_market_hours_stock_not_gated_on_holiday():
+    thanksgiving = datetime(2026, 11, 26, 13, 0, tzinfo=ZoneInfo("America/New_York"))
+    assert quote_guard.check_market_hours(security_type="STK", now=thanksgiving).accept is True

@@ -69,3 +69,15 @@ async def test_different_scopes_have_independent_cache(mock_compute):
     await cached_compute(None, AccountScope("IB", "paper", "DU1"), ib_pool=None)
     await cached_compute(None, AccountScope("FUTU", "live", "42"), ib_pool=None)
     assert mock_compute.call_count == 2
+
+
+def test_ttl_closed_on_holiday_midday():
+    """Thanksgiving 2026 12:00 ET: weekday inside 9:30-16:00, but closed."""
+    assert _ttl_for_now(dt.datetime(2026, 11, 26, 12, 0, tzinfo=_ET)) == 1800
+
+
+def test_ttl_year_missing_from_calendar_uses_weekday_rule(caplog):
+    """No holiday data for the year must not crash the cache; weekday rule + loud log."""
+    with caplog.at_level("ERROR"):
+        assert _ttl_for_now(dt.datetime(1999, 3, 3, 10, 0, tzinfo=_ET)) == 60
+    assert any("1999" in r.getMessage() for r in caplog.records)

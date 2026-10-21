@@ -746,9 +746,9 @@ def main():
 
     # Detect market status
     try:
-        from xenon.utils.market_hours import is_market_open
+        from xenon.utils import market_calendar
 
-        market_open = is_market_open()
+        market_open = market_calendar.is_open(market_calendar.now_et())
     except Exception:
         market_open = True  # assume open if can't check
 
