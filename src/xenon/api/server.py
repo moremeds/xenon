@@ -216,8 +216,9 @@ def _maybe_start_activity_poller() -> None:
     import asyncio as _asyncio
 
     from xenon.api.services.ib_activity_mirror import (
-        DEFAULT_POLL_INTERVAL_S,
         activity_poller_loop,
+        poll_interval_s,
+        poller_enabled,
     )
     from xenon.execution.account_scope import AccountScope
 
@@ -225,9 +226,8 @@ def _maybe_start_activity_poller() -> None:
         logger.info("test_mode: skipping ib activity poller")
         return
 
-    poller_flag = os.environ.get("XENON_IB_ACTIVITY_POLLER", "").strip().lower()
-    if poller_flag in {"0", "false", "no", "off"}:
-        logger.info("ib activity poller disabled (XENON_IB_ACTIVITY_POLLER=%s)", poller_flag)
+    if not poller_enabled():
+        logger.info("ib activity poller disabled (XENON_IB_ACTIVITY_POLLER=%s)", os.environ.get("XENON_IB_ACTIVITY_POLLER"))
         return
 
     _scope_account_env = getattr(app.state, "trading_mode", None)
@@ -256,10 +256,7 @@ def _maybe_start_activity_poller() -> None:
         ib_async's internals dispatch awaitables."""
         return await ib_pool.run_sync("sync", fn, *args, **kwargs)
 
-    try:
-        interval_s = float(os.environ.get("XENON_IB_ACTIVITY_POLL_S", DEFAULT_POLL_INTERVAL_S))
-    except ValueError:
-        interval_s = DEFAULT_POLL_INTERVAL_S
+    interval_s = poll_interval_s()
 
     task = _asyncio.create_task(
         activity_poller_loop(

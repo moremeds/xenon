@@ -438,9 +438,28 @@ def _resume_pending(session_id: str, *, requested_target: Decimal) -> dict[str, 
     return _outcome_unknown_409(session_id, f"its order is {state}")
 
 
+def _fills_sync_pending(terminal_at: datetime | None) -> str | None:
+    """Why 0 recorded fills is not yet proof of 0 executions, or None.
+
+    A cancel writes no filled quantity; fills on owner-placed orders reach
+    order_fills only through the activity poller (server.py
+    _maybe_start_activity_poller). Proof needs the poller on and the terminal
+    write older than 2 × its interval (one full tick after it)."""
+    from xenon.api.services.ib_activity_mirror import poll_interval_s, poller_enabled
+
+    if not poller_enabled():
+        return "the activity poller is off (XENON_IB_ACTIVITY_POLLER), so fills are never recorded"
+    window = 2 * poll_interval_s()
+    if terminal_at is None or (_now() - terminal_at).total_seconds() < window:
+        return f"it ended less than {window:g} s ago and its fills may not be recorded yet"
+    return None
+
+
 def _dead_tp_executions_refusal(session_id: str, cid: str, row: Any, *, scope: dict[str, str]) -> JSONResponse | None:
     """None only when the dead TP provably executed nothing; else a 409
-    PROTECT_TP_PARTIAL (claim kept, nothing sent).
+    (claim kept, nothing sent): PROTECT_TP_PARTIAL when executions are > 0 or
+    cannot be checked, PLACE_OUTCOME_UNKNOWN while the fills sync may still
+    be behind the terminal write (_fills_sync_pending).
 
     A cancel keeps executed quantity (order_entry._mark_submission_cancelled
     passes filled_qty=None), so a re-place at the full entry quantity after a
@@ -469,6 +488,17 @@ def _dead_tp_executions_refusal(session_id: str, cid: str, row: Any, *, scope: d
             # The activity mirror links fills by permId; without one, fills
             # recorded by IB cannot be checked.
             why = "no permId to check fills"
+        elif may_have_been_at_ib:
+            pending = _fills_sync_pending(ev.terminal_at)
+            if pending:
+                _record_event(
+                    session_id,
+                    "PROTECTION_PENDING",
+                    {"reason": "FILLS_SYNC_PENDING", "client_attempt_id": cid, "row_state": row.state, "why": pending},
+                )
+                return _outcome_unknown_409(
+                    session_id, f"its order is {row.state} but {pending}; retry after the next fills sync"
+                )
     if why is None:
         return None
 

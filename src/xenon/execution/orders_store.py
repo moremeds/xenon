@@ -1499,6 +1499,7 @@ class ExecutionEvidence:
     filled_qty: int  # order_submissions.filled_qty (0 when NULL)
     fill_rows: int  # order_fills rows linked by submission_id or scoped perm_id
     envelope_qty: Decimal  # sum of BAG envelope fill qty (leg rows excluded)
+    terminal_at: datetime | None  # order_submissions.updated_at (the terminal write or later)
 
 
 def execution_evidence(
@@ -1527,16 +1528,23 @@ def execution_evidence(
         )
     is_envelope = order_fills.c.metadata["sec_type"].astext == "BAG"
     with engine.connect() as conn:
-        filled = conn.execute(
-            select(order_submissions.c.filled_qty).where(order_submissions.c.submission_id == submission_id)
-        ).scalar()
+        sub = conn.execute(
+            select(order_submissions.c.filled_qty, order_submissions.c.updated_at).where(
+                order_submissions.c.submission_id == submission_id
+            )
+        ).first()
         rows, env_qty = conn.execute(
             select(
                 func.count(),
                 func.coalesce(func.sum(order_fills.c.qty).filter(is_envelope), 0),
             ).where(link)
         ).one()
-    return ExecutionEvidence(filled_qty=int(filled or 0), fill_rows=int(rows), envelope_qty=Decimal(env_qty))
+    return ExecutionEvidence(
+        filled_qty=int((sub.filled_qty if sub else 0) or 0),
+        fill_rows=int(rows),
+        envelope_qty=Decimal(env_qty),
+        terminal_at=sub.updated_at if sub else None,
+    )
 
 
 from xenon.execution.preflight import WorkingReservations

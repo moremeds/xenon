@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -467,6 +468,8 @@ async def _pending_with_dead_tp(place, monkeypatch, *, evidence) -> str:
 
     from xenon.execution import orders_store
 
+    monkeypatch.delenv("XENON_IB_ACTIVITY_POLLER", raising=False)
+    monkeypatch.delenv("XENON_IB_ACTIVITY_POLL_S", raising=False)
     sid = _init_session(state="FILLED")
     place.replies[:] = [JSONResponse(status_code=502, content={"reason_code": "PLACE_OUTCOME_UNKNOWN"})]
     await _protect(sid)
@@ -498,7 +501,9 @@ async def test_dead_tp_with_unknown_executions_keeps_claim_and_sends_nothing(pla
     evidence = (
         RuntimeError("db down")
         if evidence_kind == "lookup_raises"
-        else orders_store.ExecutionEvidence(filled_qty=0, fill_rows=2, envelope_qty=Decimal(0))
+        else orders_store.ExecutionEvidence(
+            filled_qty=0, fill_rows=2, envelope_qty=Decimal(0), terminal_at=datetime.now(timezone.utc) - timedelta(hours=1)
+        )
     )
     sid = await _pending_with_dead_tp(place, monkeypatch, evidence=evidence)
 
@@ -517,7 +522,9 @@ async def test_dead_tp_with_proven_zero_executions_places_one_new_tp(place, monk
     from xenon.execution import orders_store
 
     sid = await _pending_with_dead_tp(
-        place, monkeypatch, evidence=orders_store.ExecutionEvidence(filled_qty=0, fill_rows=0, envelope_qty=Decimal(0))
+        place, monkeypatch, evidence=orders_store.ExecutionEvidence(
+            filled_qty=0, fill_rows=0, envelope_qty=Decimal(0), terminal_at=datetime.now(timezone.utc) - timedelta(hours=1)
+        ),
     )
     place.replies.append({"status": "ok", "orderId": 9002, "permId": 7002})
 
