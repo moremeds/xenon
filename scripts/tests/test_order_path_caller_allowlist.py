@@ -118,3 +118,13 @@ def test_unparseable_python_falls_back_to_line_match(tmp_path: Path) -> None:
     source = "from xenon.execution.ib_place_order import place_order_on_client\ndef broken(:\n"
     result = _run(tmp_path, {"src/xenon/api/broken.py": source})
     assert result.returncode == 1, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("module", ["ib_place_order", "ib_order_manage"])
+@pytest.mark.parametrize("prefix", ["..execution", ".execution", ".."])
+def test_qualified_relative_module_import_fails(tmp_path: Path, module: str, prefix: str) -> None:
+    source = f"from {prefix}.{module} import (\n    place_order_on_client,\n)\n" if prefix != ".." else (
+        f"from ..{module} import place_order_on_client\n"
+    )
+    result = _run(tmp_path, {"src/xenon/api/example.py": source})
+    assert result.returncode == 1, result.stdout + result.stderr

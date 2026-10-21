@@ -70,7 +70,8 @@ def _python_import_linenos(source: str) -> list[int] | None:
     """Line numbers of imports of the order-write modules, via `ast`.
 
     Returns None when the source does not parse; the caller then falls back to
-    the line-by-line patterns so a syntax error can never hide an import.
+    the old line-by-line patterns. Those patterns match single-line imports
+    only, so a multiline import in a file with a syntax error is not caught.
     """
     try:
         tree = ast.parse(source)
@@ -88,8 +89,9 @@ def _python_import_linenos(source: str) -> list[int] | None:
                 from_package = module == _PACKAGE and any(a.name in _MODULE_NAMES for a in node.names)
                 hit = from_module or from_package
             else:
-                # `from .ib_place_order import x` / `from . import ib_place_order`
-                hit = module.split(".")[0] in _MODULE_NAMES or any(a.name in _MODULE_NAMES for a in node.names)
+                # `from .ib_place_order import x`, `from ..execution.ib_place_order import x`,
+                # `from . import ib_place_order`
+                hit = any(part in _MODULE_NAMES for part in module.split(".")) or any(a.name in _MODULE_NAMES for a in node.names)
         else:
             continue
         if hit:
