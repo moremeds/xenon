@@ -64,7 +64,7 @@ describe("useMarketHours boundary", () => {
     vi.setSystemTime(mockEt(16, 0));
     const { result } = renderHook(() => useMarketHours());
     // Half-open interval [9:30, 16:00) → 16:00 is NOT OPEN.
-    // Backend `utils.market_hours.is_market_open` uses `< MARKET_CLOSE`,
+    // Backend `utils.market_calendar.is_open` uses `< MARKET_CLOSE`,
     // so the two layers agree at this sharp boundary. Fix #10 regression.
     await waitFor(() => expect(result.current).toBe(MarketState.EXTENDED));
   });
