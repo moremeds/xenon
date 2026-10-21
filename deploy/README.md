@@ -93,7 +93,7 @@ cd /opt/xenon && docker rm xenon-job-nav-flex-refresh 2>/dev/null; docker-compos
 ```
 Effects: calls the live IB Flex web service with the live token; UPSERTs `xenon.nav_history` rows (`source='close'`) and `xenon.ib_cash_flow` rows into the DB named by the container env (step E). Evidence the CLI ran: output lines `xenon-nav-flex-refresh: mode=live account=...` and `fetched N NAV rows`, exit code 0 (1 empty fetch, 2 not configured, 3 read-only), and NO `PG persist failed` line. The CLI prints "fetched N NAV rows" even when the DB write failed, so also check storage afterwards (read-only):
 ```
-PGOPTIONS="-c default_transaction_read_only=on" psql -h 100.66.147.98 -U xenon_prod core_dev -v acct="$EXPECTED_ACCOUNT" -f - <<'SQL'
+PGOPTIONS="-c default_transaction_read_only=on" psql -h 100.66.147.98 -U xenon_dev core_dev -v acct="$EXPECTED_ACCOUNT" -f - <<'SQL'
 SELECT max(date), count(*), max(source)
   FROM xenon.nav_history
  WHERE broker = 'IB' AND account_env = 'live' AND broker_account = :'acct' AND source = 'close';
@@ -103,8 +103,10 @@ SQL
 - `launchctl kickstart gui/$(id -u)/com.xenon.nav-flex-refresh` is NOT a test of the job: outside 17:00-17:59 New York time the guard exits 0 before Docker starts and nothing runs. Use the unguarded command above.
 
 G. core_test refresh
-- Copy `scripts/infra/refresh-core-test.sh` to `/opt/xenon/bin/`, create `/opt/xenon/.pgpass-refresh` (chmod 600).
-- Dry (reads core_dev, writes nothing): `PGHOST=localhost PGUSER=xenon_migrator PGPASSFILE=/opt/xenon/.pgpass-refresh /opt/xenon/bin/refresh-core-test.sh --dry`. Evidence: log line `DRY: pg_dump of core_dev succeeded`.
+- Prerequisite: the `xenon_dev` role owns `core_test` and its `xenon` and `events` schemas (`docs/runbooks/dev-prod-db-cutover.md` step 3). That step is pending as of 2026-10-21; until it is done, the real run fails (the pre-drop and the restore need ownership). The dry run needs only the `core_dev` read grants.
+- Copy `scripts/infra/refresh-core-test.sh` to `/opt/xenon/bin/`. `/opt/xenon/.pgpass-refresh` (chmod 600) holds the `xenon_dev` password for `localhost:5432`. The script dumps only `-n xenon -n events`.
+- Dry (reads core_dev, writes nothing): `PGHOST=localhost PGUSER=xenon_dev PGPASSFILE=/opt/xenon/.pgpass-refresh /opt/xenon/bin/refresh-core-test.sh --dry`. Evidence: log line `DRY: pg_dump of core_dev succeeded`.
+- Grant check (read-only, as `xenon_dev` on the mini): `PGHOST=localhost PGUSER=xenon_dev PGPASSFILE=/opt/xenon/.pgpass-refresh psql core_dev -c "SELECT has_table_privilege('xenon_dev','xenon.order_submissions','INSERT,UPDATE,DELETE')"` must print `f`.
 - Real (REAL WRITES: DROPs the `xenon` and `events` schemas in core_test and restores core_dev into it): same command without the dry argument. Evidence: `=== refresh ok: core_dev -> core_test ===` in `/var/log/xenon/refresh-core-test.log`, exit 0. The script refuses any destination that is core_dev or lacks "test", and a second concurrent run exits 3. A stale lock (crashed run) is never reclaimed automatically: the log line prints the recovery. Check the pid with `ps -p <pid>` and that no `refresh-core-test.sh` is running, then `rm -rf /tmp/xenon-refresh-core-test.lock.d` by hand.
 - Same kickstart caveat: outside 04:00-04:59 New York time the plist guard makes kickstart a no-op.
 

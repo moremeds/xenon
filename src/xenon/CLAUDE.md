@@ -42,7 +42,7 @@ Database events use `events.py` plus the Postgres outbox trigger. Emit durable e
 
 ### Dev/Prod DB Split
 
-Two DBs on the macmini Postgres: `core_dev` (prod, written exclusively by the macmini Docker stack via the `xenon_prod` role) and `core_test` (dev mirror, written from MacBook sessions via `xenon_dev`). One-way nightly refresh `core_dev → core_test` at 04:00 ET (`scripts/infra/refresh-core-test.sh`). `dev.sh` refuses to boot when `DATABASE_URL` parses to `core_dev`. Adding a new migration: run `uv run alembic upgrade head` against your dev DB only — the macmini Docker `migrator` service applies it to `core_dev` on next deploy. Full policy: root `CLAUDE.md` § Dev/Prod DB Split.
+Two DBs on the macmini Postgres: `core_dev` (prod, written by the macmini Docker stack as `xenon_app`) and `core_test` (dev mirror, written from MacBook sessions). `xenon_dev` is read-only on `core_dev` and becomes owner of `core_test` after runbook step 3 (pending); until then laptops use `xenon_app` for `core_test`. One-way refresh `core_dev → core_test` at 04:00 ET (`scripts/infra/refresh-core-test.sh`, run as `xenon_dev`, dumps only `-n xenon -n events`) once the job is installed on the mini (it is not yet). `dev.sh` refuses to boot when `DATABASE_URL` parses to `core_dev`. Adding a new migration: run `uv run alembic upgrade head` against your dev DB only — the release flow applies it to `core_dev` with the `migrator` service (`deploy/README.md` § D); nothing migrates automatically. Full policy: root `CLAUDE.md` § Dev/Prod DB Split.
 
 ### Writer CLIs respect `XENON_READ_ONLY=1`
 

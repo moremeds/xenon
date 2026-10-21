@@ -36,7 +36,7 @@ Zones inside a block (absolute id = base + offset):
 
    ```bash
    cd /opt/xenon
-   PGOPTIONS='-c default_transaction_read_only=on' PGHOST=localhost PGUSER=xenon_migrator \
+   PGOPTIONS='-c default_transaction_read_only=on' PGHOST=localhost PGUSER=xenon_dev \
    PGPASSFILE=/opt/xenon/.pgpass-refresh psql core_dev --csv -c "
      SELECT submission_id, ticker, action, quantity, state,
             placing_client_id, ib_order_id, perm_id, submitted_at
@@ -92,7 +92,7 @@ With PR-10, a startup 326 on `orders` latches `ORDERS_HALTED` with that cause. T
 
    ```bash
    ids=$(tail -n +2 pr10-predeploy-inventory.csv | cut -d, -f1 | sed "s/.*/'&'/" | paste -sd, -)
-   PGOPTIONS='-c default_transaction_read_only=on' PGHOST=localhost PGUSER=xenon_migrator \
+   PGOPTIONS='-c default_transaction_read_only=on' PGHOST=localhost PGUSER=xenon_dev \
    PGPASSFILE=/opt/xenon/.pgpass-refresh psql core_dev --csv -c "
      SELECT submission_id, state, reason_code, placing_client_id, ib_order_id, perm_id, filled_qty
      FROM xenon.order_submissions WHERE submission_id IN ($ids) ORDER BY submitted_at" > pr10-postdeploy-inventory.csv
@@ -121,7 +121,7 @@ Restoring an image is not an ownership transfer. The previous build manages an o
 2. **Inventory the orders PR-10 placed or may have placed**, read-only, and save it (same connection settings as § 2 step 2; `<CUTOVER>` = when the PR-10 api first started, UTC):
 
    ```bash
-   PGOPTIONS='-c default_transaction_read_only=on' PGHOST=localhost PGUSER=xenon_migrator \
+   PGOPTIONS='-c default_transaction_read_only=on' PGHOST=localhost PGUSER=xenon_dev \
    PGPASSFILE=/opt/xenon/.pgpass-refresh psql core_dev --csv -c "
      SELECT submission_id, ticker, action, quantity, state, placing_client_id,
             ib_order_id, perm_id, submitted_at,

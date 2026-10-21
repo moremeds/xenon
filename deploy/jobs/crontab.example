@@ -23,7 +23,7 @@ PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
 30 5,6 * * * [ "$(TZ=America/New_York date +\%H)" = 17 ] && cd /opt/xenon && { docker rm xenon-job-nav-flex-refresh >/dev/null 2>&1; docker-compose -f /opt/xenon/compose.yml run --rm -T --no-deps --name xenon-job-nav-flex-refresh --label com.centurylinklabs.watchtower.enable=false api xenon-nav-flex-refresh; } >> /var/log/xenon/nav-flex-refresh.cron.log 2>&1
 
 # 04:00 ET daily -- core_dev -> core_test mirror (host-native, needs pg_dump).
-0 16,17 * * * [ "$(TZ=America/New_York date +\%H)" = 04 ] && PGHOST=localhost PGPORT=5432 PGUSER=xenon_migrator PGPASSFILE=/opt/xenon/.pgpass-refresh XENON_REFRESH_SRC=core_dev XENON_REFRESH_DST=core_test /opt/xenon/bin/refresh-core-test.sh >> /var/log/xenon/refresh-core-test.cron.log 2>&1
+0 16,17 * * * [ "$(TZ=America/New_York date +\%H)" = 04 ] && PGHOST=localhost PGPORT=5432 PGUSER=xenon_dev PGPASSFILE=/opt/xenon/.pgpass-refresh XENON_REFRESH_SRC=core_dev XENON_REFRESH_DST=core_test /opt/xenon/bin/refresh-core-test.sh >> /var/log/xenon/refresh-core-test.cron.log 2>&1
 
 # ---- Manual runs (NOT scheduled; paste in a shell on the mini) ----
 # These skip the ET-hour guard. They do REAL WRITES. Read the container settings
@@ -38,4 +38,4 @@ PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
 # refresh-core-test: DROPs the xenon and events schemas in core_test and restores
 # core_dev into it. Add --dry to only dump core_dev to /dev/null.
 # Evidence: "=== refresh ok: core_dev -> core_test ===" in /var/log/xenon/refresh-core-test.log, exit 0.
-#   PGHOST=localhost PGPORT=5432 PGUSER=xenon_migrator PGPASSFILE=/opt/xenon/.pgpass-refresh /opt/xenon/bin/refresh-core-test.sh
+#   PGHOST=localhost PGPORT=5432 PGUSER=xenon_dev PGPASSFILE=/opt/xenon/.pgpass-refresh /opt/xenon/bin/refresh-core-test.sh

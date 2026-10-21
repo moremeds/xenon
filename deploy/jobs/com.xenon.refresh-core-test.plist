@@ -28,7 +28,7 @@
                exits 3 and calls no PG command. The script also refuses SRC equal
                to DST and any DST that is core_dev or lacks "test" in its name.
   Creds:       PGPASSFILE -> /opt/xenon/.pgpass-refresh (chmod 600, holds the
-               xenon_migrator password for host:5432). No password in this file.
+               xenon_dev password for host:5432). No password in this file.
                The script does not read /opt/xenon/.env.
   Volumes:     none (host PostgreSQL on localhost:5432).
   Logs:        /var/log/xenon/refresh-core-test.log (script),
@@ -90,7 +90,7 @@
     <key>PGPORT</key>
     <string>5432</string>
     <key>PGUSER</key>
-    <string>xenon_migrator</string>
+    <string>xenon_dev</string>
     <key>PGPASSFILE</key>
     <string>/opt/xenon/.pgpass-refresh</string>
     <key>XENON_REFRESH_SRC</key>
