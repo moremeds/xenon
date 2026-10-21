@@ -181,3 +181,65 @@ class TestScriptResult:
         assert r.data is None
         assert r.error == "something broke"
         assert r.exit_code == 1
+
+
+class TestLastLineJsonFallback:
+    """PR-11 hand-off: noise containing "{" before the final JSON line (a real
+    ib_sync run printed SQLAlchemy "[parameters: {...}]") must not lose the
+    final JSON line. The first-"{" parse still wins when it succeeds."""
+
+    NOISE = (
+        "Fetching account summary...\n"
+        "  Warning: Postgres write failed: (psycopg.errors.X) boom\n"
+        "[parameters: {'ticker': '6981', 'quantity': 100}]\n"
+        "✓ Disconnected from IB\n"
+    )
+
+    def _entry(self, tmp_path, monkeypatch, body: str, name="fake-noisy", code=0):
+        import stat as _stat
+
+        from xenon.api import subprocess as sp
+
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir(exist_ok=True)
+        entry = fake_bin / name
+        entry.write_text(f"#!/usr/bin/env python3\nimport sys\nsys.stdout.write({body!r})\nsys.exit({code})\n")
+        entry.chmod(entry.stat().st_mode | _stat.S_IXUSR | _stat.S_IXGRP | _stat.S_IXOTH)
+        monkeypatch.setattr(sp, "VENV_BIN", fake_bin)
+        return sp
+
+    def test_entry_point_noise_then_final_json_line_parses(self, tmp_path, monkeypatch):
+        sp = self._entry(tmp_path, monkeypatch, self.NOISE + '{"naked_short_audit": {"status": "ok"}}\n\n')
+        result = asyncio.run(sp.run_entry_point("fake-noisy"))
+        assert result.ok is True
+        assert result.data == {"naked_short_audit": {"status": "ok"}}
+
+    def test_entry_point_noise_without_final_json_line_is_empty(self, tmp_path, monkeypatch):
+        sp = self._entry(tmp_path, monkeypatch, self.NOISE)
+        result = asyncio.run(sp.run_entry_point("fake-noisy"))
+        assert result.ok is True and result.data == {}
+
+    def test_entry_point_nonzero_exit_noise_then_status_json_surfaces_data(self, tmp_path, monkeypatch):
+        sp = self._entry(tmp_path, monkeypatch, self.NOISE + '{"status": "error", "message": "m"}\n', code=1)
+        result = asyncio.run(sp.run_entry_point("fake-noisy"))
+        assert result.ok is True and result.data["status"] == "error" and result.exit_code == 1
+
+    def test_entry_point_first_brace_parse_still_wins(self, tmp_path, monkeypatch):
+        sp = self._entry(tmp_path, monkeypatch, 'progress\n{\n  "a": 1,\n  "b": {"c": 2}\n}\n')
+        result = asyncio.run(sp.run_entry_point("fake-noisy"))
+        assert result.data == {"a": 1, "b": {"c": 2}}
+
+    def test_module_noise_then_final_json_line_parses(self, tmp_path, monkeypatch):
+        from xenon.api import subprocess as sp
+
+        mod = tmp_path / "noisy_mod_pr11.py"
+        mod.write_text(f"import sys\nsys.stdout.write({self.NOISE + chr(123) + '\"x\": 1}' + chr(10)!r})\n")
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+        result = asyncio.run(sp.run_module("noisy_mod_pr11"))
+        assert result.ok is True and result.data == {"x": 1}
+
+    def test_parse_helper_rejects_trailing_non_json_last_line(self):
+        from xenon.api import subprocess as sp
+
+        assert sp._parse_stdout_json(self.NOISE + '{"x": 1}\ntrailing text\n') is None

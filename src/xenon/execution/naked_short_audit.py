@@ -14,7 +14,9 @@ safety margin, never grounds for a violation.
 
 Shadow only: violations are logged and recorded in
 `service_health("naked_short_audit")`. This module has no broker access and
-no cancel path; enforcement (PR-11) is a separate, opt-in step.
+no cancel path; enforcement (PR-11) is a separate, opt-in step in the API
+process (`xenon.api.services.audit_enforce`, `XENON_AUDIT_CANCEL=1`), fed by
+the summary `ib_sync` prints.
 
 `violations` lists every contributor — each live order whose removal lowers
 uncovered short calls or short stock — and is not the cancel set: two SELL

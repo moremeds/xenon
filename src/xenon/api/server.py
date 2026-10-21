@@ -14,6 +14,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import re
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -61,6 +62,7 @@ from xenon.api.routes.performance import router as performance_router
 from xenon.api.routes.trades import router as trades_router
 from xenon.api.routes.watchlist import router as watchlist_router
 from xenon.api.routes.wizard import router as wizard_router
+from xenon.api.services import audit_enforce
 from xenon.api.services.flex_token import flex_token_status
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
@@ -1566,8 +1568,20 @@ async def portfolio_background_sync():
 
 
 async def _sync_via_subprocess() -> ScriptResult:
-    """Run ib_sync.py as a subprocess with auto-recovery. Never raises: the
+    """One sync pass, then (XENON_AUDIT_CANCEL=1 only) naked-short audit
+    enforcement — both inside the single-flight task. Never raises: the
     shared task may have no awaiter (background trigger)."""
+    result = await _run_sync_pass()
+    if result.ok and audit_enforce.enabled():
+        try:
+            await _enforce_naked_short_audit(result.data)
+        except Exception:  # noqa: BLE001 — enforcement must never fail the sync
+            logger.exception("naked short audit enforcement failed")
+    return result
+
+
+async def _run_sync_pass() -> ScriptResult:
+    """Run ib_sync.py as a subprocess with auto-recovery. Never raises."""
     try:
         result = await _run_ib_script_with_recovery(
             "xenon-ib-sync", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
@@ -1580,6 +1594,75 @@ async def _sync_via_subprocess() -> ScriptResult:
     else:
         logger.error("Portfolio sync failed: %s", result.error)
     return result
+
+
+async def _enforce_naked_short_audit(data: dict | None):
+    """Enforce mode (spec §2.4 Phase B; `services/audit_enforce.py`).
+
+    Cancels go through `_cancel_order`, the core of POST /orders/cancel, on
+    the order owner. In-process: the route's read-only and order guards are
+    called explicitly (`_audit_cancel_blocked`) before every cancel."""
+    if is_read_only():
+        logger.warning("XENON_AUDIT_CANCEL=1 ignored: XENON_READ_ONLY=1 never cancels")
+        return None
+    scope = _resolve_scope_kwargs()
+    outcome = await audit_enforce.enforce(
+        audit_enforce.audit_from(data),
+        scope_account=scope.get("broker_account") or "",
+        owner_client_id=pool_client_id("orders"),
+        blocked=_audit_cancel_blocked,
+        cancel=_audit_cancel,
+        resync=_audit_resync,
+    )
+    audit_enforce.record_health(outcome, scope)
+    return outcome
+
+
+def _audit_cancel_blocked() -> str | None:
+    """Why the audit may not cancel now (None = it may)."""
+    if is_read_only():
+        return "read_only"
+    if order_owner is None:
+        return "owner_unavailable"
+    if order_owner.halted:
+        return "owner_halted"
+    try:
+        denial = ensure_order_allowed("naked-short audit cancel", app.state)
+    except HTTPException:
+        return "mode_unverified"
+    if denial is not None:
+        return f"order_denied:{_json_body(denial).get('reason_code')}"
+    return None
+
+
+# The cancel core's refusal for an order that is no longer working
+# (`ib_order_manage._cancel_body`), sent before any cancelOrder.
+_ALREADY_TERMINAL = re.compile(r"^Order already (Filled|Cancelled|ApiCancelled)\b")
+
+
+async def _audit_cancel(target: dict) -> str:
+    """Cancel one audit target by its full identity; permId is always set,
+    so the core never falls back to orderId."""
+    kind, resp = await _cancel_order(
+        {"orderId": target["order_id"], "permId": target["perm_id"], "clientId": target["client_id"]},
+        reason_code=audit_enforce.REASON_CODE,
+    )
+    if kind == "ok":
+        return audit_enforce.CONFIRMED
+    detail = _json_body(resp).get("detail") or {}
+    upstream = detail.get("upstream") if isinstance(detail, dict) else None
+    logger.warning("naked short audit cancel %s for %s: %s", kind, target, detail)
+    if kind == "failed" and isinstance(upstream, dict) and upstream.get("code") == 10147:
+        return audit_enforce.NOT_FOUND  # permId gone: nothing cancelled
+    message = str(detail.get("message") or "") if isinstance(detail, dict) else ""
+    if kind == "failed" and _ALREADY_TERMINAL.match(message):
+        return audit_enforce.GONE  # filled / cancelled before we got there: nothing sent
+    return audit_enforce.UNCERTAIN if kind == "uncertain" else audit_enforce.FAILED
+
+
+async def _audit_resync() -> dict | None:
+    result = await _run_sync_pass()
+    return audit_enforce.audit_from(result.data) if result.ok else None
 
 
 async def _futu_refresh_db_first(scope) -> None:
@@ -3133,14 +3216,14 @@ def _owner_error_detail(data: dict, **extra) -> tuple[int, str, dict]:
     return http_status, reason_code, detail
 
 
-async def _cancel_order(body: dict, row: dict | None = None) -> tuple[str, Any]:
+async def _cancel_order(body: dict, row: dict | None = None, *, reason_code: str = "USER_CANCEL") -> tuple[str, Any]:
     """Cancel one order through the order owner → (kind, response). kind:
     "ok"; "failed" (nothing was sent, or IB said no and the order is still
     working); "uncertain" (the cancel may have reached IB unconfirmed).
 
     `row` = the target's submission row already resolved by the caller
     ({submission_id, placing_client_id}); else it is resolved canonically
-    here. Only that row is marked CANCELLED."""
+    here. Only that row is marked CANCELLED (with `reason_code`)."""
     if _is_test_mode():
         return "ok", {
             "status": "ok",
@@ -3224,7 +3307,7 @@ async def _cancel_order(body: dict, row: dict | None = None) -> tuple[str, Any]:
         {"status": data.get("status"), "message": data.get("message"), "http_status": 200},
         perm_id=str(perm_id or ""),
     )
-    _mark_submission_cancelled((row or {}).get("submission_id"))
+    _mark_submission_cancelled((row or {}).get("submission_id"), reason_code=reason_code)
     return "ok", data
 
 
@@ -3397,7 +3480,7 @@ async def _orders_replace_from_body(body: dict):
     )
 
 
-def _mark_submission_cancelled(submission_id: str | None) -> None:
+def _mark_submission_cancelled(submission_id: str | None, *, reason_code: str = "USER_CANCEL") -> None:
     """Transition exactly this order_submissions row to CANCELLED after a
     successful cancel. The activity poller cannot do this on its own — naive
     disappearance-detection misclassifies fills as cancels — so the cancel
@@ -3414,7 +3497,7 @@ def _mark_submission_cancelled(submission_id: str | None) -> None:
         orders_store.mark_terminal(
             submission_id=submission_id,
             state="CANCELLED",
-            reason_code="USER_CANCEL",
+            reason_code=reason_code,
             filled_qty=None,
             avg_fill_price=None,
             # Never over FILLED or an earlier terminal state (a fill or a
