@@ -276,8 +276,8 @@ plugin). Every remote command needs `PATH=/opt/homebrew/bin:$PATH`.
       docker pull "$img:latest" >/dev/null || { echo "PULL FAILED $s"; exit 1; }
       got=$(docker image inspect "$img:latest" --format '{{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}}')
       if [ "$got" != "$VER $REV" ]; then
-        docker tag "$img:$VER" "$img:latest"
-        echo "KEEP WATCHTOWER STOPPED: registry :latest of $s is $got"; exit 1
+        docker tag "$img:$VER" "$img:latest" || { echo "RESTORE FAILED $s: local :latest is NOT $VER; do not recreate any service"; exit 2; }
+        echo "KEEP WATCHTOWER STOPPED: registry :latest of $s is $got (local :latest restored to $VER)"; exit 1
       fi
     done
     cd /opt/xenon && docker-compose up -d --pull never watchtower && echo "watchtower resumed"
@@ -285,7 +285,9 @@ plugin). Every remote command needs `PATH=/opt/homebrew/bin:$PATH`.
     ```
 
     If it prints `KEEP WATCHTOWER STOPPED`, leave Watchtower stopped (the local alias is restored to
-    `:VER`) until a stable release is promoted to `:latest`, then repeat this step.
+    `:VER`) until a stable release is promoted to `:latest`, then repeat this step. If it prints
+    `RESTORE FAILED`, do not recreate any service: rerun step 5 for that image (it re-tags `:VER` and
+    must print `ok`) before anything else.
 
    The full post-deploy checks are in `docs/runbooks/pr10-order-owner-cutover.md` § 5.
 

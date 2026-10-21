@@ -4,8 +4,10 @@
 # stack must match it. Change prod by changing this file in a PR first.
 #
 # Operator sync (on the Mac mini; export PATH=/opt/homebrew/bin:$PATH first):
-#   scp deploy/compose.prod.yml macmini:/opt/xenon/compose.yml
-#   cd /opt/xenon && docker-compose up -d
+#   stage and validate it as compose.new.yml: deploy/README.md section A.
+#   Apply it only inside the controlled sequence (pause Watchtower, stop -t 60
+#   api realtime, gateway socket check, up -d --pull never api web realtime):
+#   docs/runbooks/remote-deploy.md "Standard release flow". Never a bare up -d.
 # Compare before copying:  diff deploy/compose.prod.yml /opt/xenon/compose.yml
 #
 # MIGRATIONS ARE MANUAL. The migrator never starts with `up -d` (profile

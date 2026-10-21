@@ -165,14 +165,19 @@ Edit `~/projects/xenon/.env` on the macmini and replace the
 Leave `DATABASE_URL_TEST` and `DATABASE_URL_PAPER` empty/commented in
 the prod `.env` — the Docker stack does not run paper mode.
 
-Restart the Docker stack so the new credentials take effect:
+Recreate the Docker stack so the new credentials take effect, with the controlled
+sequence from `docs/runbooks/remote-deploy.md` § Standard release flow (the mini uses the
+hyphenated `docker-compose`; run `export PATH=/opt/homebrew/bin:$PATH` first):
 
 ```bash
-cd ~/projects/xenon
-docker compose down
-docker compose run --rm migrator       # alembic upgrade against core_dev as xenon_prod
-docker compose up -d
+cd /opt/xenon
+docker stop xenon-watchtower-1
+docker-compose stop -t 60 api realtime
+lsof -nP -iTCP:4001 -sTCP:ESTABLISHED 2>/dev/null | grep -c limactl   # must print 0; else pr10-order-owner-cutover.md § 4
+docker-compose --profile migrate run --rm --pull never migrator      # alembic upgrade against core_dev
+docker-compose up -d --pull never api web realtime
 curl -s http://localhost:8321/health | jq '.ib_gateway, .ib_pool, .trading_mode'
+docker-compose up -d --pull never watchtower                          # only when no release is in flight
 ```
 
 The migrator container needs `xenon_migrator` credentials, NOT
