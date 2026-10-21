@@ -18,9 +18,11 @@ The release goes through a PR and the tag is pushed alone. Do not push `master`.
    `git switch -c release/vX.Y.Z && git tag -d vX.Y.Z && git branch -f master origin/master`
 4. Push the branch and open the release PR: `git push -u origin release/vX.Y.Z`, then `gh pr create`.
 5. When CI is green, merge the PR.
-6. Tag the merge commit and push the tag alone:
-   `git fetch origin && git tag -a vX.Y.Z -m vX.Y.Z $(gh pr view <PR> --json mergeCommit --jq .mergeCommit.oid) && git push origin refs/tags/vX.Y.Z`
-7. Watch the `Release` workflow in GitHub Actions. It runs the full test suite on the tag ref, creates the GitHub Release, and pushes the images to GHCR. Deploy to the mini with `docs/runbooks/remote-deploy.md` § Standard release flow (stop Watchtower on the mini before step 6).
+6. **Pause Watchtower on the mini and confirm it is stopped.** The tag push moves `:latest`, and a running Watchtower recreates the api on its own, with no socket check. Command and expected output: `docs/runbooks/remote-deploy.md` § Standard release flow, step 2 (`docker inspect -f '{{.State.Running}}' xenon-watchtower-1` must print `false`). Do not continue until it does.
+7. Tag the merge commit:
+   `git fetch origin && git tag -a vX.Y.Z -m vX.Y.Z $(gh pr view <PR> --json mergeCommit --jq .mergeCommit.oid)`
+8. Push the tag alone: `git push origin refs/tags/vX.Y.Z`.
+9. Watch the `Release` workflow in GitHub Actions (check the run for the tag commit: `gh run list --workflow Release --commit <sha>`). It runs the full test suite on the tag ref, creates the GitHub Release, and pushes the images to GHCR. Deploy to the mini with `docs/runbooks/remote-deploy.md` § Standard release flow, steps 4-9.
 
 ## Rolling back a bad cut (not yet deployed)
 

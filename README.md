@@ -197,8 +197,9 @@ Ops runbooks: [`ib-connection-troubleshooting`](docs/runbooks/ib-connection-trou
 
 ```bash
 ./scripts/release/cut.sh                # interactive: patch / minor / major / custom
-# then: move the commit to release/vX.Y.Z, open and merge the PR, tag the merge commit,
-#       git push origin refs/tags/vX.Y.Z      (steps: docs/runbooks/release.md)
+# then: move the commit to release/vX.Y.Z, open and merge the PR,
+#       pause Watchtower on the mini and confirm it is stopped,
+#       tag the merge commit, git push origin refs/tags/vX.Y.Z   (steps: docs/runbooks/release.md)
 ```
 
 Production is a Docker stack on the Mac mini (`deploy/compose.prod.yml`, images from GHCR). A merge alone never deploys; the tag push does. Cutover steps: [`docs/runbooks/remote-deploy.md`](docs/runbooks/remote-deploy.md) § Standard release flow. Deploy truth and scheduled jobs: [`deploy/README.md`](deploy/README.md).

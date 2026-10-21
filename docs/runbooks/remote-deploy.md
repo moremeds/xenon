@@ -149,16 +149,21 @@ plugin). Every remote command needs `PATH=/opt/homebrew/bin:$PATH`.
 1. **Cut and merge.** Follow root `CLAUDE.md` § CI / Release: `scripts/release/cut.sh`
    makes the `release: vX.Y.Z` commit, the commit moves to a `release/vX.Y.Z` branch,
    and the release PR merges when CI is green. Never push `master`. If the release
-   changes `deploy/compose.prod.yml`, stage that file first with
-   `deploy/README.md` § Operator rollout checklist, section A: Watchtower recreates
-   containers with their old config and never reads `compose.yml`.
+   changes `deploy/compose.prod.yml`, stage and validate the new file now with
+   `deploy/README.md` § Operator rollout checklist, section A. Do not apply it yet:
+   Watchtower recreates containers with their old config and never reads `compose.yml`,
+   and `docker-compose up -d` would recreate the api before the socket check. Step 8
+   applies it.
 
-2. **Stop Watchtower on the mini BEFORE the tag push**, so it cannot race the cutover:
+2. **Pause Watchtower on the mini and confirm it is stopped, BEFORE the tag push**, so it
+   cannot race the cutover:
 
    ```bash
    ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; docker stop xenon-watchtower-1 && \
-     docker inspect -f "{{.State.Running}}" xenon-watchtower-1'   # prints false
+     docker inspect -f "{{.State.Running}}" xenon-watchtower-1'   # must print false
    ```
+
+   Do not continue to step 3 until it prints `false`.
 
 3. **Tag the merge commit and push the tag alone** (never `git push origin master`):
 
@@ -170,55 +175,63 @@ plugin). Every remote command needs `PATH=/opt/homebrew/bin:$PATH`.
 
    The tag push fires `.github/workflows/release.yml`.
 
-4. **Wait for `release.yml`** to finish. It runs end-to-end with no operator step:
+4. **Wait for the `Release` run of this tag's commit** and check its conclusion. Do not look at
+   "the latest run": another release or a prerelease can be newer. `--commit` filters runs by SHA:
+
+   ```bash
+   REV=$(git rev-parse vX.Y.Z^{commit})
+   gh run list --repo moremeds/xenon --workflow Release --commit "$REV" --json databaseId,status,conclusion
+   gh run watch <databaseId> --repo moremeds/xenon      # then list again
+   ```
+
+   The run must show `"conclusion":"success"`. Its jobs:
    - `verify` — full pytest + npm test + typecheck + lint + version-sync
      against an ephemeral Postgres service container.
    - `publish` — GitHub Release at `vX.Y.Z`, body extracted from `CHANGELOG.md`.
    - `ghcr-push` (matrix × 4) — builds + pushes each image at
-     `ghcr.io/moremeds/xenon-{api,web,realtime,migrator}:X.Y.Z`.
+     `ghcr.io/moremeds/xenon-{api,web,realtime,migrator}:X.Y.Z` (immutable version tag).
    - `promote-latest` — after every `ghcr-push` leg passed, moves `:latest` of all four
-     images to `:X.Y.Z` (skipped for prerelease tags).
+     images to `:X.Y.Z` (skipped for prerelease tags). The cutover below does not depend on it.
+
+5. **Pull the release images by version tag, verify them, and alias them to `:latest` locally.**
+   Compose uses `:latest` and `--pull never`, so the alias is what runs. A floating
+   `:latest` pull could be a different release. `VER` is the version without the `v`; `REV` is the
+   commit from step 4. Add `migrator` to the list only when the release carries an Alembic migration.
+   Each image must report `VER REV` (its `org.opencontainers.image.version` and `.revision` labels);
+   the loop stops on the first mismatch:
 
    ```bash
-   gh run watch --repo moremeds/xenon
+   ssh moremeds@100.66.147.98 'VER=X.Y.Z REV=<full sha> PATH=/opt/homebrew/bin:$PATH bash -s' <<'EOF'
+   for s in api web realtime; do          # add: migrator
+     img=ghcr.io/moremeds/xenon-$s
+     docker pull "$img:$VER" >/dev/null || { echo "PULL FAILED $s"; exit 1; }
+     got=$(docker image inspect "$img:$VER" --format '{{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}}')
+     [ "$got" = "$VER $REV" ] || { echo "MISMATCH $s: $got"; exit 1; }
+     docker tag "$img:$VER" "$img:latest" && echo "ok $s $got"
+   done
+   EOF
    ```
 
-   Then check the real conclusion with `gh run list --workflow Release --limit 1 --json conclusion`
-   (`gh run watch --exit-status` can return 0 on a failed run).
+6. **Migrate, only when the release carries an Alembic migration.** Watchtower never runs the
+   migrator. Run it once, on the image aliased in step 5, with the gate in
+   `deploy/README.md` § D step 3 (`alembic current`, `alembic heads`, one
+   `docker-compose --profile migrate run --rm --pull never migrator`). Do not pull or run any other migrator image.
 
-5. **Pull the new images on the mini:**
-
-   ```bash
-   ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && docker-compose pull api web realtime'
-   ```
-
-   Only when the release carries an Alembic migration, also pull and run the migrator
-   (Watchtower never does; verify the migrator image first as in `deploy/README.md` § D step 2):
-
-   ```bash
-   ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && \
-     docker-compose --profile migrate pull migrator && \
-     docker-compose --profile migrate run --rm migrator'
-   ```
-
-6. **Stop api and realtime with the full grace period.** The api disconnects its IB
-   connections on SIGTERM; 60 s matches `stop_grace_period`:
+7. **Stop api and realtime with the full grace period, then confirm no leftover gateway sockets.**
+   The api disconnects its IB connections on SIGTERM; 60 s matches `stop_grace_period`.
+   The socket count must be `0` (`grep -c` prints `0` and exits 1 when nothing matches; that is fine):
 
    ```bash
    ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && docker-compose stop -t 60 api realtime'
-   ```
-
-7. **Confirm no leftover gateway sockets.** The count must be `0` (`grep -c` prints `0`
-   and exits 1 when nothing matches; that is fine):
-
-   ```bash
    ssh moremeds@100.66.147.98 'lsof -nP -iTCP:4001 -sTCP:ESTABLISHED 2>/dev/null | grep -c limactl'
    ```
 
-   If it is not `0`, do not start the api. Follow `docs/runbooks/pr10-order-owner-cutover.md` § 4.
+   If the count is not `0`, do not start the api. Follow `docs/runbooks/pr10-order-owner-cutover.md` § 4.
 
-8. **Start the stack on the pulled images.** `--pull never` keeps the images from step 5.
-   This also recreates the stopped Watchtower from the compose file:
+8. **Start the stack on the aliased images.** If step 1 staged a new compose file, move it into place
+   first: `cd /opt/xenon && mv compose.new.yml compose.yml` (the backup from section A step 4 stays).
+   `--pull never` keeps the images from step 5. `up -d` also recreates the stopped Watchtower
+   from the compose file:
 
    ```bash
    ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && docker-compose up -d --pull never'
@@ -331,12 +344,6 @@ landed via PR #91 + PR #94).
 4. **`/opt/xenon/logs/`** isn't mounted yet. Container stdout still works
    (`docker-compose logs`), but persistent file logs go nowhere. Add a
    `./logs:/app/logs` bind-mount once persistent logging is needed.
-
-5. **Full live promotion (Phase 1.11)** still waits on a 24h burn-in. Today
-   we shipped _half-live_: live trading mode + live IB pointing, but
-   `DATABASE_URL=core_dev`. To flip to full prod: edit `/opt/xenon/.env`
-   `DATABASE_URL` from `core_dev` to `core`, restart, and stop this Mac's
-   API to avoid double-writers.
 
 6. **Compose plugin parity.** Mini uses `docker-compose` (hyphen, v5.1.3
    via brew) because the docker plugin's compose subcommand isn't

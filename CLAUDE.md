@@ -291,9 +291,11 @@ Two escape hatches:
 
 1. `./scripts/release/cut.sh` from a clean, synced `master` (interactive: patch / minor / major / custom). It rewrites `VERSION`, `package.json`, `web/package.json` and `CHANGELOG.md`, commits `release: vX.Y.Z` and creates a local tag. Ignore any hint to push `master`.
 2. Move the release commit to a branch: `git switch -c release/vX.Y.Z`, `git tag -d vX.Y.Z`, `git branch -f master origin/master`. Push the branch and open a PR.
-3. After CI is green, merge the PR. Tag the merge commit: `git fetch origin && git tag -a vX.Y.Z -m vX.Y.Z $(gh pr view <PR> --json mergeCommit --jq .mergeCommit.oid)`.
-4. Push the tag alone: `git push origin refs/tags/vX.Y.Z`. `release.yml` fires.
-5. Deploy is the tag push building the images, then the operator cutover on the mini: `docs/runbooks/remote-deploy.md` § Standard release flow. A merge alone never deploys.
+3. After CI is green, merge the PR.
+4. **Pause Watchtower on the mini and confirm it is stopped** before any tag push (`docker stop xenon-watchtower-1`, then `docker inspect -f '{{.State.Running}}' xenon-watchtower-1` must print `false`; command in `docs/runbooks/remote-deploy.md` § Standard release flow, step 2). The tag push moves `:latest`, and a running Watchtower recreates the api on its own, with no socket check.
+5. Tag the merge commit: `git fetch origin && git tag -a vX.Y.Z -m vX.Y.Z $(gh pr view <PR> --json mergeCommit --jq .mergeCommit.oid)`.
+6. Push the tag alone: `git push origin refs/tags/vX.Y.Z`. `release.yml` fires.
+7. Deploy is the tag push building the images, then the operator cutover on the mini: `docs/runbooks/remote-deploy.md` § Standard release flow, steps 4-9. A merge alone never deploys.
 
 `VERSION` (root) is the source of truth; `scripts/release/version_sync_check.py` enforces parity with `package.json` in CI.
 
