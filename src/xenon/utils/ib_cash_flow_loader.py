@@ -98,9 +98,22 @@ def upsert_ib_cash_flow_sync(
     if scope.broker != "IB":
         raise ValueError(f"ib_cash_flow is IB-only; got broker={scope.broker!r}")
 
+    # Non-numeric input raises decimal.InvalidOperation here (pinned
+    # contract — the caller's except clause relies on it). Parsed but
+    # non-finite values (NaN, sNaN, Infinity) are refused explicitly
+    # BEFORE engine access: PG numeric accepts NaN, so without this check
+    # a replayed export could overwrite a stored flow with NaN.
     amount = Decimal(str(amount_native))
+    if not amount.is_finite():
+        raise ValueError(
+            f"ib_cash_flow amount_native must be finite; got {amount_native!r} (txn {transaction_id!r})"
+        )
     fx_rate = _resolve_fx(currency)
     amount_usd = (amount * fx_rate).quantize(Decimal("0.0001"))
+    if not amount_usd.is_finite():
+        raise ValueError(
+            f"ib_cash_flow amount_usd must be finite; got {amount_usd!r} (txn {transaction_id!r})"
+        )
 
     engine = get_sync_engine()
     with engine.begin() as conn:

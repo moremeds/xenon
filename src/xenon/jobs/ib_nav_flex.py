@@ -50,6 +50,47 @@ def _split_ib_flex_csv_sections(body: str) -> List[List[str]]:
     return sections
 
 
+# Columns a CashTransactions section must carry for its rows to be usable:
+# TransactionID (primary key + replay dedupe), Type (Deposits/Withdrawals
+# filter), Date/Time (occurred_at), Amount + CurrencyPrimary (amount_usd
+# and fx_rate derivation). One shared list: the daily job validates against
+# it to warn once per run, and the CSV backfill validates to refuse a
+# malformed export before any write.
+IB_CASH_TRANSACTIONS_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "TransactionID",
+    "Type",
+    "Date/Time",
+    "Amount",
+    "CurrencyPrimary",
+)
+
+# A section IS a CashTransactions export iff its header carries BOTH
+# identity columns. TransactionID alone is not enough — Transfers shares
+# TransactionID/Type/Date-Time/CurrencyPrimary with CashTransactions, and
+# its own value column (``PositionAmount``) is optional in Flex exports, so
+# neither its presence nor its absence can identify a section
+# (docs/architecture/performance-reconstruction.md, Astra R2).
+_IB_CASH_SECTION_IDENTITY: tuple[str, str] = ("TransactionID", "Amount")
+
+
+def _cash_section_missing_columns(field_names: Any) -> Optional[List[str]]:
+    """Validate a section header against the CashTransactions contract.
+
+    Returns ``None`` when the section is not a CashTransactions export
+    (NAV, Transfers, Trades, an export with ``Amount`` deselected, … —
+    those belong to ``sections_skipped`` and, in the daily job, the "no
+    CashTransactions section" warning), ``[]`` when the header is complete,
+    or the missing required columns when the section is a malformed
+    CashTransactions export. Both identity columns are also required, so
+    the returned list can only name ``Type`` / ``Date/Time`` /
+    ``CurrencyPrimary``.
+    """
+    names = set(field_names or [])
+    if not set(_IB_CASH_SECTION_IDENTITY) <= names:
+        return None
+    return [c for c in IB_CASH_TRANSACTIONS_REQUIRED_COLUMNS if c not in names]
+
+
 def _parse_ib_cash_transactions_section(
     section_lines: List[str],
     *,
@@ -69,6 +110,8 @@ def _parse_ib_cash_transactions_section(
     import csv as _csv
     import io as _io
     from datetime import datetime as _dt
+    from decimal import Decimal as _Decimal
+    from decimal import InvalidOperation as _InvalidOperation
     from zoneinfo import ZoneInfo as _ZI
 
     et = _ZI("America/New_York")
@@ -107,12 +150,27 @@ def _parse_ib_cash_transactions_section(
                 exc,
             )
             continue
+        amount_raw = (row.get("Amount") or "").strip()
+        try:
+            amount_ok = _Decimal(amount_raw).is_finite()
+        except _InvalidOperation:
+            amount_ok = False
+        if not amount_ok:
+            # Never persist a missing or non-finite amount: on
+            # transaction_id replay the upsert would overwrite a stored
+            # amount_usd with 0 or NaN (PG numeric accepts NaN).
+            logger.warning(
+                "fetch_ib_nav_series: skipping CashTransaction %s — Amount %r is blank or non-finite",
+                txn_id,
+                amount_raw,
+            )
+            continue
         out.append(
             {
                 "transaction_id": txn_id,
                 "txn_type": txn_type,
                 "description": (row.get("Description") or "").strip() or None,
-                "amount_native": (row.get("Amount") or "0").strip(),
+                "amount_native": amount_raw,
                 "currency": (row.get("CurrencyPrimary") or "").strip(),
                 "occurred_at": occurred_at,
                 "raw": dict(row),
@@ -223,6 +281,7 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
 
             entries: List[Dict[str, Any]] = []
             cash_flow_rows: List[Dict[str, Any]] = []
+            skipped_txn_sections: List[str] = []
             if body_stripped.startswith('"ClientAccountID"'):
                 # CSV-format saved query (current xenon configuration).
                 # IB concatenates sections (EquitySummaryInBase,
@@ -248,6 +307,8 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                     _expected_account = None
 
                 sections = _split_ib_flex_csv_sections(body)
+                saw_cash_section = False
+                cash_section_missing_cols: set[str] = set()
                 for section_lines in sections:
                     section_reader = _csv.DictReader(_io.StringIO("\n".join(section_lines)))
                     field_names = section_reader.fieldnames or []
@@ -280,15 +341,66 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                                     "options": safe_float(csv_row.get("Options")),
                                 }
                             )
-                    elif "TransactionID" in field_names:
+                    else:
+                        missing = _cash_section_missing_columns(field_names)
+                        if missing is None:
+                            # Transaction-shaped but not cash (Transfers,
+                            # Trades, or a CashTransactions export with
+                            # Amount deselected). Record the header so a
+                            # section skipped next to a valid cash section
+                            # stays visible — a sole one already surfaces
+                            # via the no-cash-section warning below.
+                            if "TransactionID" in field_names:
+                                skipped_txn_sections.append(section_lines[0].strip()[:200])
+                            continue
+                        if missing:
+                            # CashTransactions-shaped but missing required
+                            # columns — the parser can't use it.
+                            cash_section_missing_cols |= set(missing)
+                            continue
                         # CashTransactions section (Deposits/Withdrawals
                         # subset only — see _parse_ib_cash_transactions_section).
+                        saw_cash_section = True
                         cash_flow_rows.extend(
                             _parse_ib_cash_transactions_section(section_lines, account_filter=_expected_account)
                         )
+
+                # Once per run: surface a statement whose CashTransactions
+                # section is absent or unparsable. Without this, a saved
+                # query that lost the section leaves xenon.ib_cash_flow
+                # empty and /performance counts deposits as gains —
+                # silent from the outside.
+                if not saw_cash_section and not cash_section_missing_cols:
+                    logger.warning(
+                        "fetch_ib_nav_series: Flex response has no CashTransactions "
+                        "section — xenon.ib_cash_flow gets nothing from this run; "
+                        "check the saved query includes it"
+                    )
+                elif cash_section_missing_cols:
+                    logger.warning(
+                        "fetch_ib_nav_series: CashTransactions section lacks required "
+                        "column(s) %s — rows cannot be parsed into xenon.ib_cash_flow; "
+                        "check the saved query's column selection",
+                        sorted(cash_section_missing_cols),
+                    )
+                # Once per run, INFO level: transaction-shaped sections
+                # the classifier skipped (TransactionID present, Amount
+                # absent — Transfers legitimately lands here every run).
+                if skipped_txn_sections:
+                    logger.info(
+                        "fetch_ib_nav_series: %d transaction-shaped section(s) skipped "
+                        "as non-CashTransactions — headers: %s",
+                        len(skipped_txn_sections),
+                        skipped_txn_sections,
+                    )
             elif "<FlexStatements" in body:
                 # XML-format saved query — kept for forward-compat in case
                 # a future saved query is configured as XML.
+                logger.warning(
+                    "fetch_ib_nav_series: XML-format Flex response — CashTransactions "
+                    "are only ingested from CSV responses, so xenon.ib_cash_flow "
+                    "gets nothing from this run; check the saved query's format"
+                )
                 root2 = ET.fromstring(body)
                 navs = root2.findall(".//EquitySummaryByReportDateInBase")
                 if not navs:
@@ -363,11 +475,13 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                     inserted, updated = _persist_ib_cash_transactions(cash_flow_rows)
                     logger.info(
                         "fetch_ib_nav_series: ib_cash_flow ingest — %d inserted, "
-                        "%d updated (replays), %d skipped (of %d total CashTransactions row(s))",
+                        "%d updated (replays), %d skipped (of %d total CashTransactions row(s)); "
+                        "%d transaction-shaped section(s) skipped",
                         inserted,
                         updated,
                         len(cash_flow_rows) - inserted - updated,
                         len(cash_flow_rows),
+                        len(skipped_txn_sections),
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(

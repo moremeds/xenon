@@ -195,6 +195,56 @@ def test_upsert_malformed_amount_raises_invalid_operation(pg_test_engine):
         )
 
 
+@pytest.mark.parametrize(
+    "bad_amount",
+    ["NaN", "sNaN", "Infinity", "-Infinity", Decimal("NaN"), float("inf")],
+)
+def test_upsert_rejects_nonfinite_amount_before_engine(pg_test_engine, monkeypatch, bad_amount):
+    """PG numeric accepts NaN, so the writer itself must refuse non-finite
+    amount_native (and a derived non-finite amount_usd) BEFORE the engine
+    is touched — a replayed export must not overwrite a stored flow."""
+    import xenon.utils.ib_cash_flow_loader as loader
+
+    engine_calls = []
+    real_get_engine = loader.get_sync_engine
+    monkeypatch.setattr(
+        loader,
+        "get_sync_engine",
+        lambda: engine_calls.append(1) or real_get_engine(),
+    )
+    with pytest.raises(ValueError, match="finite"):
+        upsert_ib_cash_flow_sync(
+            scope=SCOPE,
+            transaction_id="NONFINITE",
+            txn_type="Deposits/Withdrawals",
+            description="x",
+            amount_native=bad_amount,
+            currency="USD",
+            occurred_at=datetime(2026, 4, 1, 0, 0, 0, tzinfo=timezone.utc),
+            raw={},
+        )
+    assert engine_calls == []  # refused before engine access
+    assert _read("NONFINITE") is None
+
+
+def test_upsert_accepts_finite_zero(pg_test_engine):
+    """A finite zero amount is a legitimate flow — never reject it."""
+    upsert_ib_cash_flow_sync(
+        scope=SCOPE,
+        transaction_id="ZERO_AMT",
+        txn_type="Deposits/Withdrawals",
+        description="zero flow",
+        amount_native="0",
+        currency="USD",
+        occurred_at=datetime(2026, 4, 1, 0, 0, 0, tzinfo=timezone.utc),
+        raw={},
+    )
+    row = _read("ZERO_AMT")
+    assert row is not None
+    assert row["amount_native"] == Decimal("0.0000")
+    assert row["amount_usd"] == Decimal("0.0000")
+
+
 def test_upsert_rejects_non_ib_broker(pg_test_engine):
     futu_scope = AccountScope(broker="FUTU", account_env="live", broker_account="123")
     with pytest.raises(ValueError, match="IB-only"):
