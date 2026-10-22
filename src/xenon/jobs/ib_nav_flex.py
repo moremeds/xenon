@@ -248,6 +248,8 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                     _expected_account = None
 
                 sections = _split_ib_flex_csv_sections(body)
+                saw_cash_section = False
+                cash_section_missing_cols: set[str] = set()
                 for section_lines in sections:
                     section_reader = _csv.DictReader(_io.StringIO("\n".join(section_lines)))
                     field_names = section_reader.fieldnames or []
@@ -283,9 +285,37 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                     elif "TransactionID" in field_names:
                         # CashTransactions section (Deposits/Withdrawals
                         # subset only — see _parse_ib_cash_transactions_section).
-                        cash_flow_rows.extend(
-                            _parse_ib_cash_transactions_section(section_lines, account_filter=_expected_account)
-                        )
+                        saw_cash_section = True
+                        missing = {"Type", "Date/Time"} - set(field_names)
+                        if missing:
+                            cash_section_missing_cols |= missing
+                        else:
+                            cash_flow_rows.extend(
+                                _parse_ib_cash_transactions_section(section_lines, account_filter=_expected_account)
+                            )
+                    elif "Date/Time" in field_names and "Type" in field_names:
+                        # CashTransactions-shaped header without TransactionID —
+                        # the parser's hard gate would drop every row.
+                        cash_section_missing_cols.add("TransactionID")
+
+                # Once per run: surface a statement whose CashTransactions
+                # section is absent or unparsable. Without this, a saved
+                # query that lost the section leaves xenon.ib_cash_flow
+                # empty and /performance counts deposits as gains —
+                # silent from the outside.
+                if not saw_cash_section and not cash_section_missing_cols:
+                    logger.warning(
+                        "fetch_ib_nav_series: Flex response has no CashTransactions "
+                        "section — xenon.ib_cash_flow gets nothing from this run; "
+                        "check the saved query includes it"
+                    )
+                elif cash_section_missing_cols:
+                    logger.warning(
+                        "fetch_ib_nav_series: CashTransactions section lacks required "
+                        "column(s) %s — rows cannot be parsed into xenon.ib_cash_flow; "
+                        "check the saved query's column selection",
+                        sorted(cash_section_missing_cols),
+                    )
             elif "<FlexStatements" in body:
                 # XML-format saved query — kept for forward-compat in case
                 # a future saved query is configured as XML.

@@ -1,25 +1,34 @@
-"""Backfill xenon.nav_history from IB Flex EquitySummaryByReportDateInBase.
+"""Backfill ``xenon.nav_history`` + ``xenon.ib_cash_flow`` from an IB Flex CSV export.
 
-Two ingest paths:
+``--from-csv <path>`` parses a multi-section CSV downloaded from IB Account
+Management (Reports → Flex Queries → a *Custom Date Range* query covering
+inception-to-date → Run → save CSV). Each section is classified by its
+header row:
 
-* ``--from-csv <path>`` — parse a CSV downloaded from IB Account Management
-  (Reports → Flex Queries → Run → save CSV). Use for inception-to-date pulls
-  that are too large for the Flex Web Service polling timeout.
-* default (no flag) — call ``fetch_ib_nav_series`` which polls Flex Web Service
-  and writes the same rows. Suitable for incremental refreshes.
+* ``EquitySummaryInBase`` (``ReportDate`` + ``Total`` columns) → upserted
+  into ``xenon.nav_history`` via ``upsert_nav_sync(..., source='close')`` —
+  the single NAV writer (post-``2026_06_03_nav_src_pk`` the PK includes
+  ``source``, so a hand-rolled ``ON CONFLICT`` no longer matches).
+* ``CashTransactions`` (``TransactionID`` column) → parsed and persisted
+  by the shared ``_parse_ib_cash_transactions_section`` /
+  ``_persist_ib_cash_transactions`` helpers from ``xenon.jobs.ib_nav_flex``
+  — the same code the daily ``xenon-nav-flex-refresh`` job runs. The saved
+  daily query is a rolling ~2-week window and can never backfill history,
+  which is why this one-shot exists.
+* Anything else (Transfers, …) is counted as skipped.
 
-Writes ``source='close'`` because EquitySummaryByReportDateInBase rows are
-post-close. Raw SQL upsert avoids extending ``upsert_nav_sync`` (which only
-writes ``source='intraday'`` today).
-
-Optional ``--trades-csv <path>`` parses the trade-history CSV for summary only —
-no PG write surface exists for historical Flex trades today.
+``--dry-run`` parses the file and prints counts (NAV rows, cash rows, NAV
+date range) with zero DB writes. ``--trades-csv <path>`` prints a
+trade-history summary only — no PG write surface exists for historical
+Flex trades today. No flags prints usage and exits 2. Writes refuse under
+``XENON_READ_ONLY=1`` (exit 3), mirroring ``xenon-nav-flex-refresh``.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import io
 import os
 import sys
 from datetime import date as _date
@@ -54,119 +63,124 @@ def _dec(value: str) -> Decimal:
     return Decimal(value.strip() or "0")
 
 
-def ingest_nav_csv(*, path: Path, scope: Any) -> dict[str, Any]:
-    """Read CSV, validate account, upsert nav_history with source='close'."""
-    from sqlalchemy import text
+def _parse_flex_csv(*, path: Path, scope: Any) -> dict[str, Any]:
+    """Split the multi-section Flex CSV and classify each section by header.
 
-    from xenon.db.engine import get_sync_engine
+    Returns NAV rows ready for ``upsert_nav_sync``, cash rows ready for
+    ``_persist_ib_cash_transactions``, and skip counters. Sections whose
+    header matches neither EquitySummaryInBase nor CashTransactions are
+    counted in ``sections_skipped``.
+    """
+    from xenon.jobs.ib_nav_flex import (
+        _parse_ib_cash_transactions_section,
+        _split_ib_flex_csv_sections,
+    )
 
-    rows: list[dict[str, Any]] = []
+    # utf-8-sig strips the BOM IB sometimes prepends to downloaded CSVs —
+    # otherwise the first line's header check against "ClientAccountID" misses.
+    sections = _split_ib_flex_csv_sections(path.read_text(encoding="utf-8-sig"))
+    nav_rows: list[dict[str, Any]] = []
+    cash_rows: list[dict[str, Any]] = []
+    sections_skipped = 0
     skipped_mismatch = 0
-    extra_sections = 0  # IB Flex CSV may concat (NAV, CashTransactions, Transfers)
-    with path.open(newline="") as f:
-        reader = csv.DictReader(f)
-        for csv_row in reader:
-            account = csv_row.get("ClientAccountID", "").strip()
-            # Second/third header row marks the start of another section
-            # (Cash Transactions, Transfers). csv.DictReader keeps the first
-            # section's column names so reading further yields garbage.
-            if account == "ClientAccountID":
-                extra_sections += 1
-                break
-            if account != scope.broker_account:
-                skipped_mismatch += 1
-                continue
-            day = _parse_yyyymmdd(csv_row["ReportDate"])
-            total = _dec(csv_row["Total"])
-            rows.append(
-                {
-                    "broker": scope.broker,
-                    "account_env": scope.account_env,
-                    "broker_account": scope.broker_account,
-                    "date": day,
-                    "nav": total,
-                    "total": total,
-                    "cash": _dec(csv_row["Cash"]),
-                    "stock_value": _dec(csv_row["Stock"]),
-                    "options_value": _dec(csv_row["Options"]),
-                    "source": "close",
-                }
+    for section_lines in sections:
+        reader = csv.DictReader(io.StringIO("\n".join(section_lines)))
+        field_names = reader.fieldnames or []
+        if "ReportDate" in field_names and "Total" in field_names:
+            for csv_row in reader:
+                if csv_row.get("ClientAccountID", "").strip() != scope.broker_account:
+                    skipped_mismatch += 1
+                    continue
+                total = _dec(csv_row["Total"])
+                nav_rows.append(
+                    {
+                        "date": _parse_yyyymmdd(csv_row["ReportDate"]),
+                        # nav column mirrors total for IB Flex (same convention
+                        # as fetch_ib_nav_series — single authoritative source).
+                        "nav": total,
+                        "total": total,
+                        "cash": _dec(csv_row["Cash"]),
+                        "stock_value": _dec(csv_row["Stock"]),
+                        "options_value": _dec(csv_row["Options"]),
+                    }
+                )
+        elif "TransactionID" in field_names:
+            cash_rows.extend(
+                _parse_ib_cash_transactions_section(
+                    section_lines, account_filter=scope.broker_account
+                )
             )
+        else:
+            sections_skipped += 1
+    return {
+        "nav_rows": nav_rows,
+        "cash_rows": cash_rows,
+        "sections_skipped": sections_skipped,
+        "skipped_account_mismatch": skipped_mismatch,
+    }
 
-    engine = get_sync_engine()
 
-    # Preflight: nav_history_one_env_per_day unique index excludes account_env.
-    # A pre-existing row with a different env for the same (broker, account, date)
-    # would block the upsert with an IntegrityError on the secondary index, not
-    # the primary key. Catch it before we issue 265 individual upserts.
-    conflicting: list[tuple[_date, str]] = []
-    with engine.begin() as conn:
-        result = conn.execute(
-            text(
-                """
-                SELECT date, account_env FROM xenon.nav_history
-                 WHERE broker = :broker
-                   AND broker_account = :broker_account
-                   AND account_env != :account_env
-                   AND date = ANY(:dates)
-                """
-            ),
-            {
-                "broker": scope.broker,
-                "broker_account": scope.broker_account,
-                "account_env": scope.account_env,
-                "dates": [r["date"] for r in rows],
-            },
-        )
-        conflicting = [(row.date, row.account_env) for row in result]
+def ingest_nav_csv(*, path: Path, scope: Any, dry_run: bool = False) -> dict[str, Any]:
+    """Ingest a Flex CSV export into nav_history (source='close') + ib_cash_flow.
 
-    if conflicting:
+    ``dry_run=True`` parses and reports counts only — zero DB writes. NAV
+    writes go through ``upsert_nav_sync``; cash writes through the shared
+    ``_persist_ib_cash_transactions`` (idempotent on the
+    ``transaction_id`` primary key). A ``NavAccountEnvConflict`` from the
+    env guard surfaces as ``{"error": "ENV_INDEX_CONFLICT", ...}`` like the
+    old pre-flight did.
+    """
+    from xenon.api.services.futu_nav_persistence import NavAccountEnvConflict
+    from xenon.jobs.ib_nav_flex import _persist_ib_cash_transactions
+    from xenon.utils.portfolio_loader import upsert_nav_sync
+
+    parsed = _parse_flex_csv(path=path, scope=scope)
+    nav_rows = parsed["nav_rows"]
+    cash_rows = parsed["cash_rows"]
+
+    result: dict[str, Any] = {
+        "dry_run": dry_run,
+        "nav_rows": len(nav_rows),
+        "cash_flow_rows": len(cash_rows),
+        "skipped_account_mismatch": parsed["skipped_account_mismatch"],
+        "sections_skipped": parsed["sections_skipped"],
+        "earliest_date": nav_rows[0]["date"].isoformat() if nav_rows else None,
+        "latest_date": nav_rows[-1]["date"].isoformat() if nav_rows else None,
+    }
+    if cash_rows:
+        result["cash_earliest"] = min(r["occurred_at"] for r in cash_rows).isoformat()
+        result["cash_latest"] = max(r["occurred_at"] for r in cash_rows).isoformat()
+    if dry_run:
+        return result
+
+    nav_written = 0
+    try:
+        for r in nav_rows:
+            upsert_nav_sync(
+                scope=scope,
+                day=r["date"],
+                nav=r["nav"],
+                total=r["total"],
+                cash=r["cash"],
+                stock_value=r["stock_value"],
+                options_value=r["options_value"],
+                source="close",
+            )
+            nav_written += 1
+    except NavAccountEnvConflict as exc:
         return {
+            **result,
             "error": "ENV_INDEX_CONFLICT",
-            "conflicting_dates": [{"date": d.isoformat(), "existing_env": e} for d, e in conflicting[:10]],
-            "conflict_count": len(conflicting),
+            "detail": str(exc),
+            "nav_rows_written_before_error": nav_written,
         }
 
-    inserted = 0
-    updated = 0
-    upsert_sql = text(
-        """
-        INSERT INTO xenon.nav_history
-            (broker, account_env, broker_account, date,
-             nav, total, cash, stock_value, options_value, source)
-        VALUES
-            (:broker, :account_env, :broker_account, :date,
-             :nav, :total, :cash, :stock_value, :options_value, :source)
-        ON CONFLICT (broker, account_env, broker_account, date)
-        DO UPDATE SET
-            nav           = EXCLUDED.nav,
-            total         = EXCLUDED.total,
-            cash          = EXCLUDED.cash,
-            stock_value   = EXCLUDED.stock_value,
-            options_value = EXCLUDED.options_value,
-            source        = EXCLUDED.source
-        RETURNING (xmax = 0) AS was_inserted
-        """
-    )
-    with engine.begin() as conn:
-        for r in rows:
-            res = conn.execute(upsert_sql, r).first()
-            if res and res.was_inserted:
-                inserted += 1
-            else:
-                updated += 1
-
-    nonzero = [r for r in rows if r["total"] != 0]
+    cash_inserted, cash_updated = _persist_ib_cash_transactions(cash_rows)
     return {
-        "inserted": inserted,
-        "updated": updated,
-        "skipped_account_mismatch": skipped_mismatch,
-        "additional_sections_skipped": extra_sections,
-        "total_processed": len(rows),
-        "earliest_date": rows[0]["date"].isoformat() if rows else None,
-        "latest_date": rows[-1]["date"].isoformat() if rows else None,
-        "earliest_funded_date": nonzero[0]["date"].isoformat() if nonzero else None,
-        "latest_funded_total": str(nonzero[-1]["total"]) if nonzero else None,
+        **result,
+        "nav_rows_written": nav_written,
+        "cash_inserted": cash_inserted,
+        "cash_updated": cash_updated,
     }
 
 
@@ -203,36 +217,21 @@ def summarize_trades_csv(*, path: Path, scope: Any) -> dict[str, Any]:
     }
 
 
-def fetch_via_flex_api(scope: Any) -> int:
-    """Original API path — calls fetch_ib_nav_series which polls Flex Web Service.
-
-    Persists via upsert_nav_sync (writes source='intraday' — known gap until
-    that helper accepts source). Kept for incremental refresh use; CSV path
-    is preferred for inception backfills.
-    """
-    if not os.environ.get("IB_FLEX_TOKEN") or not os.environ.get("IB_FLEX_NAV_QUERY_ID"):
-        print("FLEX_NOT_CONFIGURED: missing IB_FLEX_TOKEN or IB_FLEX_NAV_QUERY_ID", file=sys.stderr)
-        return 2
-    from xenon.jobs.ib_nav_flex import fetch_ib_nav_series
-
-    print(f"scope: broker={scope.broker} env={scope.account_env} account={scope.broker_account}")
-    print("polling IB Flex Web Service (up to 300s)...")
-    entries = fetch_ib_nav_series()
-    if entries is None:
-        print("fetch_ib_nav_series returned None — token rejected, poll timeout, or no rows", file=sys.stderr)
-        return 1
-    print(f"fetched {len(entries)} NAV rows from IB Flex API")
-    return 0
-
-
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--from-csv", type=Path, help="Path to Flex CSV export (NAV + CashTransactions)")
+    parser.add_argument("--trades-csv", type=Path, help="Path to trades CSV (summary only, no PG write)")
+    parser.add_argument("--dry-run", action="store_true", help="Parse and report counts only — no DB writes")
+    args = parser.parse_args()
+
+    if not args.from_csv and not args.trades_csv:
+        # The old no-flag path polled the Flex Web Service — a duplicate of
+        # `xenon-nav-flex-refresh`. Removed; this script is CSV-only.
+        parser.print_usage(sys.stderr)
+        return 2
+
     _load_env()
     _ensure_broker_account_env()
-
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--from-csv", type=Path, help="Path to NAV CSV (preferred for inception backfill)")
-    parser.add_argument("--trades-csv", type=Path, help="Path to trades CSV (summary only, no PG write)")
-    args = parser.parse_args()
 
     from xenon.execution.account_scope import resolve_from_env
 
@@ -246,16 +245,19 @@ def main() -> int:
             print(f"  {k}: {v}")
 
     if args.from_csv:
-        print(f"\n[nav] ingesting {args.from_csv}")
-        result = ingest_nav_csv(path=args.from_csv, scope=scope)
+        if not args.dry_run and os.environ.get("XENON_READ_ONLY") == "1":
+            print(
+                "READ_ONLY: XENON_READ_ONLY=1 — refusing to ingest NAV/cash rows. "
+                "Use --dry-run to preview, or unset the flag to write.",
+                file=sys.stderr,
+            )
+            return 3
+        print(f"\n[nav] ingesting {args.from_csv}{' (dry-run)' if args.dry_run else ''}")
+        result = ingest_nav_csv(path=args.from_csv, scope=scope, dry_run=args.dry_run)
         for k, v in result.items():
             print(f"  {k}: {v}")
         if "error" in result:
             return 1
-        return 0
-
-    if not args.trades_csv:
-        return fetch_via_flex_api(scope)
 
     return 0
 

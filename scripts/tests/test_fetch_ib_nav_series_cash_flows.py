@@ -168,6 +168,88 @@ def test_fetch_ib_nav_series_no_cash_section_still_works(monkeypatch, pg_test_en
     assert count == 0
 
 
+def test_fetch_ib_nav_series_warns_when_no_cash_section(monkeypatch, pg_test_engine, caplog):
+    """A CSV statement with no CashTransactions section must log a WARNING.
+
+    Otherwise a saved query that silently lost the section (or never had
+    it) leaves ``xenon.ib_cash_flow`` empty and /performance counts
+    deposits as gains — undiagnosable from the outside (ib_cash_flow
+    investigation, Task 2).
+    """
+    import logging
+
+    nav_only = (
+        '"ClientAccountID","ReportDate","Total","TotalLong","TotalShort","Cash",'
+        '"CashLong","CashShort","Stock","StockLong","StockShort","Options",'
+        '"OptionsLong","OptionsShort","Bonds","BondsLong","BondsShort",'
+        '"Commodities","CommoditiesLong","CommoditiesShort","Funds","FundsLong",'
+        '"FundsShort","DividendAccruals","DividendAccrualsLong",'
+        '"DividendAccrualsShort","InterestAccruals","InterestAccrualsLong",'
+        '"InterestAccrualsShort"\n'
+        '"DUQ999999","20260601","100","100","0","50","50","0","40","40","0",'
+        '"10","10","0","0","0","0","0","0","0","0","0","0","0","0","0","0",'
+        '"0","0"\n'
+    )
+
+    monkeypatch.setenv("IB_FLEX_TOKEN", "x" * 24)
+    monkeypatch.setenv("IB_FLEX_NAV_QUERY_ID", "1529248")
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_PAPER_ACCOUNT", "DUQ999999")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DUQ999999")
+
+    with patch("urllib.request.urlopen", _fake_urlopen_factory(nav_only)), patch("time.sleep"), caplog.at_level(
+        logging.WARNING, logger="xenon.jobs.ib_nav_flex"
+    ):
+        from xenon.jobs.ib_nav_flex import fetch_ib_nav_series
+
+        entries = fetch_ib_nav_series()
+
+    assert entries is not None and len(entries) == 1
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("CashTransactions" in m for m in warnings), warnings
+
+
+def test_fetch_ib_nav_series_warns_when_cash_section_missing_columns(monkeypatch, pg_test_engine, caplog):
+    """A CashTransactions-shaped section without the required columns
+    (e.g. no ``TransactionID``) must also warn — the parser drops it."""
+    import logging
+
+    nav_plus_broken_cash = (
+        '"ClientAccountID","ReportDate","Total","TotalLong","TotalShort","Cash",'
+        '"CashLong","CashShort","Stock","StockLong","StockShort","Options",'
+        '"OptionsLong","OptionsShort","Bonds","BondsLong","BondsShort",'
+        '"Commodities","CommoditiesLong","CommoditiesShort","Funds","FundsLong",'
+        '"FundsShort","DividendAccruals","DividendAccrualsLong",'
+        '"DividendAccrualsShort","InterestAccruals","InterestAccrualsLong",'
+        '"InterestAccrualsShort"\n'
+        '"DUQ999999","20260601","100","100","0","50","50","0","40","40","0",'
+        '"10","10","0","0","0","0","0","0","0","0","0","0","0","0","0","0",'
+        '"0","0"\n'
+        # CashTransactions-shaped but no TransactionID column.
+        '"ClientAccountID","Date/Time","Type","Description","Amount",'
+        '"CurrencyPrimary","Symbol","AssetClass"\n'
+        '"DUQ999999","20251026;225011","Deposits/Withdrawals",'
+        '"CASH RECEIPTS","10000","HKD","",""\n'
+    )
+
+    monkeypatch.setenv("IB_FLEX_TOKEN", "x" * 24)
+    monkeypatch.setenv("IB_FLEX_NAV_QUERY_ID", "1529248")
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_PAPER_ACCOUNT", "DUQ999999")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DUQ999999")
+
+    with patch("urllib.request.urlopen", _fake_urlopen_factory(nav_plus_broken_cash)), patch("time.sleep"), caplog.at_level(
+        logging.WARNING, logger="xenon.jobs.ib_nav_flex"
+    ):
+        from xenon.jobs.ib_nav_flex import fetch_ib_nav_series
+
+        entries = fetch_ib_nav_series()
+
+    assert entries is not None and len(entries) == 1
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("CashTransactions" in m and "TransactionID" in m for m in warnings), warnings
+
+
 def test_split_ib_flex_csv_sections_handles_unquoted_headers():
     """The splitter must match both quoted and unquoted ClientAccountID headers."""
     from xenon.jobs.ib_nav_flex import _split_ib_flex_csv_sections

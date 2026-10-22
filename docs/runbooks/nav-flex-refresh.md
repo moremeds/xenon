@@ -2,7 +2,7 @@
 
 Polls IB Flex `EquitySummaryByReportDateInBase` daily at 17:30 ET on the macmini and upserts post-close NAV rows into `xenon.nav_history` with `source='close'`. The `/performance` page reads these rows.
 
-**Architecture:** the saved Flex query is a rolling ~2-week reconciliation window — a missed day is absorbed by tomorrow's run. Historical backfill is a separate one-shot path (manual CSV download + `scripts/migrations/_2026_06_02_backfill_nav_from_ib_flex.py`); never widen the saved daily query.
+**Architecture:** the saved Flex query is a rolling ~2-week reconciliation window — a missed day is absorbed by tomorrow's run. Historical backfill is a separate one-shot path (manual CSV download + `scripts/migrations/_2026_06_02_backfill_nav_from_ib_flex.py`, see "Historical backfill" below); never widen the saved daily query.
 
 ## One-time install (macmini)
 
@@ -91,6 +91,32 @@ rm ~/Library/LaunchAgents/com.xenon.nav-flex-refresh.plist
 - If the saved Flex query is rebuilt with a different ID, update `IB_FLEX_NAV_QUERY_ID` in `/opt/xenon/.env` only.
 - The schedule lives in `deploy/jobs/` (plist `StartCalendarInterval` or crontab). To change the time, edit it there, then `launchctl bootout` + `bootstrap` again (see `deploy/README.md`).
 - **Pass-3 A5 — cache flush.** After applying any `nav_history` schema migration, restart `xenon-api` so the in-process `perf_cache` repopulates against the new schema (next cache TTL would rebuild automatically; the restart shortens the staleness window to zero).
+
+## Historical backfill (one-shot, manual CSV)
+
+The daily job only ever sees the rolling window. To load inception-to-date NAV rows (`source='close'`) **and** historical `Deposits/Withdrawals` cash flows into `xenon.ib_cash_flow` (required for flow-adjusted TWR/IRR on `/performance`), run the backfill script once:
+
+1. **Export the CSV from the IB portal.** Account Management → Reports → Flex Queries → create (or clone) a *Custom Date Range* query covering inception-to-date that includes **both** `EquitySummaryInBase` (or `EquitySummaryByReportDateInBase`) and `CashTransactions` (with the `TransactionID`, `Type`, `Date/Time`, `Amount`, `CurrencyPrimary` columns). Run it and save the CSV.
+2. **Dry-run first** (parses, prints row counts + NAV date range, writes nothing):
+
+   ```bash
+   cd /opt/xenon && docker-compose -f /opt/xenon/compose.yml run --rm -T --no-deps \
+     -v /path/to/flex.csv:/tmp/flex.csv api \
+     python scripts/migrations/_2026_06_02_backfill_nav_from_ib_flex.py \
+       --from-csv /tmp/flex.csv --dry-run
+   ```
+
+   Expect `nav_rows` ≈ trading days since funding, `cash_flow_rows` = deposit/withdrawal count, and `earliest_date`/`latest_date` matching the export window. On a MacBook checkout: `uv run python scripts/migrations/_2026_06_02_backfill_nav_from_ib_flex.py --from-csv <path> --dry-run`.
+3. **Real run — operator step, requires approval.** Drop `--dry-run` and run the same command against the intended DB (`DATABASE_URL` decides). Against prod (`core_dev`) this writes real history rows: get explicit sign-off, run on the macmini stack, and confirm `XENON_READ_ONLY` is unset (the script exits 3 when it is). Rows are upserts on `(broker, account_env, broker_account, date, source)` / `transaction_id`, so a re-run is idempotent.
+4. **Verify:**
+
+   ```bash
+   psql -h 100.66.147.98 -U xenon_app core_dev -c \
+     "SELECT count(*), min(date), max(date) FROM xenon.nav_history WHERE source='close';
+      SELECT count(*), min(occurred_at::date), max(occurred_at::date) FROM xenon.ib_cash_flow;"
+   ```
+
+   Then re-check `/performance` — `twr_total_return` / `irr_total_return` populate once flows exist.
 
 ## Scope
 
