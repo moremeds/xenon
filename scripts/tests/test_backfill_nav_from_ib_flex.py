@@ -62,9 +62,12 @@ _TWO_SECTION_CSV = (
 )
 
 
-# CashTransactions section with the Amount column deselected — the Astra
-# review's repro shape. Its TransactionID overlaps the seeded fixture on
-# purpose: replay must not be able to zero the stored flow.
+# Export whose transaction section lacks BOTH identity columns' Amount
+# half — TransactionID present, Amount deselected. Under the section
+# identity contract this is NOT a CashTransactions section: it is skipped,
+# writes nothing, and cash_flow_rows reports 0. Its TransactionID overlaps
+# the seeded fixture on purpose: replay must not be able to zero the
+# stored flow.
 _MISSING_AMOUNT_CSV = (
     '"ClientAccountID","ReportDate","Total","TotalLong","TotalShort","Cash",'
     '"CashLong","CashShort","Stock","StockLong","StockShort","Options",'
@@ -81,6 +84,46 @@ _MISSING_AMOUNT_CSV = (
     '"DUQ999999","20260107","Deposits/Withdrawals",'
     '"CASH RECEIPTS / ELECTRONIC FUND TRANSFERS","USD","","","4326167414"\n'
 )
+
+# A real CashTransactions section (TransactionID + Amount both selected)
+# with Date/Time deselected — malformed cash, refused before any write.
+_MISSING_DATETIME_CSV = (
+    '"ClientAccountID","ReportDate","Total","TotalLong","TotalShort","Cash",'
+    '"CashLong","CashShort","Stock","StockLong","StockShort","Options",'
+    '"OptionsLong","OptionsShort","Bonds","BondsLong","BondsShort",'
+    '"Commodities","CommoditiesLong","CommoditiesShort","Funds","FundsLong",'
+    '"FundsShort","DividendAccruals","DividendAccrualsLong",'
+    '"DividendAccrualsShort","InterestAccruals","InterestAccrualsLong",'
+    '"InterestAccrualsShort"\n'
+    '"DUQ999999","20260603","140000","140000","0","90000","90000","0","45","45","0",'
+    '"10","10","0","0","0","0","0","0","0","0","0","0","0","0","0","0",'
+    '"0","0"\n'
+    '"ClientAccountID","Type","Description","Amount","CurrencyPrimary",'
+    '"Symbol","AssetClass","TransactionID"\n'
+    '"DUQ999999","Deposits/Withdrawals",'
+    '"CASH RECEIPTS / ELECTRONIC FUND TRANSFERS","-2500","USD","","","4326167414"\n'
+)
+
+
+def _nonfinite_replay_csv(amount: str) -> str:
+    """Valid NAV + full CashTransactions header, but the replayed deposit
+    row carries a non-finite Amount for the seeded 4326167414 flow."""
+    return (
+        '"ClientAccountID","ReportDate","Total","TotalLong","TotalShort","Cash",'
+        '"CashLong","CashShort","Stock","StockLong","StockShort","Options",'
+        '"OptionsLong","OptionsShort","Bonds","BondsLong","BondsShort",'
+        '"Commodities","CommoditiesLong","CommoditiesShort","Funds","FundsLong",'
+        '"FundsShort","DividendAccruals","DividendAccrualsLong",'
+        '"DividendAccrualsShort","InterestAccruals","InterestAccrualsLong",'
+        '"InterestAccrualsShort"\n'
+        '"DUQ999999","20260603","140000","140000","0","90000","90000","0","45","45","0",'
+        '"10","10","0","0","0","0","0","0","0","0","0","0","0","0","0","0",'
+        '"0","0"\n'
+        '"ClientAccountID","Date/Time","Type","Description","Amount",'
+        '"CurrencyPrimary","Symbol","AssetClass","TransactionID"\n'
+        f'"DUQ999999","20260107","Deposits/Withdrawals",'
+        f'"CASH RECEIPTS / ELECTRONIC FUND TRANSFERS","{amount}","USD","","","4326167414"\n'
+    )
 
 
 @pytest.fixture
@@ -189,25 +232,26 @@ def test_read_only_refuses_writes(csv_path, pg_test_engine, duq_env, monkeypatch
 
 
 def test_invalid_cash_section_fails_before_any_write(tmp_path, pg_test_engine, duq_env):
-    """A CashTransactions section missing required columns aborts the run
-    before ANY write — NAV rows included. Otherwise an export with Amount
-    deselected would ingest NAV while silently dropping/zeroing flows."""
-    bad = tmp_path / "missing_amount.csv"
-    bad.write_text(_MISSING_AMOUNT_CSV)
+    """A CashTransactions section (TransactionID + Amount selected) that is
+    missing a required column aborts the run before ANY write — NAV rows
+    included."""
+    bad = tmp_path / "missing_datetime.csv"
+    bad.write_text(_MISSING_DATETIME_CSV)
 
     result = ingest_nav_csv(path=bad, scope=_SCOPE)
 
     assert result["error"] == "INVALID_CASH_SECTION"
     missing = result["invalid_cash_sections"][0]["missing_columns"]
-    assert "Amount" in missing
+    assert missing == ["Date/Time"]
     # Zero writes of either kind — even the valid-looking NAV row at 2026-06-03.
     assert _nav_rows() == []
     assert _cash_rows() == []
 
 
 def test_missing_amount_replay_leaves_stored_flow_unchanged(csv_path, tmp_path, pg_test_engine, duq_env):
-    """Regression (Astra P2): seed a valid flow, replay a missing-Amount
-    export — the stored amount must not be overwritten with zero."""
+    """Regression (Astra P2): seed a valid flow, replay an export whose
+    transaction section has Amount deselected — that section is not
+    CashTransactions, is skipped, and the stored amount stays intact."""
     seed = ingest_nav_csv(path=csv_path, scope=_SCOPE)
     assert seed["cash_inserted"] == 2
 
@@ -215,12 +259,62 @@ def test_missing_amount_replay_leaves_stored_flow_unchanged(csv_path, tmp_path, 
     bad.write_text(_MISSING_AMOUNT_CSV)
     result = ingest_nav_csv(path=bad, scope=_SCOPE)
 
-    assert result["error"] == "INVALID_CASH_SECTION"
+    # Not a cash section → not an error: NAV still writes, cash gets 0 rows.
+    assert "error" not in result
+    assert result["cash_flow_rows"] == 0
+    assert result["sections_skipped"] == 1
     by_id = {r.transaction_id: r for r in _cash_rows()}
     assert by_id["4326167414"].amount_usd == Decimal("35000.0000")
     assert by_id["4326167414"].amount_native == Decimal("35000.0000")
-    # The bad export's new NAV row (2026-06-03) never landed either.
-    assert [r.date.isoformat() for r in _nav_rows()] == ["2026-06-01", "2026-06-02"]
+    # The replay's new NAV row (2026-06-03) did land — only the
+    # non-cash section was skipped.
+    assert [r.date.isoformat() for r in _nav_rows()] == ["2026-06-01", "2026-06-02", "2026-06-03"]
+
+
+@pytest.mark.parametrize("bad_amount", ["NaN", "sNaN", "Infinity"])
+def test_nonfinite_amount_replay_leaves_stored_flow_unchanged(csv_path, tmp_path, pg_test_engine, duq_env, bad_amount):
+    """Regression (Astra R2 P2): PG numeric accepts NaN, so a replayed row
+    whose Amount parses to a non-finite Decimal must be skipped at parse —
+    never upserted over the stored 35000 flow."""
+    seed = ingest_nav_csv(path=csv_path, scope=_SCOPE)
+    assert seed["cash_inserted"] == 2
+
+    bad = tmp_path / "replay_nonfinite.csv"
+    bad.write_text(_nonfinite_replay_csv(bad_amount))
+    result = ingest_nav_csv(path=bad, scope=_SCOPE)
+
+    assert "error" not in result
+    assert result["cash_flow_rows"] == 0  # the only row was skipped
+    by_id = {r.transaction_id: r for r in _cash_rows()}
+    assert by_id["4326167414"].amount_usd == Decimal("35000.0000")
+    assert by_id["4326167414"].amount_native == Decimal("35000.0000")
+
+
+@pytest.mark.parametrize("has_position_amount", [True, False])
+def test_transfers_section_is_skipped(csv_path, tmp_path, pg_test_engine, duq_env, has_position_amount):
+    """A Transfers section is not CashTransactions — with OR without the
+    optional PositionAmount column it must be skipped, and the valid NAV +
+    cash sections must still write (Astra R2 P2)."""
+    header = (
+        '"ClientAccountID","Date/Time","Type","Direction","TransferCompany",'
+        '"CurrencyPrimary","TransactionID"'
+    )
+    row = '"DUQ999999","20260301","ACATS","IN","CONTRA BROKER","USD","555001"'
+    if has_position_amount:
+        header = header.replace('"CurrencyPrimary"', '"PositionAmount","CurrencyPrimary"')
+        row = row.replace('"USD","555001"', '"45000","USD","555001"')
+    p = tmp_path / "with_transfers.csv"
+    p.write_text(csv_path.read_text() + header + "\n" + row + "\n")
+
+    result = ingest_nav_csv(path=p, scope=_SCOPE)
+
+    assert "error" not in result
+    assert result["nav_rows"] == 2
+    assert result["cash_flow_rows"] == 2
+    assert result["cash_inserted"] == 2
+    assert result["sections_skipped"] == 1
+    # The Transfers TransactionID never became a cash row.
+    assert "555001" not in {r.transaction_id for r in _cash_rows()}
 
 
 def test_descending_export_reports_min_max_dates(tmp_path, pg_test_engine, duq_env):

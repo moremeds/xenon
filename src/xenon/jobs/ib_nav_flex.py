@@ -55,8 +55,7 @@ def _split_ib_flex_csv_sections(body: str) -> List[List[str]]:
 # filter), Date/Time (occurred_at), Amount + CurrencyPrimary (amount_usd
 # and fx_rate derivation). One shared list: the daily job validates against
 # it to warn once per run, and the CSV backfill validates to refuse a
-# malformed export before any write — a missing Amount column would
-# otherwise silently zero previously stored flows on upsert.
+# malformed export before any write.
 IB_CASH_TRANSACTIONS_REQUIRED_COLUMNS: tuple[str, ...] = (
     "TransactionID",
     "Type",
@@ -65,24 +64,29 @@ IB_CASH_TRANSACTIONS_REQUIRED_COLUMNS: tuple[str, ...] = (
     "CurrencyPrimary",
 )
 
-# Transfers sections share TransactionID/Type/Date-Time/CurrencyPrimary
-# with CashTransactions but measure with ``positionAmount`` — never treat
-# one as a malformed cash section (docs/architecture/performance-reconstruction.md).
-_TRANSFERS_MARKER_COLUMN = "PositionAmount"
+# A section IS a CashTransactions export iff its header carries BOTH
+# identity columns. TransactionID alone is not enough — Transfers shares
+# TransactionID/Type/Date-Time/CurrencyPrimary with CashTransactions, and
+# its own value column (``PositionAmount``) is optional in Flex exports, so
+# neither its presence nor its absence can identify a section
+# (docs/architecture/performance-reconstruction.md, Astra R2).
+_IB_CASH_SECTION_IDENTITY: tuple[str, str] = ("TransactionID", "Amount")
 
 
 def _cash_section_missing_columns(field_names: Any) -> Optional[List[str]]:
     """Validate a section header against the CashTransactions contract.
 
-    Returns ``None`` when the section is not cash-shaped (NAV, Transfers,
-    Trades, … — those belong to ``sections_skipped``), ``[]`` when the
-    header is complete, or the list of missing required columns when the
-    section is a malformed CashTransactions export.
+    Returns ``None`` when the section is not a CashTransactions export
+    (NAV, Transfers, Trades, an export with ``Amount`` deselected, … —
+    those belong to ``sections_skipped`` and, in the daily job, the "no
+    CashTransactions section" warning), ``[]`` when the header is complete,
+    or the missing required columns when the section is a malformed
+    CashTransactions export. Both identity columns are also required, so
+    the returned list can only name ``Type`` / ``Date/Time`` /
+    ``CurrencyPrimary``.
     """
     names = set(field_names or [])
-    if _TRANSFERS_MARKER_COLUMN in names:
-        return None
-    if "TransactionID" not in names and not {"Date/Time", "Type"} <= names:
+    if not set(_IB_CASH_SECTION_IDENTITY) <= names:
         return None
     return [c for c in IB_CASH_TRANSACTIONS_REQUIRED_COLUMNS if c not in names]
 
@@ -106,6 +110,8 @@ def _parse_ib_cash_transactions_section(
     import csv as _csv
     import io as _io
     from datetime import datetime as _dt
+    from decimal import Decimal as _Decimal
+    from decimal import InvalidOperation as _InvalidOperation
     from zoneinfo import ZoneInfo as _ZI
 
     et = _ZI("America/New_York")
@@ -145,12 +151,18 @@ def _parse_ib_cash_transactions_section(
             )
             continue
         amount_raw = (row.get("Amount") or "").strip()
-        if not amount_raw:
-            # Never default a missing amount to 0: on transaction_id replay
-            # the upsert would overwrite a stored amount_usd with zero.
+        try:
+            amount_ok = _Decimal(amount_raw).is_finite()
+        except _InvalidOperation:
+            amount_ok = False
+        if not amount_ok:
+            # Never persist a missing or non-finite amount: on
+            # transaction_id replay the upsert would overwrite a stored
+            # amount_usd with 0 or NaN (PG numeric accepts NaN).
             logger.warning(
-                "fetch_ib_nav_series: skipping CashTransaction %s — missing or blank Amount",
+                "fetch_ib_nav_series: skipping CashTransaction %s — Amount %r is blank or non-finite",
                 txn_id,
+                amount_raw,
             )
             continue
         out.append(

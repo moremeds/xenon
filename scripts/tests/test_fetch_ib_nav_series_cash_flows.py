@@ -210,8 +210,8 @@ def test_fetch_ib_nav_series_warns_when_no_cash_section(monkeypatch, pg_test_eng
 
 
 def test_fetch_ib_nav_series_warns_when_cash_section_missing_columns(monkeypatch, pg_test_engine, caplog):
-    """A CashTransactions-shaped section without the required columns
-    (e.g. no ``TransactionID``) must also warn — the parser drops it."""
+    """A CashTransactions section (TransactionID + Amount selected) that is
+    missing a required column must warn — the parser drops its rows."""
     import logging
 
     nav_plus_broken_cash = (
@@ -225,11 +225,12 @@ def test_fetch_ib_nav_series_warns_when_cash_section_missing_columns(monkeypatch
         '"DUQ999999","20260601","100","100","0","50","50","0","40","40","0",'
         '"10","10","0","0","0","0","0","0","0","0","0","0","0","0","0","0",'
         '"0","0"\n'
-        # CashTransactions-shaped but no TransactionID column.
-        '"ClientAccountID","Date/Time","Type","Description","Amount",'
-        '"CurrencyPrimary","Symbol","AssetClass"\n'
-        '"DUQ999999","20251026;225011","Deposits/Withdrawals",'
-        '"CASH RECEIPTS","10000","HKD","",""\n'
+        # CashTransactions (TransactionID + Amount selected) but no
+        # Date/Time column.
+        '"ClientAccountID","Type","Description","Amount",'
+        '"CurrencyPrimary","Symbol","AssetClass","TransactionID"\n'
+        '"DUQ999999","Deposits/Withdrawals",'
+        '"CASH RECEIPTS","10000","HKD","","","4179119714"\n'
     )
 
     monkeypatch.setenv("IB_FLEX_TOKEN", "x" * 24)
@@ -247,13 +248,13 @@ def test_fetch_ib_nav_series_warns_when_cash_section_missing_columns(monkeypatch
 
     assert entries is not None and len(entries) == 1
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("CashTransactions" in m and "TransactionID" in m for m in warnings), warnings
+    assert any("CashTransactions" in m and "Date/Time" in m for m in warnings), warnings
 
 
 def test_fetch_ib_nav_series_warns_when_cash_section_missing_amount(monkeypatch, pg_test_engine, caplog):
-    """A CashTransactions section without the Amount column (export with
-    Amount deselected) must warn — otherwise a replay could silently zero
-    stored flows (Astra P2). NAV rows still return."""
+    """An export with Amount deselected is NOT a CashTransactions section
+    under the identity contract — the run treats it as absent and emits
+    the "no CashTransactions section" warning. NAV rows still return."""
     import logging
 
     nav_plus_no_amount = (
@@ -267,7 +268,7 @@ def test_fetch_ib_nav_series_warns_when_cash_section_missing_amount(monkeypatch,
         '"DUQ999999","20260601","100","100","0","50","50","0","40","40","0",'
         '"10","10","0","0","0","0","0","0","0","0","0","0","0","0","0","0",'
         '"0","0"\n'
-        # CashTransactions-shaped but no Amount column.
+        # TransactionID present but Amount deselected → not a cash section.
         '"ClientAccountID","Date/Time","Type","Description",'
         '"CurrencyPrimary","Symbol","AssetClass","TransactionID"\n'
         '"DUQ999999","20251026;225011","Deposits/Withdrawals",'
@@ -289,7 +290,52 @@ def test_fetch_ib_nav_series_warns_when_cash_section_missing_amount(monkeypatch,
 
     assert entries is not None and len(entries) == 1
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("CashTransactions" in m and "Amount" in m for m in warnings), warnings
+    assert any("has no CashTransactions section" in m for m in warnings), warnings
+
+
+def test_fetch_ib_nav_series_transfers_section_does_not_warn(monkeypatch, pg_test_engine, caplog):
+    """A Transfers section — with TransactionID but no Amount — is not
+    cash-shaped: with a valid CashTransactions section alongside it, the
+    run emits no CashTransactions warning at all."""
+    import logging
+
+    nav_cash_transfers = (
+        '"ClientAccountID","ReportDate","Total","TotalLong","TotalShort","Cash",'
+        '"CashLong","CashShort","Stock","StockLong","StockShort","Options",'
+        '"OptionsLong","OptionsShort","Bonds","BondsLong","BondsShort",'
+        '"Commodities","CommoditiesLong","CommoditiesShort","Funds","FundsLong",'
+        '"FundsShort","DividendAccruals","DividendAccrualsLong",'
+        '"DividendAccrualsShort","InterestAccruals","InterestAccrualsLong",'
+        '"InterestAccrualsShort"\n'
+        '"DUQ999999","20260601","100","100","0","50","50","0","40","40","0",'
+        '"10","10","0","0","0","0","0","0","0","0","0","0","0","0","0","0",'
+        '"0","0"\n'
+        # Transfers — TransactionID but no Amount column.
+        '"ClientAccountID","Date/Time","Type","Direction",'
+        '"TransferCompany","CurrencyPrimary","TransactionID"\n'
+        '"DUQ999999","20260301","ACATS","IN","CONTRA BROKER","USD","555001"\n'
+        '"ClientAccountID","Date/Time","Type","Description","Amount",'
+        '"CurrencyPrimary","Symbol","AssetClass","TransactionID"\n'
+        '"DUQ999999","20260107","Deposits/Withdrawals",'
+        '"CASH RECEIPTS","35000","USD","","","4326167414"\n'
+    )
+
+    monkeypatch.setenv("IB_FLEX_TOKEN", "x" * 24)
+    monkeypatch.setenv("IB_FLEX_NAV_QUERY_ID", "1529248")
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_PAPER_ACCOUNT", "DUQ999999")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DUQ999999")
+
+    with patch("urllib.request.urlopen", _fake_urlopen_factory(nav_cash_transfers)), patch("time.sleep"), caplog.at_level(
+        logging.WARNING, logger="xenon.jobs.ib_nav_flex"
+    ):
+        from xenon.jobs.ib_nav_flex import fetch_ib_nav_series
+
+        entries = fetch_ib_nav_series()
+
+    assert entries is not None and len(entries) == 1
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not any("CashTransactions" in m for m in warnings), warnings
 
 
 def test_parse_cash_transactions_rejects_blank_amount():
@@ -305,6 +351,26 @@ def test_parse_cash_transactions_rejects_blank_amount():
     rows = _parse_ib_cash_transactions_section(section)
     assert [r["transaction_id"] for r in rows] == ["T2"]
     assert rows[0]["amount_native"] == "100"
+
+
+def test_parse_cash_transactions_rejects_nonfinite_amount():
+    """NaN / sNaN / Infinity / non-numeric Amounts are skipped — a stored
+    flow must never be overwritten by a non-finite replay (Astra R2 P2).
+    Finite 0 and negative withdrawals stay valid."""
+    from xenon.jobs.ib_nav_flex import _parse_ib_cash_transactions_section
+
+    section = [
+        '"ClientAccountID","Date/Time","Type","Description","Amount","CurrencyPrimary","Symbol","AssetClass","TransactionID"',
+        '"A","20260107","Deposits/Withdrawals","W1","NaN","USD","","","T1"',
+        '"A","20260107","Deposits/Withdrawals","W2","sNaN","USD","","","T2"',
+        '"A","20260107","Deposits/Withdrawals","W3","Infinity","USD","","","T3"',
+        '"A","20260107","Deposits/Withdrawals","W4","abc","USD","","","T4"',
+        '"A","20260108","Deposits/Withdrawals","IN","0","USD","","","T5"',
+        '"A","20260109","Deposits/Withdrawals","OUT","-500","USD","","","T6"',
+    ]
+    rows = _parse_ib_cash_transactions_section(section)
+    assert [r["transaction_id"] for r in rows] == ["T5", "T6"]
+    assert [r["amount_native"] for r in rows] == ["0", "-500"]
 
 
 def test_fetch_ib_nav_series_warns_on_xml_response(monkeypatch, pg_test_engine, caplog):
