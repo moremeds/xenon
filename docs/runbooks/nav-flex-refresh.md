@@ -96,23 +96,26 @@ rm ~/Library/LaunchAgents/com.xenon.nav-flex-refresh.plist
 
 The daily job only ever sees the rolling window. To load inception-to-date NAV rows (`source='close'`) **and** historical `Deposits/Withdrawals` cash flows into `xenon.ib_cash_flow` (required for flow-adjusted TWR/IRR on `/performance`), run the backfill script once:
 
-1. **Export the CSV from the IB portal.** Account Management → Reports → Flex Queries → create (or clone) a *Custom Date Range* query covering inception-to-date that includes **both** `EquitySummaryInBase` (or `EquitySummaryByReportDateInBase`) and `CashTransactions` (with the `TransactionID`, `Type`, `Date/Time`, `Amount`, `CurrencyPrimary` columns). Run it and save the CSV.
+1. **Export the CSV from the IB portal.** Account Management → Reports → Flex Queries → create (or clone) a _Custom Date Range_ query covering inception-to-date that includes **both** `EquitySummaryInBase` (or `EquitySummaryByReportDateInBase`) and `CashTransactions` (with the `TransactionID`, `Type`, `Date/Time`, `Amount`, `CurrencyPrimary` columns). Run it and save the CSV.
 2. **Dry-run first** (parses, prints row counts + NAV date range, writes nothing). The api image ships `src/` only — `scripts/` is not in the image — so copy the script and the CSV to the mini and bind-mount **both** into the container:
 
    ```bash
    # From the MacBook checkout — copy script + CSV to the mini:
-   ssh mini mkdir -p /opt/xenon/tmp
-   scp scripts/migrations/_2026_06_02_backfill_nav_from_ib_flex.py mini:/opt/xenon/tmp/
-   scp /path/to/flex.csv mini:/opt/xenon/tmp/flex.csv
+   ssh macmini mkdir -p /opt/xenon/tmp
+   scp scripts/migrations/_2026_06_02_backfill_nav_from_ib_flex.py macmini:/opt/xenon/tmp/
+   scp /path/to/flex.csv macmini:/opt/xenon/tmp/flex.csv
 
-   # On the mini:
+   # On the mini (ssh macmini). The script resolves Path(__file__).parents[2],
+   # so mount it two levels below /app (a /tmp/x.py mount raises IndexError).
+   export PATH=/opt/homebrew/bin:$PATH
    cd /opt/xenon && docker-compose -f /opt/xenon/compose.yml run --rm -T --no-deps \
-     -v /opt/xenon/tmp/_2026_06_02_backfill_nav_from_ib_flex.py:/tmp/backfill_nav.py \
+     -v /opt/xenon/tmp/_2026_06_02_backfill_nav_from_ib_flex.py:/app/scripts/migrations/backfill_nav.py \
      -v /opt/xenon/tmp/flex.csv:/tmp/flex.csv api \
-     python /tmp/backfill_nav.py --from-csv /tmp/flex.csv --dry-run
+     python /app/scripts/migrations/backfill_nav.py --from-csv /tmp/flex.csv --dry-run
    ```
 
    Expect `nav_rows` ≈ trading days since funding, `cash_flow_rows` = deposit/withdrawal count, and `earliest_date`/`latest_date` matching the export window. On a MacBook checkout (writes go wherever its `DATABASE_URL` points — keep it on `core_test`): `uv run python scripts/migrations/_2026_06_02_backfill_nav_from_ib_flex.py --from-csv <path> --dry-run`.
+
 3. **Real run — operator step, requires approval.** Drop `--dry-run` and run the same command against the intended DB (`DATABASE_URL` decides). Against prod (`core_dev`) this writes real history rows: get explicit sign-off, run on the macmini stack, and confirm `XENON_READ_ONLY` is unset (the script exits 3 when it is). Rows are upserts on `(broker, account_env, broker_account, date, source)` / `transaction_id`, so a re-run is idempotent.
 4. **Verify** (read-only role — `xenon_app` is prod-only):
 
