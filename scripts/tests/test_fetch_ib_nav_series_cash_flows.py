@@ -250,6 +250,38 @@ def test_fetch_ib_nav_series_warns_when_cash_section_missing_columns(monkeypatch
     assert any("CashTransactions" in m and "TransactionID" in m for m in warnings), warnings
 
 
+def test_fetch_ib_nav_series_warns_on_xml_response(monkeypatch, pg_test_engine, caplog):
+    """XML-format saved queries never ingest CashTransactions — the XML
+    branch has no cash parser, so it must warn that ib_cash_flow gets
+    nothing from the run."""
+    import logging
+
+    xml_body = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<FlexStatements count="1"><FlexStatement>'
+        '<EquitySummaryByReportDateInBase accountId="DUQ999999" '
+        'reportDate="20260601" total="100" cash="50" stock="40" options="10"/>'
+        "</FlexStatement></FlexStatements>"
+    )
+
+    monkeypatch.setenv("IB_FLEX_TOKEN", "x" * 24)
+    monkeypatch.setenv("IB_FLEX_NAV_QUERY_ID", "1529248")
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_PAPER_ACCOUNT", "DUQ999999")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DUQ999999")
+
+    with patch("urllib.request.urlopen", _fake_urlopen_factory(xml_body)), patch("time.sleep"), caplog.at_level(
+        logging.WARNING, logger="xenon.jobs.ib_nav_flex"
+    ):
+        from xenon.jobs.ib_nav_flex import fetch_ib_nav_series
+
+        entries = fetch_ib_nav_series()
+
+    assert entries is not None and len(entries) == 1
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("CashTransactions" in m for m in warnings), warnings
+
+
 def test_split_ib_flex_csv_sections_handles_unquoted_headers():
     """The splitter must match both quoted and unquoted ClientAccountID headers."""
     from xenon.jobs.ib_nav_flex import _split_ib_flex_csv_sections

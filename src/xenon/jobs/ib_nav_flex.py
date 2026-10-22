@@ -319,6 +319,11 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
             elif "<FlexStatements" in body:
                 # XML-format saved query — kept for forward-compat in case
                 # a future saved query is configured as XML.
+                logger.warning(
+                    "fetch_ib_nav_series: XML-format Flex response — CashTransactions "
+                    "are only ingested from CSV responses, so xenon.ib_cash_flow "
+                    "gets nothing from this run; check the saved query's format"
+                )
                 root2 = ET.fromstring(body)
                 navs = root2.findall(".//EquitySummaryByReportDateInBase")
                 if not navs:
