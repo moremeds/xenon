@@ -37,7 +37,7 @@ from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xenon.api.services.futu_closed_trades import match_closed_lots
+from xenon.api.services.futu_closed_trades import CORPORATE_ACTIONS, match_closed_lots
 from xenon.db.queries.futu_history import list_cashflows, list_trades
 from xenon.execution.account_scope import AccountScope
 
@@ -90,7 +90,7 @@ def _compute_daily_realized_pnl(trades: list[dict]) -> dict[date, Decimal]:
     sides (pre-inception positions contribute no P&L).
     """
     daily: dict[date, Decimal] = defaultdict(lambda: Decimal("0"))
-    for lot in match_closed_lots(trades):
+    for lot in match_closed_lots(trades, actions=CORPORATE_ACTIONS):
         daily[lot.closed_at.astimezone(timezone.utc).date()] += lot.realized_pnl
     return dict(daily)
 
