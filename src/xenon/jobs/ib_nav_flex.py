@@ -281,6 +281,7 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
 
             entries: List[Dict[str, Any]] = []
             cash_flow_rows: List[Dict[str, Any]] = []
+            skipped_txn_sections: List[str] = []
             if body_stripped.startswith('"ClientAccountID"'):
                 # CSV-format saved query (current xenon configuration).
                 # IB concatenates sections (EquitySummaryInBase,
@@ -343,7 +344,15 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                     else:
                         missing = _cash_section_missing_columns(field_names)
                         if missing is None:
-                            continue  # unrelated section (Transfers, Trades, …)
+                            # Transaction-shaped but not cash (Transfers,
+                            # Trades, or a CashTransactions export with
+                            # Amount deselected). Record the header so a
+                            # section skipped next to a valid cash section
+                            # stays visible — a sole one already surfaces
+                            # via the no-cash-section warning below.
+                            if "TransactionID" in field_names:
+                                skipped_txn_sections.append(section_lines[0].strip()[:200])
+                            continue
                         if missing:
                             # CashTransactions-shaped but missing required
                             # columns — the parser can't use it.
@@ -373,6 +382,16 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                         "column(s) %s — rows cannot be parsed into xenon.ib_cash_flow; "
                         "check the saved query's column selection",
                         sorted(cash_section_missing_cols),
+                    )
+                # Once per run, INFO level: transaction-shaped sections
+                # the classifier skipped (TransactionID present, Amount
+                # absent — Transfers legitimately lands here every run).
+                if skipped_txn_sections:
+                    logger.info(
+                        "fetch_ib_nav_series: %d transaction-shaped section(s) skipped "
+                        "as non-CashTransactions — headers: %s",
+                        len(skipped_txn_sections),
+                        skipped_txn_sections,
                     )
             elif "<FlexStatements" in body:
                 # XML-format saved query — kept for forward-compat in case
@@ -456,11 +475,13 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                     inserted, updated = _persist_ib_cash_transactions(cash_flow_rows)
                     logger.info(
                         "fetch_ib_nav_series: ib_cash_flow ingest — %d inserted, "
-                        "%d updated (replays), %d skipped (of %d total CashTransactions row(s))",
+                        "%d updated (replays), %d skipped (of %d total CashTransactions row(s)); "
+                        "%d transaction-shaped section(s) skipped",
                         inserted,
                         updated,
                         len(cash_flow_rows) - inserted - updated,
                         len(cash_flow_rows),
+                        len(skipped_txn_sections),
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(

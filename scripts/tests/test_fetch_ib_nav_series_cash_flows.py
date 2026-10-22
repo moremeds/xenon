@@ -338,6 +338,79 @@ def test_fetch_ib_nav_series_transfers_section_does_not_warn(monkeypatch, pg_tes
     assert not any("CashTransactions" in m for m in warnings), warnings
 
 
+def test_fetch_ib_nav_series_logs_skipped_transaction_section(monkeypatch, pg_test_engine, caplog):
+    """A transaction-shaped section skipped next to a VALID cash section
+    must stay visible (Astra R3): one INFO line names the count and the
+    skipped header, the ingest summary carries the count, the valid rows
+    still persist, and NAV is unchanged."""
+    import logging
+
+    nav_cash_plus_omitted = (
+        '"ClientAccountID","ReportDate","Total","TotalLong","TotalShort","Cash",'
+        '"CashLong","CashShort","Stock","StockLong","StockShort","Options",'
+        '"OptionsLong","OptionsShort","Bonds","BondsLong","BondsShort",'
+        '"Commodities","CommoditiesLong","CommoditiesShort","Funds","FundsLong",'
+        '"FundsShort","DividendAccruals","DividendAccrualsLong",'
+        '"DividendAccrualsShort","InterestAccruals","InterestAccrualsLong",'
+        '"InterestAccrualsShort"\n'
+        '"DUQ999999","20260601","100","100","0","50","50","0","40","40","0",'
+        '"10","10","0","0","0","0","0","0","0","0","0","0","0","0","0","0",'
+        '"0","0"\n'
+        '"ClientAccountID","Date/Time","Type","Description","Amount",'
+        '"CurrencyPrimary","Symbol","AssetClass","TransactionID"\n'
+        '"DUQ999999","20260107","Deposits/Withdrawals",'
+        '"CASH RECEIPTS","35000","USD","","","4326167414"\n'
+        # Transaction-shaped, Amount deselected → skipped, but visible.
+        '"ClientAccountID","Date/Time","Type","Description",'
+        '"CurrencyPrimary","Symbol","AssetClass","TransactionID"\n'
+        '"DUQ999999","20260107","Deposits/Withdrawals",'
+        '"CASH RECEIPTS","USD","","","SYNTHETIC-OMITTED-R3"\n'
+    )
+
+    monkeypatch.setenv("IB_FLEX_TOKEN", "x" * 24)
+    monkeypatch.setenv("IB_FLEX_NAV_QUERY_ID", "1529248")
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_PAPER_ACCOUNT", "DUQ999999")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DUQ999999")
+
+    with patch("urllib.request.urlopen", _fake_urlopen_factory(nav_cash_plus_omitted)), patch("time.sleep"), caplog.at_level(
+        logging.INFO, logger="xenon.jobs.ib_nav_flex"
+    ):
+        from xenon.jobs.ib_nav_flex import fetch_ib_nav_series
+
+        entries = fetch_ib_nav_series()
+
+    # NAV unchanged; the one valid cash row persisted.
+    assert entries is not None and len(entries) == 1
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        ids = {
+            r.transaction_id
+            for r in conn.execute(
+                text(
+                    "SELECT transaction_id FROM xenon.ib_cash_flow "
+                    "WHERE broker='IB' AND account_env='paper' "
+                    "AND broker_account='DUQ999999'"
+                )
+            )
+        }
+    assert ids == {"4326167414"}
+
+    # One INFO line names the count and the skipped section's header.
+    infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    assert any(
+        "1 transaction-shaped section(s) skipped" in m
+        and "TransactionID" in m
+        and "CurrencyPrimary" in m
+        for m in infos
+    ), infos
+    # The ingest summary line carries the skipped-section count too.
+    assert any(
+        "ib_cash_flow ingest" in m and "1 transaction-shaped section(s) skipped" in m
+        for m in infos
+    ), infos
+
+
 def test_parse_cash_transactions_rejects_blank_amount():
     """A row with a missing/blank Amount is skipped — never emitted as '0'
     (a '0' upsert would overwrite a stored amount on transaction_id replay)."""
