@@ -73,6 +73,21 @@ CORPORATE_ACTIONS: tuple[CorporateAction, ...] = (
 )
 
 
+def _futu_trade_date(filled_at: datetime) -> date:
+    """US trade date of a fill — the calendar date the ex-date gate compares.
+
+    Stored `filled_at` is Futu `create_time` — US/Eastern wall time labelled UTC
+    at ingest (`FutuClient._parse_futu_ts`), verified 2026-10-22 on the 7378-row
+    prod export: regular-session stock fills cluster at stored-UTC hours 09-16
+    (= ET session 09:30-16:00), not 13-21 — see
+    tmp/evidence/futu-corp-actions-notes.md § Timestamp convention. The stored
+    UTC calendar date is therefore already the ET trade date; no tz conversion
+    is applied. Overnight-session (20:00-04:00 ET) corporate-action treatment is
+    unverified; no stored fill hits that boundary.
+    """
+    return filled_at.astimezone(timezone.utc).date()
+
+
 def _renamed_code(futu_code: str, action: CorporateAction) -> str | None:
     """New futu_code for a pre-ex option deal, or None when the code is not in
     the action's contract family (incl. plain stock codes — no OCC tail)."""
@@ -97,7 +112,7 @@ def apply_corporate_actions(trades: list[dict], actions: Iterable[CorporateActio
         return trades
     out: list[dict] = []
     for t in trades:
-        when = t["filled_at"].astimezone(timezone.utc).date()
+        when = _futu_trade_date(t["filled_at"])
         adj = t
         for a in actions:
             if when >= a.ex_date:
