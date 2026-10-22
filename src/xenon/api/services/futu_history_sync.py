@@ -218,7 +218,7 @@ async def sync_futu_orders(
     """
     from xenon.api.guards import is_read_only
     from xenon.api.services.advisory_lock import pg_try_advisory_lock
-    from xenon.api.services.futu_closed_trades import closed_lots_to_rows, match_closed_lots
+    from xenon.api.services.futu_closed_trades import CORPORATE_ACTIONS, closed_lots_to_rows, match_closed_lots
     from xenon.api.services.futu_structure import group_closed_trades
     from xenon.db.queries.futu_history import insert_futu_journal_entries
 
@@ -268,7 +268,7 @@ async def sync_futu_orders(
         #    Closed-trades table stays per-lot (the blotter groups on read); the
         #    journal is written at the structure level (one row per closing order).
         trades = await list_trades(engine, scope)
-        closed_rows = closed_lots_to_rows(match_closed_lots(trades))
+        closed_rows = closed_lots_to_rows(match_closed_lots(trades, actions=CORPORATE_ACTIONS))
         n_closed = await insert_closed_trades(engine, scope, closed_rows)
         n_journal = await insert_futu_journal_entries(engine, scope, group_closed_trades(closed_rows))
 
