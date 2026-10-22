@@ -117,13 +117,19 @@ The daily job only ever sees the rolling window. To load inception-to-date NAV r
    Expect `nav_rows` ≈ trading days since funding, `cash_flow_rows` = deposit/withdrawal count, and `earliest_date`/`latest_date` matching the export window. On a MacBook checkout (writes go wherever its `DATABASE_URL` points — keep it on `core_test`): `uv run python scripts/migrations/_2026_06_02_backfill_nav_from_ib_flex.py --from-csv <path> --dry-run`.
 
 3. **Real run — operator step, requires approval.** Drop `--dry-run` and run the same command against the intended DB (`DATABASE_URL` decides). Against prod (`core_dev`) this writes real history rows: get explicit sign-off, run on the macmini stack, and confirm `XENON_READ_ONLY` is unset (the script exits 3 when it is). Rows are upserts on `(broker, account_env, broker_account, date, source)` / `transaction_id`, so a re-run is idempotent.
-4. **Verify** (read-only role — `xenon_app` is prod-only):
+4. **Verify** (read-only role — `xenon_app` is prod-only). Filter both queries to the exact scope you backfilled — otherwise FUTU NAV rows or another IB account's history can masquerade as a successful run. Cash dates are bucketed in `America/New_York` to match how `/performance` groups flows (raw `occurred_at::date` uses the session timezone):
 
    ```bash
    psql -h 100.66.147.98 -U xenon_dev core_dev -c \
-     "SELECT count(*), min(date), max(date) FROM xenon.nav_history WHERE source='close';
-      SELECT count(*), min(occurred_at::date), max(occurred_at::date) FROM xenon.ib_cash_flow;"
+     "SELECT count(*), min(date), max(date) FROM xenon.nav_history
+       WHERE broker='IB' AND account_env='live' AND broker_account='<acct>' AND source='close';
+      SELECT count(*), min((occurred_at AT TIME ZONE 'America/New_York')::date),
+             max((occurred_at AT TIME ZONE 'America/New_York')::date)
+        FROM xenon.ib_cash_flow
+       WHERE broker='IB' AND account_env='live' AND broker_account='<acct>';"
    ```
+
+   Substitute `<acct>` with the account the export covers (e.g. the live `U…` account or the paper `DU…` account), and `account_env` to match.
 
    Then re-check `/performance` — `twr_total_return` / `irr_total_return` populate once flows exist.
 

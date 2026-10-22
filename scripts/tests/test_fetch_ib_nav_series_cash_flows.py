@@ -250,6 +250,63 @@ def test_fetch_ib_nav_series_warns_when_cash_section_missing_columns(monkeypatch
     assert any("CashTransactions" in m and "TransactionID" in m for m in warnings), warnings
 
 
+def test_fetch_ib_nav_series_warns_when_cash_section_missing_amount(monkeypatch, pg_test_engine, caplog):
+    """A CashTransactions section without the Amount column (export with
+    Amount deselected) must warn — otherwise a replay could silently zero
+    stored flows (Astra P2). NAV rows still return."""
+    import logging
+
+    nav_plus_no_amount = (
+        '"ClientAccountID","ReportDate","Total","TotalLong","TotalShort","Cash",'
+        '"CashLong","CashShort","Stock","StockLong","StockShort","Options",'
+        '"OptionsLong","OptionsShort","Bonds","BondsLong","BondsShort",'
+        '"Commodities","CommoditiesLong","CommoditiesShort","Funds","FundsLong",'
+        '"FundsShort","DividendAccruals","DividendAccrualsLong",'
+        '"DividendAccrualsShort","InterestAccruals","InterestAccrualsLong",'
+        '"InterestAccrualsShort"\n'
+        '"DUQ999999","20260601","100","100","0","50","50","0","40","40","0",'
+        '"10","10","0","0","0","0","0","0","0","0","0","0","0","0","0","0",'
+        '"0","0"\n'
+        # CashTransactions-shaped but no Amount column.
+        '"ClientAccountID","Date/Time","Type","Description",'
+        '"CurrencyPrimary","Symbol","AssetClass","TransactionID"\n'
+        '"DUQ999999","20251026;225011","Deposits/Withdrawals",'
+        '"CASH RECEIPTS","USD","","","4179119714"\n'
+    )
+
+    monkeypatch.setenv("IB_FLEX_TOKEN", "x" * 24)
+    monkeypatch.setenv("IB_FLEX_NAV_QUERY_ID", "1529248")
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_PAPER_ACCOUNT", "DUQ999999")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DUQ999999")
+
+    with patch("urllib.request.urlopen", _fake_urlopen_factory(nav_plus_no_amount)), patch("time.sleep"), caplog.at_level(
+        logging.WARNING, logger="xenon.jobs.ib_nav_flex"
+    ):
+        from xenon.jobs.ib_nav_flex import fetch_ib_nav_series
+
+        entries = fetch_ib_nav_series()
+
+    assert entries is not None and len(entries) == 1
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("CashTransactions" in m and "Amount" in m for m in warnings), warnings
+
+
+def test_parse_cash_transactions_rejects_blank_amount():
+    """A row with a missing/blank Amount is skipped — never emitted as '0'
+    (a '0' upsert would overwrite a stored amount on transaction_id replay)."""
+    from xenon.jobs.ib_nav_flex import _parse_ib_cash_transactions_section
+
+    section = [
+        '"ClientAccountID","Date/Time","Type","Description","Amount","CurrencyPrimary","Symbol","AssetClass","TransactionID"',
+        '"A","20260107","Deposits/Withdrawals","WIRE IN","","USD","","","T1"',
+        '"A","20260108","Deposits/Withdrawals","WIRE IN","100","USD","","","T2"',
+    ]
+    rows = _parse_ib_cash_transactions_section(section)
+    assert [r["transaction_id"] for r in rows] == ["T2"]
+    assert rows[0]["amount_native"] == "100"
+
+
 def test_fetch_ib_nav_series_warns_on_xml_response(monkeypatch, pg_test_engine, caplog):
     """XML-format saved queries never ingest CashTransactions — the XML
     branch has no cash parser, so it must warn that ib_cash_flow gets

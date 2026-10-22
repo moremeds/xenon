@@ -69,9 +69,12 @@ def _parse_flex_csv(*, path: Path, scope: Any) -> dict[str, Any]:
     Returns NAV rows ready for ``upsert_nav_sync``, cash rows ready for
     ``_persist_ib_cash_transactions``, and skip counters. Sections whose
     header matches neither EquitySummaryInBase nor CashTransactions are
-    counted in ``sections_skipped``.
+    counted in ``sections_skipped``; a CashTransactions-shaped header that
+    fails the shared required-column validation lands in
+    ``invalid_cash_sections`` and the caller refuses before any write.
     """
     from xenon.jobs.ib_nav_flex import (
+        _cash_section_missing_columns,
         _parse_ib_cash_transactions_section,
         _split_ib_flex_csv_sections,
     )
@@ -83,6 +86,7 @@ def _parse_flex_csv(*, path: Path, scope: Any) -> dict[str, Any]:
     cash_rows: list[dict[str, Any]] = []
     sections_skipped = 0
     skipped_mismatch = 0
+    invalid_cash_sections: list[dict[str, Any]] = []
     for section_lines in sections:
         reader = csv.DictReader(io.StringIO("\n".join(section_lines)))
         field_names = reader.fieldnames or []
@@ -104,19 +108,26 @@ def _parse_flex_csv(*, path: Path, scope: Any) -> dict[str, Any]:
                         "options_value": _dec(csv_row["Options"]),
                     }
                 )
-        elif "TransactionID" in field_names:
+            continue
+        missing = _cash_section_missing_columns(field_names)
+        if missing is None:
+            sections_skipped += 1
+        elif missing:
+            invalid_cash_sections.append(
+                {"missing_columns": missing, "header": section_lines[0].strip()[:200]}
+            )
+        else:
             cash_rows.extend(
                 _parse_ib_cash_transactions_section(
                     section_lines, account_filter=scope.broker_account
                 )
             )
-        else:
-            sections_skipped += 1
     return {
         "nav_rows": nav_rows,
         "cash_rows": cash_rows,
         "sections_skipped": sections_skipped,
         "skipped_account_mismatch": skipped_mismatch,
+        "invalid_cash_sections": invalid_cash_sections,
     }
 
 
@@ -138,18 +149,31 @@ def ingest_nav_csv(*, path: Path, scope: Any, dry_run: bool = False) -> dict[str
     nav_rows = parsed["nav_rows"]
     cash_rows = parsed["cash_rows"]
 
+    # min/max, not first/last — a descending or multi-section export must
+    # still report the true coverage bounds the runbook verifies against.
+    nav_dates = [r["date"] for r in nav_rows]
     result: dict[str, Any] = {
         "dry_run": dry_run,
         "nav_rows": len(nav_rows),
         "cash_flow_rows": len(cash_rows),
         "skipped_account_mismatch": parsed["skipped_account_mismatch"],
         "sections_skipped": parsed["sections_skipped"],
-        "earliest_date": nav_rows[0]["date"].isoformat() if nav_rows else None,
-        "latest_date": nav_rows[-1]["date"].isoformat() if nav_rows else None,
+        "earliest_date": min(nav_dates).isoformat() if nav_dates else None,
+        "latest_date": max(nav_dates).isoformat() if nav_dates else None,
     }
     if cash_rows:
         result["cash_earliest"] = min(r["occurred_at"] for r in cash_rows).isoformat()
         result["cash_latest"] = max(r["occurred_at"] for r in cash_rows).isoformat()
+
+    # Refuse before ANY write (NAV or cash) when a CashTransactions-shaped
+    # section is missing required columns — e.g. an export with Amount
+    # deselected would upsert stored flows to zero on transaction_id replay.
+    if parsed["invalid_cash_sections"]:
+        return {
+            **result,
+            "error": "INVALID_CASH_SECTION",
+            "invalid_cash_sections": parsed["invalid_cash_sections"],
+        }
     if dry_run:
         return result
 

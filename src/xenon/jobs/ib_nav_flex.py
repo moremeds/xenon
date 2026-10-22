@@ -50,6 +50,43 @@ def _split_ib_flex_csv_sections(body: str) -> List[List[str]]:
     return sections
 
 
+# Columns a CashTransactions section must carry for its rows to be usable:
+# TransactionID (primary key + replay dedupe), Type (Deposits/Withdrawals
+# filter), Date/Time (occurred_at), Amount + CurrencyPrimary (amount_usd
+# and fx_rate derivation). One shared list: the daily job validates against
+# it to warn once per run, and the CSV backfill validates to refuse a
+# malformed export before any write — a missing Amount column would
+# otherwise silently zero previously stored flows on upsert.
+IB_CASH_TRANSACTIONS_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "TransactionID",
+    "Type",
+    "Date/Time",
+    "Amount",
+    "CurrencyPrimary",
+)
+
+# Transfers sections share TransactionID/Type/Date-Time/CurrencyPrimary
+# with CashTransactions but measure with ``positionAmount`` — never treat
+# one as a malformed cash section (docs/architecture/performance-reconstruction.md).
+_TRANSFERS_MARKER_COLUMN = "PositionAmount"
+
+
+def _cash_section_missing_columns(field_names: Any) -> Optional[List[str]]:
+    """Validate a section header against the CashTransactions contract.
+
+    Returns ``None`` when the section is not cash-shaped (NAV, Transfers,
+    Trades, … — those belong to ``sections_skipped``), ``[]`` when the
+    header is complete, or the list of missing required columns when the
+    section is a malformed CashTransactions export.
+    """
+    names = set(field_names or [])
+    if _TRANSFERS_MARKER_COLUMN in names:
+        return None
+    if "TransactionID" not in names and not {"Date/Time", "Type"} <= names:
+        return None
+    return [c for c in IB_CASH_TRANSACTIONS_REQUIRED_COLUMNS if c not in names]
+
+
 def _parse_ib_cash_transactions_section(
     section_lines: List[str],
     *,
@@ -107,12 +144,21 @@ def _parse_ib_cash_transactions_section(
                 exc,
             )
             continue
+        amount_raw = (row.get("Amount") or "").strip()
+        if not amount_raw:
+            # Never default a missing amount to 0: on transaction_id replay
+            # the upsert would overwrite a stored amount_usd with zero.
+            logger.warning(
+                "fetch_ib_nav_series: skipping CashTransaction %s — missing or blank Amount",
+                txn_id,
+            )
+            continue
         out.append(
             {
                 "transaction_id": txn_id,
                 "txn_type": txn_type,
                 "description": (row.get("Description") or "").strip() or None,
-                "amount_native": (row.get("Amount") or "0").strip(),
+                "amount_native": amount_raw,
                 "currency": (row.get("CurrencyPrimary") or "").strip(),
                 "occurred_at": occurred_at,
                 "raw": dict(row),
@@ -282,21 +328,21 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                                     "options": safe_float(csv_row.get("Options")),
                                 }
                             )
-                    elif "TransactionID" in field_names:
+                    else:
+                        missing = _cash_section_missing_columns(field_names)
+                        if missing is None:
+                            continue  # unrelated section (Transfers, Trades, …)
+                        if missing:
+                            # CashTransactions-shaped but missing required
+                            # columns — the parser can't use it.
+                            cash_section_missing_cols |= set(missing)
+                            continue
                         # CashTransactions section (Deposits/Withdrawals
                         # subset only — see _parse_ib_cash_transactions_section).
                         saw_cash_section = True
-                        missing = {"Type", "Date/Time"} - set(field_names)
-                        if missing:
-                            cash_section_missing_cols |= missing
-                        else:
-                            cash_flow_rows.extend(
-                                _parse_ib_cash_transactions_section(section_lines, account_filter=_expected_account)
-                            )
-                    elif "Date/Time" in field_names and "Type" in field_names:
-                        # CashTransactions-shaped header without TransactionID —
-                        # the parser's hard gate would drop every row.
-                        cash_section_missing_cols.add("TransactionID")
+                        cash_flow_rows.extend(
+                            _parse_ib_cash_transactions_section(section_lines, account_filter=_expected_account)
+                        )
 
                 # Once per run: surface a statement whose CashTransactions
                 # section is absent or unparsable. Without this, a saved

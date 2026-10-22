@@ -62,6 +62,27 @@ _TWO_SECTION_CSV = (
 )
 
 
+# CashTransactions section with the Amount column deselected — the Astra
+# review's repro shape. Its TransactionID overlaps the seeded fixture on
+# purpose: replay must not be able to zero the stored flow.
+_MISSING_AMOUNT_CSV = (
+    '"ClientAccountID","ReportDate","Total","TotalLong","TotalShort","Cash",'
+    '"CashLong","CashShort","Stock","StockLong","StockShort","Options",'
+    '"OptionsLong","OptionsShort","Bonds","BondsLong","BondsShort",'
+    '"Commodities","CommoditiesLong","CommoditiesShort","Funds","FundsLong",'
+    '"FundsShort","DividendAccruals","DividendAccrualsLong",'
+    '"DividendAccrualsShort","InterestAccruals","InterestAccrualsLong",'
+    '"InterestAccrualsShort"\n'
+    '"DUQ999999","20260603","140000","140000","0","90000","90000","0","45","45","0",'
+    '"10","10","0","0","0","0","0","0","0","0","0","0","0","0","0","0",'
+    '"0","0"\n'
+    '"ClientAccountID","Date/Time","Type","Description","CurrencyPrimary",'
+    '"Symbol","AssetClass","TransactionID"\n'
+    '"DUQ999999","20260107","Deposits/Withdrawals",'
+    '"CASH RECEIPTS / ELECTRONIC FUND TRANSFERS","USD","","","4326167414"\n'
+)
+
+
 @pytest.fixture
 def duq_env(monkeypatch):
     monkeypatch.setenv("XENON_TRADING_MODE", "paper")
@@ -165,6 +186,61 @@ def test_read_only_refuses_writes(csv_path, pg_test_engine, duq_env, monkeypatch
     assert "READ_ONLY" in capsys.readouterr().err
     assert _nav_rows() == []
     assert _cash_rows() == []
+
+
+def test_invalid_cash_section_fails_before_any_write(tmp_path, pg_test_engine, duq_env):
+    """A CashTransactions section missing required columns aborts the run
+    before ANY write — NAV rows included. Otherwise an export with Amount
+    deselected would ingest NAV while silently dropping/zeroing flows."""
+    bad = tmp_path / "missing_amount.csv"
+    bad.write_text(_MISSING_AMOUNT_CSV)
+
+    result = ingest_nav_csv(path=bad, scope=_SCOPE)
+
+    assert result["error"] == "INVALID_CASH_SECTION"
+    missing = result["invalid_cash_sections"][0]["missing_columns"]
+    assert "Amount" in missing
+    # Zero writes of either kind — even the valid-looking NAV row at 2026-06-03.
+    assert _nav_rows() == []
+    assert _cash_rows() == []
+
+
+def test_missing_amount_replay_leaves_stored_flow_unchanged(csv_path, tmp_path, pg_test_engine, duq_env):
+    """Regression (Astra P2): seed a valid flow, replay a missing-Amount
+    export — the stored amount must not be overwritten with zero."""
+    seed = ingest_nav_csv(path=csv_path, scope=_SCOPE)
+    assert seed["cash_inserted"] == 2
+
+    bad = tmp_path / "replay_missing_amount.csv"
+    bad.write_text(_MISSING_AMOUNT_CSV)
+    result = ingest_nav_csv(path=bad, scope=_SCOPE)
+
+    assert result["error"] == "INVALID_CASH_SECTION"
+    by_id = {r.transaction_id: r for r in _cash_rows()}
+    assert by_id["4326167414"].amount_usd == Decimal("35000.0000")
+    assert by_id["4326167414"].amount_native == Decimal("35000.0000")
+    # The bad export's new NAV row (2026-06-03) never landed either.
+    assert [r.date.isoformat() for r in _nav_rows()] == ["2026-06-01", "2026-06-02"]
+
+
+def test_descending_export_reports_min_max_dates(tmp_path, pg_test_engine, duq_env):
+    """earliest/latest come from min/max, not file order — a descending
+    export must still report the true coverage bounds (Astra P3)."""
+    # _TWO_SECTION_CSV lists 20260601 then 20260602; swap the data rows.
+    nav_rows = [
+        l
+        for l in _TWO_SECTION_CSV.splitlines(keepends=True)
+        if l.startswith('"DUQ999999","2026') and l.split('","')[2].strip('"').isdigit()
+    ]
+    assert len(nav_rows) == 2
+    desc = _TWO_SECTION_CSV.replace(nav_rows[0] + nav_rows[1], nav_rows[1] + nav_rows[0])
+    p = tmp_path / "desc.csv"
+    p.write_text(desc)
+
+    result = ingest_nav_csv(path=p, scope=_SCOPE, dry_run=True)
+
+    assert result["earliest_date"] == "2026-06-01"
+    assert result["latest_date"] == "2026-06-02"
 
 
 def test_read_only_dry_run_still_works(csv_path, pg_test_engine, duq_env, monkeypatch):
