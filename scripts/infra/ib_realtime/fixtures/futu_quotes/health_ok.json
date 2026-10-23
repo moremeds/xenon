@@ -1,0 +1,10 @@
+{
+  "type": "health",
+  "opend_connected": true,
+  "quota": {
+    "ceiling": 800,
+    "own_used": 3,
+    "all_used": 3,
+    "remain": 997
+  }
+}

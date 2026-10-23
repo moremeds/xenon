@@ -1,0 +1,25 @@
+{
+  "type": "assign",
+  "gen": 7,
+  "ok": [],
+  "pending": [
+    {
+      "symbol": "AAPL",
+      "reason": "session"
+    },
+    {
+      "symbol": "BRK.B",
+      "reason": "session"
+    },
+    {
+      "symbol": "HYG",
+      "reason": "session"
+    }
+  ],
+  "rejected": [
+    {
+      "symbol": "ZZZZ",
+      "reason": "unknown_symbol"
+    }
+  ]
+}
