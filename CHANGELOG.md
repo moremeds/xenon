@@ -5,6 +5,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+- **WS relay: protocol ping/pong counts as client liveness.** `ib_realtime` keep-alive moved into `liveness.js`; a client that answers protocol pings (or sends its own) stays connected without the app-level `{action:"pong"}`, so argon-style service clients no longer hit the 65 s dead-peer close every ~90 s. The relay now also sends a `ws.ping()` per sweep; browser `{type:"ping"}`/`{action:"pong"}` handling is unchanged. Tests: `scripts/infra/ib_realtime/__tests__/liveness.test.mjs`.
+
 ## [0.14.0] — 2026-10-23
 
 Summary: the wizard protect take-profit goes through the Gate-4 reservation; the Futu closed-trades matcher applies reviewed splits and option re-codes; the IB NAV backfill works again and can load historical deposits/withdrawals into `ib_cash_flow`; docs match the real Postgres roles. No Alembic migration and no compose change.

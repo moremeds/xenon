@@ -55,6 +55,7 @@ import { pickEvictable, pickAdmittable } from "./line_budget.js";
 import { LRUCache } from "../../lib/lru-cache.js";
 import { RateLimiter } from "../../lib/rate-limiter.js";
 import { createSubscriberRegistry } from "./subscriber_registry.js";
+import { createLiveness } from "./liveness.js";
 import { authorizeUpgrade } from "./ws_upgrade_auth.js";
 import { resolveRelayClientIds } from "./client_id_zone.js";
 
@@ -72,10 +73,6 @@ function resolveIbPort() {
 const DEFAULT_IB_PORT = resolveIbPort();
 const RECONNECT_MS = 5000;
 const SNAPSHOT_TIMEOUT_MS = 5000;
-
-/* ─── Keep-Alive Ping/Pong ─────────────────────────────────────────────── */
-const PING_INTERVAL_MS = 30_000;
-const PONG_TIMEOUT_MS = 65_000; // 30s * 2 + 5s grace
 
 function parseArgs(argv) {
   const args = {
@@ -582,10 +579,6 @@ function applyCachedClose(data) {
 
 loadCloseCache();
 
-/* ─── Keep-Alive State ──────────────────────────────────────────────────── */
-const clientLastPong = new Map(); // client → timestamp (ms)
-let pingIntervalTimer = null;
-
 /* ─── Subscriber Registry (identified WS clients via ?id=) ──────────────── */
 const SUBSCRIBER_TTL_MS =
   Number(process.env.IB_REALTIME_SUBSCRIBER_TTL_MS) || 900_000;
@@ -593,6 +586,18 @@ const subscriberRegistry = createSubscriberRegistry({
   ttlMs: SUBSCRIBER_TTL_MS,
 });
 const clientId = new Map(); // ws -> id (only for identified subscribers)
+
+/* ─── Keep-Alive State ──────────────────────────────────────────────────── */
+const liveness = createLiveness({
+  clients,
+  sendAppPing: (client) => sendMessage(client, { type: "ping" }),
+  onAlive: (client, nowMs) => {
+    const sid = clientId.get(client);
+    if (sid) subscriberRegistry.onPong(sid, nowMs);
+  },
+  closeClient: (client) => client.close(),
+  log: console.log,
+});
 // Required shared secret for GET /status — the api service sends it as
 // `X-Status-Token` (constant-time compare, no loopback exception). When empty
 // /status answers 403 to everyone; dev.sh exports an ephemeral token per
@@ -950,7 +955,7 @@ function unsubscribeClientFromSymbol(client, symbol) {
 
 function disconnectClient(client) {
   removeBatchBuffer(client);
-  clientLastPong.delete(client);
+  liveness.detach(client);
   // Depth/tape cleanup must run before the L1 early-return below — a client may
   // subscribe to depth without any L1 symbol (clientSet would be null).
   disconnectClientFromDepth(client);
@@ -2051,9 +2056,7 @@ async function handleClientMessage(client, data) {
       return;
     }
     case "pong": {
-      clientLastPong.set(client, Date.now());
-      const sid = clientId.get(client);
-      if (sid) subscriberRegistry.onPong(sid, Date.now());
+      liveness.noteAlive(client);
       return;
     }
     case "search": {
@@ -2455,7 +2458,7 @@ wireIBEvents();
 
 wss.on("connection", (client, req) => {
   clients.add(client);
-  clientLastPong.set(client, Date.now());
+  liveness.attach(client);
 
   let subId = null;
   try {
@@ -2520,24 +2523,7 @@ ib.connect();
 startBatchFlush();
 
 /* ─── Keep-Alive Ping Interval ─────────────────────────────────────────── */
-pingIntervalTimer = setInterval(() => {
-  const now = Date.now();
-  for (const client of clients) {
-    sendMessage(client, { type: "ping" });
-    const lastPong = clientLastPong.get(client);
-    if (lastPong !== undefined && now - lastPong > PONG_TIMEOUT_MS) {
-      console.log(
-        `Closing unresponsive client (no pong for ${Math.round((now - lastPong) / 1000)}s)`,
-      );
-      clientLastPong.delete(client);
-      try {
-        client.close();
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-}, PING_INTERVAL_MS);
+liveness.start();
 
 statusBroadcastTick = setInterval(() => {
   if (ibConnected) return;
@@ -2593,10 +2579,7 @@ process.on("SIGINT", () => {
     clearInterval(statusBroadcastTick);
   }
   stopBatchFlush();
-  if (pingIntervalTimer) {
-    clearInterval(pingIntervalTimer);
-    pingIntervalTimer = null;
-  }
+  liveness.stop();
   if (staleCheckTimer) {
     clearInterval(staleCheckTimer);
     staleCheckTimer = null;
