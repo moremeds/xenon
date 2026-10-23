@@ -26,13 +26,18 @@ Futu (X3a): the future adapter `xenon.execution.futu_orders` is a second
 target with its own allowlist (only `services/order_entry.py` and the module
 itself). Raw Futu SDK mutations (`place_order`, `modify_order`,
 `cancel_all_order`, `unlock_trade`) are allowed only inside that adapter: the
-guard flags those calls in any other Python file when the receiver is a Futu
-trade context — a name or attribute assigned from `Open*TradeContext(...)`
-(including aliases, `with ... as`, subclasses, and context attributes such as
-`self._trd_ctx` created in another file), or `getattr(ctx, "<mutation>")`.
-IB's `client.place_order(...)` is not a Futu context and stays allowed.
-Limits: dynamic access other than a literal `getattr` and contexts passed
-through function parameters or return values are not traced.
+guard flags ANY reference to those attributes in any other Python file when
+the receiver is a Futu trade context — a name or attribute assigned from
+`Open*TradeContext(...)` (including aliases like `ctx = client._trd_ctx`,
+`with ... as`, subclasses, and context attributes such as `self._trd_ctx`
+created in another file), a bound-method capture (`send = ctx.place_order`),
+or `getattr(ctx, "<mutation>")`. IB's `client.place_order(...)` is not a
+Futu context and stays allowed.
+Limits: flow-insensitive name propagation (a local `client =
+OpenSecTradeContext()` in one function taints a same-named parameter in
+another); dynamic access other than a literal `getattr` and contexts passed
+through function parameters or return values are not traced; an unparseable
+Python file's mutation calls are not scanned (the import fallback still is).
 
 Reference: docs/reference/order-path-incident-history.md (Layer 2 guards).
 """
@@ -93,7 +98,6 @@ def _import_patterns(names: frozenset[str]) -> tuple[re.Pattern[str], ...]:
 
 _IMPORT_PATTERNS = _import_patterns(_MODULE_NAMES)
 _FUTU_IMPORT_PATTERNS = _import_patterns(_FUTU_MODULE_NAMES)
-_FUTU_MUTATION_LINE = re.compile(r"\b(?:" + "|".join(sorted(_FUTU_MUTATIONS)) + r")\b")
 
 
 def _python_import_linenos(source: str | ast.AST, names: frozenset[str] = _MODULE_NAMES) -> list[int] | None:
@@ -149,27 +153,41 @@ class _FutuContexts:
         self.ctors: set[str] = set()
         self.paths: set[str] = set()
         self.attrs: set[str] = set()
-        nodes = list(ast.walk(tree))
-        for node in nodes:
+        self._nodes = list(ast.walk(tree))
+        for node in self._nodes:
             if isinstance(node, ast.ImportFrom):
                 for alias in node.names:
                     if _FUTU_CONTEXT_RE.match(alias.name):
                         self.ctors.add(alias.asname or alias.name)
+        self.propagate(frozenset())
+
+    def propagate(self, foreign_attrs: frozenset[str]) -> bool:
+        """Fixpoint name propagation with a cross-file attribute set.
+
+        ``foreign_attrs`` holds context attribute names collected repo-wide
+        (e.g. ``_trd_ctx`` from ``FutuClient``), so ``ctx = client._trd_ctx``
+        keeps Futu identity. Returns True when anything new was added; the
+        caller re-runs it across all files until a global fixpoint.
+        """
         changed = True
+        grew = False
         while changed:
             changed = False
-            for node in nodes:
+            for node in self._nodes:
                 if isinstance(node, ast.ClassDef) and node.name not in self.ctors:
                     if any(self._is_ctor_ref(b) for b in node.bases):
                         self.ctors.add(node.name)
                         changed = True
+                        grew = True
                 for target, value in self._bindings(node):
                     path = _dotted(target)
-                    if path and path not in self.paths and self.is_context(value):
+                    if path and path not in self.paths and self.is_context(value, foreign_attrs):
                         self.paths.add(path)
                         if isinstance(target, ast.Attribute):
                             self.attrs.add(target.attr)
                         changed = True
+                        grew = True
+        return grew
 
     @staticmethod
     def _bindings(node: ast.AST):
@@ -200,26 +218,30 @@ class _FutuContexts:
 
 
 def _futu_mutation_linenos(tree: ast.AST, contexts: _FutuContexts, foreign_attrs: frozenset[str]) -> list[int]:
-    """Lines calling a Futu SDK mutation on a Futu trade context."""
-    linenos: list[int] = []
+    """Lines referencing a Futu SDK mutation attribute on a Futu trade
+    context — calls, bound-method capture (``send = ctx.place_order``), any
+    other read/write of the attribute, or a literal
+    ``getattr(ctx, "<mutation>")``."""
+    linenos: set[int] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr in _FUTU_MUTATIONS
+            and contexts.is_context(node.value, foreign_attrs)
+        ):
+            linenos.add(node.lineno)
             continue
-        func = node.func
-        if isinstance(func, ast.Attribute) and func.attr in _FUTU_MUTATIONS:
-            hit = contexts.is_context(func.value, foreign_attrs)
-        elif isinstance(func, ast.Name) and func.id == "getattr" and len(node.args) >= 2:
-            name = node.args[1]
-            hit = (
-                isinstance(name, ast.Constant)
-                and name.value in _FUTU_MUTATIONS
-                and contexts.is_context(node.args[0], foreign_attrs)
-            )
-        else:
-            continue
-        if hit:
-            linenos.append(node.lineno)
-    return linenos
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in _FUTU_MUTATIONS
+            and contexts.is_context(node.args[0], foreign_attrs)
+        ):
+            linenos.add(node.lineno)
+    return sorted(linenos)
 
 
 # The removed console scripts: forbidden everywhere except this guard.
@@ -308,8 +330,16 @@ def main() -> int:
 
     # Context attributes (e.g. `self._trd_ctx = OpenSecTradeContext(...)`)
     # declared anywhere; another file using `x._trd_ctx.place_order` is caught.
+    # Propagate with the repo-wide attribute set to a global fixpoint so an
+    # ordinary alias (`ctx = client._trd_ctx`) keeps Futu identity too.
     contexts = {rel: _FutuContexts(tree) for rel, _, _, tree in files if tree is not None}
     foreign_attrs = frozenset(a for c in contexts.values() for a in c.attrs)
+    changed = True
+    while changed:
+        changed = False
+        for ctxs in contexts.values():
+            changed |= ctxs.propagate(foreign_attrs)
+        foreign_attrs = frozenset(a for c in contexts.values() for a in c.attrs)
 
     for rel, file_path, lines, tree in files:
         ib_allowed = rel in _ALLOWLIST
@@ -324,13 +354,6 @@ def main() -> int:
                 ast_linenos.update(_python_import_linenos(tree, _FUTU_MODULE_NAMES) or [])
             if not is_adapter:
                 ast_linenos.update(_futu_mutation_linenos(tree, contexts[rel], foreign_attrs))
-        # Unparseable Python that names a Futu trade context: any mutation-named call fails.
-        futu_text = (
-            tree is None
-            and file_path.suffix == ".py"
-            and not is_adapter
-            and any("TradeContext" in line for line in lines)
-        )
         for lineno, line in enumerate(lines, start=1):
             # Skip comment lines — Python `#`, JS/TS `//`, or YAML/TOML `#`.
             stripped = line.lstrip()
@@ -343,7 +366,6 @@ def main() -> int:
                 hit = (
                     (not ib_allowed and any(p.search(line) for p in _IMPORT_PATTERNS))
                     or (not futu_allowed and any(p.search(line) for p in _FUTU_IMPORT_PATTERNS))
-                    or (futu_text and bool(_FUTU_MUTATION_LINE.search(line)))
                 )
             if _CLI_PATTERN.search(line) or hit:
                 violations.append((rel, lineno, line.strip()))

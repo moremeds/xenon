@@ -311,10 +311,62 @@ def test_futu_mutation_in_test_file_is_exempt(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_futu_mutation_in_unparseable_file_falls_back(tmp_path: Path) -> None:
+def test_unparseable_file_mutation_is_documented_gap(tmp_path: Path) -> None:
+    """The invalid-Python mutation fallback was removed: a Futu mutation in a
+    file that does not parse is a documented blind spot. The separate IMPORT
+    fallback for unparseable files still stands (see test above)."""
     source = "from futu import OpenSecTradeContext\nctx = OpenSecTradeContext()\nctx.place_order(1)\ndef broken(:\n"
     result = _run(tmp_path, {"src/xenon/clients/broken.py": source})
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+# ── F1 regressions: alias of a cross-file context attr; bound-method capture ──
+
+
+def test_ctx_alias_of_cross_file_attr_fails(tmp_path: Path) -> None:
+    """`ctx = client._trd_ctx` then `ctx.place_order(1)` — an ordinary alias of
+    the real FutuClient's context attribute keeps its Futu identity."""
+    real = (GUARD.parents[2] / "src/xenon/clients/futu_client.py").read_text(encoding="utf-8")
+    result = _run(
+        tmp_path,
+        {
+            "src/xenon/clients/futu_client.py": real,
+            "src/xenon/api/routes/sneaky.py": (
+                "def go(client):\n    ctx = client._trd_ctx\n    return ctx.place_order(1)\n"
+            ),
+        },
+    )
     assert result.returncode == 1, result.stdout + result.stderr
+    assert "src/xenon/api/routes/sneaky.py" in result.stderr
+
+
+def test_bound_method_capture_of_futu_mutation_fails(tmp_path: Path) -> None:
+    """`send = ctx.place_order` — referencing a mutation attribute on a known
+    Futu context is flagged even without a call."""
+    source = (
+        "from futu import OpenSecTradeContext\n"
+        "ctx = OpenSecTradeContext()\n"
+        "send = ctx.place_order\n"
+        "send(1)\n"
+    )
+    result = _run(tmp_path, {"src/xenon/clients/raw.py": source})
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "ctx.place_order" in result.stderr
+
+
+@pytest.mark.parametrize("method", _MUTATIONS)
+def test_bound_method_capture_each_mutation_fails(tmp_path: Path, method: str) -> None:
+    source = f"from futu import OpenSecTradeContext\nctx = OpenSecTradeContext()\nsend = ctx.{method}\nsend(1)\n"
+    result = _run(tmp_path, {"src/xenon/clients/raw.py": source})
+    assert result.returncode == 1, result.stdout + result.stderr
+
+
+def test_ib_client_alias_mutation_passes(tmp_path: Path) -> None:
+    """Negative control: an ordinary alias of a non-Futu client stays allowed —
+    no declared Futu context attribute anywhere in the scan."""
+    source = "def go(client):\n    ctx = client\n    return ctx.place_order(1)\n"
+    result = _run(tmp_path, {"src/xenon/execution/helper.py": source})
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_show_allowlist_lists_both_targets(tmp_path: Path) -> None:
