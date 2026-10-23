@@ -68,8 +68,11 @@ _NOT_FOUND_HINTS = (
     "no such",
     "unknown code",
     "invalid code",
+    "illegal code",
+    "invalid security",
     "inv code",
     "not found",
+    "代码",
 )
 
 
@@ -94,14 +97,20 @@ _UNSUPPORTED_HINTS = (
 
 
 def classify_subscribe_error(msg: str) -> str:
-    """Map a subscribe rejection message to an ``assign`` rejected reason."""
+    """Map a subscribe rejection message to an ``assign`` rejected reason.
+
+    Not-found/invalid-code is checked before "not supported": a code that
+    does not exist at all (e.g. a class-share spelling the provider cannot
+    parse) must land in ``rejected/unknown_symbol``, never a retryable
+    bucket.
+    """
     m = (msg or "").lower()
     if any(k in m for k in _QUOTA_HINTS):
         return "quota"
-    if any(k in m for k in _UNSUPPORTED_HINTS):
-        return "not_supported"
     if any(k in m for k in _NOT_FOUND_HINTS):
         return "unknown_symbol"
+    if any(k in m for k in _UNSUPPORTED_HINTS):
+        return "not_supported"
     return "provider_error"
 
 

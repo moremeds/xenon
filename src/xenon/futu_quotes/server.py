@@ -304,6 +304,11 @@ class FutuQuotesService:
         except OpenDDownError:
             self._on_opend_down()
             return
+        except OpenDNotFoundError as exc:
+            # Unknown/invalid code — never retried; lands rejected/unknown_symbol.
+            self.admission.subscribe_result(symbol, str(exc), "unknown_symbol")
+            self._kick()
+            return
         except OpenDError as exc:
             self.admission.subscribe_result(symbol, str(exc), classify_subscribe_error(str(exc)))
             self._kick()
@@ -325,6 +330,11 @@ class FutuQuotesService:
             res = await self.opend.unsubscribe([code])
         except OpenDDownError:
             self._on_opend_down()
+            return
+        except OpenDNotFoundError as exc:
+            # Code unknown to OpenD ⇒ nothing is subscribed there.
+            self.admission.unsubscribe_result(symbol, str(exc), "not_subscribed")
+            self._kick()
             return
         except OpenDError as exc:
             self.admission.unsubscribe_result(symbol, str(exc), "provider_error")

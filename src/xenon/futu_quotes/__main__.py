@@ -26,7 +26,17 @@ def main(argv: list[str] | None = None) -> int:
         default=int(os.environ.get("FUTU_QUOTES_PORT", "8767")),
     )
     p.add_argument("--log-level", default="INFO")
+    p.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run the fake-OpenD scenario over a real local WebSocket and exit",
+    )
     args = p.parse_args(argv)
+
+    if args.self_test:
+        from xenon.futu_quotes._selftest import run_self_test
+
+        return asyncio.run(run_self_test())
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),

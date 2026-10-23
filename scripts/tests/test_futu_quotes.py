@@ -22,6 +22,7 @@ from xenon.futu_quotes.admission import (
     ticker_of,
 )
 from xenon.futu_quotes.opend import (
+    OpenDNotFoundError,
     classify_subscribe_error,
     classify_unsubscribe_error,
 )
@@ -164,6 +165,8 @@ def test_error_classification():
     assert classify_subscribe_error("subscription quota limit exceeded") == "quota"
     assert classify_subscribe_error("code not support") == "not_supported"
     assert classify_subscribe_error("unknown code US.ZZZZ") == "unknown_symbol"
+    assert classify_subscribe_error("invalid code US.BRK.B") == "unknown_symbol"
+    assert classify_subscribe_error("illegal code US.BRK.B") == "unknown_symbol"
     assert classify_subscribe_error("something odd") == "provider_error"
     assert classify_unsubscribe_error("unsubscribe too early") == "too_early"
     assert classify_unsubscribe_error("code not subscribed") == "not_subscribed"
@@ -502,7 +505,9 @@ class FakeOpenD:
         self.snapshot_calls = 0
         self.quota_calls = 0
         self.subscribe_errors: dict[str, str] = {}
+        self.subscribe_raise: dict[str, Exception] = {}
         self.unsubscribe_errors: list[str] = []
+        self.unsubscribe_raise: Exception | None = None
         self.defer_all = False
         self._defer_results: dict[str, str | None] = {}
         self._defer_waiters: dict[str, asyncio.Future] = {}
@@ -543,6 +548,8 @@ class FakeOpenD:
         return out
 
     def _do_subscribe(self, c: str):
+        if c in self.subscribe_raise:
+            raise self.subscribe_raise.pop(c)
         if c in self.subscribe_errors:
             return self.subscribe_errors.pop(c)
         if self.sub_limit is not None and len(self.subscribed) >= self.sub_limit:
@@ -570,6 +577,8 @@ class FakeOpenD:
         out: dict = {}
         for c in codes:
             self.unsubscribe_calls.append(c)
+            if self.unsubscribe_raise is not None:
+                raise self.unsubscribe_raise
             if self.unsubscribe_errors:
                 out[c] = self.unsubscribe_errors.pop(0)
             elif c in self.subscribed:
@@ -1018,3 +1027,65 @@ async def test_gen_stale_ignored():
     await svc.drain()
     assert len(ws.frames("assign")) == assigns_before
     assert ws.last("assign")["gen"] == 5
+
+
+@pytest.mark.asyncio
+async def test_subscribe_rejected_unknown_code_via_error_string():
+    """Verified at snapshot, then subscribe rejects the code as invalid →
+    rejected/unknown_symbol permanently (class-share passthrough)."""
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS)
+    fake.subscribe_errors["US.BRK.B"] = "invalid code US.BRK.B"
+    svc = await _settled_service(fake)
+    ws = FakeWS()
+    await svc.on_ws_connect(ws)
+    await _want(svc, ws, 1, ["AAPL", "BRK.B"])
+    await svc.drain()
+    last = ws.last("assign")
+    assert last is not None
+    assert last["ok"] == ["AAPL"]
+    assert {"symbol": "BRK.B", "reason": "unknown_symbol"} in last["rejected"]
+    # Permanent: no re-subscribe storms.
+    await svc.tick_unsubscribes_once()
+    await svc.drain()
+    assert fake.subscribe_calls.count("US.BRK.B") == 1
+
+
+@pytest.mark.asyncio
+async def test_subscribe_raises_not_found_unknown_symbol():
+    """OpenDNotFoundError on subscribe classifies by type, not message."""
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS)
+    fake.subscribe_raise["US.BRK.B"] = OpenDNotFoundError("US.BRK.B")
+    svc = await _settled_service(fake)
+    ws = FakeWS()
+    await svc.on_ws_connect(ws)
+    await _want(svc, ws, 1, ["AAPL", "BRK.B"])
+    await svc.drain()
+    last = ws.last("assign")
+    assert last is not None
+    assert last["ok"] == ["AAPL"]
+    assert {"symbol": "BRK.B", "reason": "unknown_symbol"} in last["rejected"]
+    assert fake.subscribe_calls.count("US.BRK.B") == 1
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_raises_not_found_clears_record():
+    """OpenDNotFoundError on unsubscribe resolves the sub the same as a
+    'not subscribed' reply."""
+    clock = Clock(1000.0)
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS)
+    svc = await _settled_service(fake, clock=clock)
+    ws = FakeWS()
+    await svc.on_ws_connect(ws)
+    await _want(svc, ws, 1, ["AAPL", "MSFT"])
+    await svc.drain()
+    clock.advance(200)
+    await _want(svc, ws, 2, ["AAPL"])
+    fake.unsubscribe_raise = OpenDNotFoundError("US.MSFT")
+    for _ in range(120):
+        if "US.MSFT" in fake.unsubscribe_calls:
+            break
+        clock.advance(1)
+        await svc.tick_unsubscribes_once()
+        await svc.drain()
+    assert "US.MSFT" in fake.unsubscribe_calls
+    assert not svc.admission.state("MSFT").subscribed
