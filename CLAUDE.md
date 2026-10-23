@@ -38,7 +38,7 @@ Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` fi
 ## Brokers
 
 - **IB** (primary) — quotes, chains, execution, portfolio. Never bypassed.
-- **Futu** (read-only) — positions snapshot via local Futu OpenD. Surfaces as a separate account tab. No order execution and no quote feed; it reads positions and historical deals (`xenon-futu-history-sync`). Silent degrade when OpenD unreachable.
+- **Futu** (read-only for trading) — positions snapshot via local Futu OpenD. Surfaces as a separate account tab. No order execution; it reads positions and historical deals (`xenon-futu-history-sync`). Silent degrade when OpenD unreachable. Quote feed: the `futu-quotes` service (`xenon-futu-quotes`, `src/xenon/futu_quotes/`) streams US stock/ETF QUOTE pushes during RTH to the realtime relay, which serves them only to `X-API-Key` clients that opt in with `?quotes=futu-first` (argon). Browsers stay on IB. Contract: `docs/architecture/futu-quotes.md`; runbook: `docs/runbooks/futu-quotes.md`.
 
 Every execution/portfolio row carries `broker`, `account_env`, `broker_account` columns so paper and live data never blend in a shared Postgres. Resolve scope via `AccountScope` (`src/xenon/execution/account_scope.py`); FastAPI depends on `get_account_scope`, sync subprocesses read `XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`. Full policy: `docs/architecture/production-database-strategy.md` § Broker Account Scope.
 
@@ -52,7 +52,7 @@ Every execution/portfolio row carries `broker`, `account_env`, `broker_account` 
 ## Data Sources
 
 1. **Interactive Brokers** — real-time quotes, chains, execution, live portfolio. Primary.
-2. **Futu OpenD** — read-only positions snapshot for the Futu account tab.
+2. **Futu OpenD** — read-only positions snapshot for the Futu account tab, and RTH US stock/ETF quotes for opted-in relay service clients (`futu-quotes`; quota 1 per symbol, ceiling `FUTU_QUOTE_QUOTA`=800).
 3. **Unusual Whales (`$UW_TOKEN`)** — dark-pool flow for `xenon-portfolio-report`, analyst ratings for the Ratings tab (FastAPI `GET /ticker/ratings`, `src/xenon/api/routes/ratings.py`), and ticker info / news / seasonality / previous-close routes in Next.js. Not used for signal generation (removed in the pure-portfolio pivot).
 4. **IB Flex Query** — historical fills audit overlay (`xenon-blotter-history`).
 

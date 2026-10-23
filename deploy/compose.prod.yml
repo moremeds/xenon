@@ -125,6 +125,8 @@ services:
       XENON_IB_CLIENT_ID_BASE: "0"
       # Same reason: the default 127.0.0.1:8321 is the relay itself, not the api.
       TICKET_VALIDATE_URL: http://api:8321/ws-ticket/validate
+      # Futu-first quotes for opted-in service clients; unset = IB only.
+      FUTU_QUOTES_URL: ws://futu-quotes:8767
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
@@ -138,7 +140,31 @@ services:
       com.centurylinklabs.watchtower.enable: "true"
     restart: unless-stopped
 
-  # Stage C auto-deploy. Label-gated so ONLY the three services above are
+  # Futu OpenD → relay quote source (docs/architecture/futu-quotes.md). Same
+  # image as the api. Explicit env only, no env_file: the quote service must
+  # never see trading secrets. Internal port 8767, not published.
+  futu-quotes:
+    image: ghcr.io/moremeds/xenon-api:latest
+    command: ["xenon-futu-quotes"]
+    environment:
+      FUTU_OPEND_HOST: host.docker.internal
+      FUTU_OPEND_PORT: "11111"
+      FUTU_QUOTES_HOST: "0.0.0.0"
+      FUTU_QUOTES_PORT: "8767"
+      FUTU_QUOTE_QUOTA: "800"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8767), 2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    restart: unless-stopped
+
+  # Stage C auto-deploy. Label-gated so ONLY the four services above are
   # watched — migrator and the trading-* stack are never auto-updated.
   watchtower:
     image: containrrr/watchtower:1.7.1
