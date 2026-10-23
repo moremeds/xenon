@@ -5,6 +5,9 @@
 // We record it per symbol and expose it as `mdType` in the per-symbol
 // status/snapshot payload. It resets on reconnect or resubscribe.
 
+// Snapshot and live request ids are tracked separately: the callback's reqId
+// must match the live tickerId for live state to update, so a concurrent
+// snapshot on the same symbol can't overwrite or manufacture live evidence.
 export function recordMdType(
   { requestIdToSymbol, symbolStates, snapshotRequests },
   reqId,
@@ -13,7 +16,7 @@ export function recordMdType(
   const symbol = requestIdToSymbol.get(reqId);
   if (!symbol) return null;
   const live = symbolStates.get(symbol);
-  if (live) live.mdType = mdType;
+  if (live && live.tickerId === reqId) live.mdType = mdType;
   const snap = snapshotRequests?.get(reqId);
   if (snap?.data) snap.data.mdType = mdType;
   return symbol;

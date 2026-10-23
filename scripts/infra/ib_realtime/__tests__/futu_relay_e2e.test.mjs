@@ -394,10 +394,11 @@ test("indexes never enter want and never receive futu ticks", async () => {
   for (const w of futuWants) {
     assert.ok(!w.symbols.includes("VIX"), "VIX leaked into want");
   }
-  // Even if the service volunteers it in ok, the pinned key never routes.
+  // Even if the service volunteers it in ok (valid current-gen assign), the
+  // pinned key never routes.
   futuSend({
     type: "assign",
-    gen: (futuWants.at(-1)?.gen ?? 0) + 100,
+    gen: futuWants.at(-1)?.gen ?? 0,
     ok: ["VIX"],
     pending: [],
     rejected: [],
@@ -409,6 +410,55 @@ test("indexes never enter want and never receive futu ticks", async () => {
     opted.batches().some((b) => b.updates?.VIX),
     false,
     "index received a futu tick",
+  );
+  opted.close();
+});
+
+test("same-gen assign partition moves apply without a new want", async () => {
+  futuHealthOn = true;
+  const opted = await connectRelay({ apiKey: API_KEY, quotes: "futu-first" });
+  subscribe(opted, ["COST"]);
+  await waitFor(() => futuWants.at(-1)?.symbols?.includes("COST"));
+  const gen = futuWants.at(-1).gen;
+
+  // The service keeps the subscription pending, then completes it — SAME gen.
+  futuSend({
+    type: "assign",
+    gen,
+    ok: [],
+    pending: [{ symbol: "COST", reason: "session" }],
+    rejected: [],
+  });
+  await sleep(HD + 300);
+  futuSend({ type: "batch", updates: { COST: { symbol: "COST", last: 900 } } });
+  await sleep(200);
+  assert.equal(
+    opted.batches().some((b) => b.updates?.COST),
+    false,
+    "pending symbol delivered a futu tick",
+  );
+
+  futuSend({ type: "assign", gen, ok: ["COST"], pending: [], rejected: [] });
+  await sleep(HD + 300);
+  futuSend({ type: "batch", updates: { COST: { symbol: "COST", last: 901 } } });
+  await waitFor(() => opted.batches().some((b) => b.updates?.COST));
+
+  // Same-gen session pullback — ok→pending fails back to IB immediately.
+  const n = opted.batches().length;
+  futuSend({
+    type: "assign",
+    gen,
+    ok: [],
+    pending: [{ symbol: "COST", reason: "session" }],
+    rejected: [],
+  });
+  await sleep(HD + 300);
+  futuSend({ type: "batch", updates: { COST: { symbol: "COST", last: 902 } } });
+  await sleep(300);
+  assert.equal(
+    opted.batches().length,
+    n,
+    "futu tick delivered after same-gen session pullback",
   );
   opted.close();
 });
@@ -431,7 +481,7 @@ test("browser client cannot opt in even when the service claims ok", async () =>
   const n = browser.batches().length;
   futuSend({
     type: "assign",
-    gen: (futuWants.at(-1)?.gen ?? 0) + 100,
+    gen: futuWants.at(-1)?.gen ?? 0,
     ok: ["WMT"],
     pending: [],
     rejected: [],

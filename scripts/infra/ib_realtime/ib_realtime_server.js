@@ -58,7 +58,7 @@ import { createSubscriberRegistry } from "./subscriber_registry.js";
 import { createLiveness } from "./liveness.js";
 import { createFutuRouting, FUTU_HOLD_DOWN_MS } from "./futu_routing.js";
 import { createFutuQuotesClient } from "./futu_quotes_client.js";
-import { recordMdType } from "./md_type.js";
+import { recordMdType, resetMdType } from "./md_type.js";
 import { authorizeUpgrade } from "./ws_upgrade_auth.js";
 import { resolveRelayClientIds } from "./client_id_zone.js";
 
@@ -865,7 +865,7 @@ function startLiveSubscription(key, ibContract) {
   const nextTickerId = (nextRequestId += 1);
   const state = existing;
   state.lastAccessAt = Date.now(); // subscribe counts as access (LRU heat)
-  state.mdType = null; // effective type is per-request; IB re-reports it
+  resetMdType(state); // effective type is per-request; IB re-reports it
 
   if (state.tickerId != null) {
     try {
@@ -917,7 +917,7 @@ function stopLiveSubscription(symbol) {
 
 function cleanupSymbolStateForReconnect() {
   for (const state of symbolStates.values()) {
-    state.mdType = null; // per-request — stale values must not survive resubscribe
+    resetMdType(state); // per-request — stale values must not survive resubscribe
     if (state.tickerId != null) {
       try {
         ib.cancelMktData(state.tickerId);
@@ -1508,7 +1508,7 @@ function evictLine(key) {
   }
   requestIdToSymbol.delete(state.tickerId);
   state.tickerId = null;
-  state.mdType = null;
+  resetMdType(state);
   hydrateAndBroadcast(key); // push stale:true to subscribers
 }
 
@@ -1921,7 +1921,7 @@ function dropIbLine(symbol) {
   }
   requestIdToSymbol.delete(state.tickerId);
   state.tickerId = null;
-  state.mdType = null;
+  resetMdType(state);
   verbose(`futu serves ${symbol} — IB line dropped`);
 }
 
@@ -2398,7 +2398,7 @@ function wireIBEvents() {
         if (state && state.tickerId === tickerId) {
           requestIdToSymbol.delete(tickerId);
           state.tickerId = null;
-          state.mdType = null;
+          resetMdType(state);
           hydrateAndBroadcast(symbol); // line died → push stale:true
         }
       } else if (tickerId != null) {
@@ -2413,7 +2413,7 @@ function wireIBEvents() {
         if (state && state.tickerId === tickerId) {
           requestIdToSymbol.delete(tickerId);
           state.tickerId = null;
-          state.mdType = null;
+          resetMdType(state);
           hydrateAndBroadcast(symbol); // line died → push stale:true
         }
       }
@@ -2432,7 +2432,7 @@ function wireIBEvents() {
         if (state && state.tickerId === tickerId) {
           requestIdToSymbol.delete(tickerId);
           state.tickerId = null;
-          state.mdType = null;
+          resetMdType(state);
           hydrateAndBroadcast(symbol); // push stale:true to subscribers now
         }
       }
@@ -2708,6 +2708,7 @@ if (FUTU_QUOTES_URL) {
       const { entered, left, ignored } = futuRouting.applyAssign(
         assign,
         Date.now(),
+        futuClient?.sentGen() ?? 0,
       );
       if (!ignored) {
         verbose(
@@ -2718,7 +2719,7 @@ if (FUTU_QUOTES_URL) {
     },
     onBatch: onFutuBatch,
     onHealth: (health) => {
-      futuRouting.noteHealth(health, Date.now());
+      futuRouting.noteHealth(health);
       reconcileFutuRoutes();
       broadcastStatus();
     },

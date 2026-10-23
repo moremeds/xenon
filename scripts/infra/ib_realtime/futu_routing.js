@@ -25,10 +25,8 @@ export function createFutuRouting({ holdDownMs = FUTU_HOLD_DOWN_MS } = {}) {
   const ibPinned = new Set(); // symbol keys that never route to Futu
   let okSet = new Set(); // symbols in `ok` of the latest accepted assign
   const okSince = new Map(); // symbol -> ms it entered ok (current up-epoch)
-  let lastAssignGen = 0;
   let socketOpen = false;
   let up = false; // health-driven: fresh health + opend_connected
-  let lastHealthAt = null;
   let lastHealth = null; // { opend_connected, quota }
   const futuStates = new Map(); // symbol -> latest Futu PriceData
 
@@ -58,7 +56,6 @@ export function createFutuRouting({ holdDownMs = FUTU_HOLD_DOWN_MS } = {}) {
     okSet = new Set();
     okSince.clear();
     futuStates.clear();
-    lastAssignGen = 0; // a new connection epoch restarts gen at 1
   }
 
   function noteSocket(open) {
@@ -66,9 +63,8 @@ export function createFutuRouting({ holdDownMs = FUTU_HOLD_DOWN_MS } = {}) {
     if (!socketOpen) clearUp();
   }
 
-  function noteHealth(health, now) {
+  function noteHealth(health) {
     lastHealth = health;
-    lastHealthAt = now;
     if (health?.opend_connected === false) {
       clearUp();
     } else if (socketOpen) {
@@ -84,12 +80,15 @@ export function createFutuRouting({ holdDownMs = FUTU_HOLD_DOWN_MS } = {}) {
     return up;
   }
 
-  function applyAssign(assign, now) {
+  // An assign is valid only for the latest want gen sent on the current
+  // socket (passed in by the caller, which owns the counter). The service
+  // sends repeated assigns for one want gen as partitions move — pending→ok,
+  // ok→pending/session — and every one of them applies.
+  function applyAssign(assign, now, wantGen) {
     const gen = Number(assign?.gen);
-    if (!Number.isFinite(gen) || gen <= lastAssignGen) {
+    if (!Number.isFinite(gen) || gen !== wantGen) {
       return { entered: [], left: [], ignored: true };
     }
-    lastAssignGen = gen;
     const ok = Array.isArray(assign.ok) ? assign.ok : [];
     const next = new Set(ok);
     const entered = [];

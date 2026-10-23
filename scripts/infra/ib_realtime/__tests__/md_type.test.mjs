@@ -36,6 +36,54 @@ test("unknown reqId is a no-op", () => {
   assert.equal(recordMdType(maps, 999, 1), null);
 });
 
+test("R234-3: snapshot callback does not touch the live request's mdType", () => {
+  // One symbol, two concurrent request ids: reqId 10 is the live stream,
+  // reqId 11 is a one-shot snapshot. requestIdToSymbol maps BOTH to SPX.
+  const maps = setup();
+  maps.symbolStates.set("SPX", { tickerId: 10, mdType: null });
+  maps.requestIdToSymbol.set(10, "SPX");
+  maps.requestIdToSymbol.set(11, "SPX");
+  maps.snapshotRequests.set(11, { data: { symbol: "SPX" } });
+
+  // The live request reports first.
+  recordMdType(maps, 10, 3);
+  assert.equal(maps.symbolStates.get("SPX").mdType, 3);
+
+  // The snapshot's own callback must not manufacture or overwrite live
+  // evidence for the same symbol.
+  recordMdType(maps, 11, 1);
+  assert.equal(maps.symbolStates.get("SPX").mdType, 3);
+  assert.equal(maps.snapshotRequests.get(11).data.mdType, 1);
+});
+
+test("R234-3: live resubscribe waits for its own callback", () => {
+  const maps = setup();
+  const state = { tickerId: 10, mdType: 3 };
+  maps.symbolStates.set("SPX", state);
+  maps.requestIdToSymbol.set(10, "SPX");
+  maps.requestIdToSymbol.set(11, "SPX");
+  maps.snapshotRequests.set(11, { data: { symbol: "SPX" } });
+
+  // Resubscribe: new tickerId, mdType reset (production path = resetMdType).
+  state.tickerId = null;
+  resetMdType(state);
+  state.tickerId = 12;
+  maps.requestIdToSymbol.delete(10);
+  maps.requestIdToSymbol.set(12, "SPX");
+
+  // A late callback for the dead request and for the in-flight snapshot must
+  // not populate the new live request's mdType.
+  recordMdType(maps, 10, 1); // dead reqId — symbol resolves, live id mismatch
+  assert.equal(state.mdType, null);
+  recordMdType(maps, 11, 4); // snapshot's own callback
+  assert.equal(state.mdType, null);
+  assert.equal(maps.snapshotRequests.get(11).data.mdType, 4);
+
+  // The live request's own callback reports.
+  recordMdType(maps, 12, 1);
+  assert.equal(state.mdType, 1);
+});
+
 test("reset clears mdType on resubscribe/reconnect", () => {
   const state = { tickerId: 1, mdType: 3 };
   resetMdType(state);

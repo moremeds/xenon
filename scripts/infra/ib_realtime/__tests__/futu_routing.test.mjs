@@ -4,23 +4,28 @@ import { createFutuRouting, FUTU_HOLD_DOWN_MS } from "../futu_routing.js";
 
 // Futu provider routing — pure state machine. `now` is always caller-passed.
 // Covers: client preference (opted-in API-key vs browser/un-opted), the want
-// set, assign partitions, the 60 s hold-down, per-source failover, and
-// IB-demand recomputation (the "IB line count drops" rule).
+// set, assign partitions for the CURRENT want gen (R234-1: same gen repeats,
+// every partition change applies), the 60 s hold-down, per-source failover,
+// and IB-demand recomputation (the "IB line count drops" rule).
 
 const HD = 1_000; // small hold-down for tests
 
 function setup() {
-  return createFutuRouting({ holdDownMs: HD, healthDeadlineMs: 15_000 });
+  return createFutuRouting({ holdDownMs: HD });
 }
 
 const futuClientA = { name: "argon" };
 const apiKeyClientB = { name: "apex" }; // api-key but NOT opted in
 const browserClient = { name: "browser" };
 
-function liveFutu(r, okSymbols, now = 0) {
+function liveFutu(r, okSymbols, now = 0, wantGen = 1) {
   r.noteSocket(true);
-  r.noteHealth({ opend_connected: true, quota: { ceiling: 800 } }, now);
-  r.applyAssign({ gen: 1, ok: okSymbols, pending: [], rejected: [] }, now);
+  r.noteHealth({ opend_connected: true, quota: { ceiling: 800 } });
+  r.applyAssign(
+    { gen: wantGen, ok: okSymbols, pending: [], rejected: [] },
+    now,
+    wantGen,
+  );
 }
 
 test("want set = futu-first clients' symbols minus IB-pinned", () => {
@@ -80,15 +85,16 @@ test("IB demand drops for futu-served symbols (line freed)", () => {
 test("quota rejection keeps symbol on IB", () => {
   const r = setup();
   r.setPref(futuClientA, "futu-first");
-  liveFutu(r, [], 0); // up, but nothing in ok
+  liveFutu(r, [], 0, 7); // up, but nothing in ok
   r.applyAssign(
     {
-      gen: 2,
+      gen: 7,
       ok: [],
       pending: [],
       rejected: [{ symbol: "HYG", reason: "quota" }],
     },
     10,
+    7,
   );
   const subs = new Set([futuClientA]);
   assert.equal(r.futuLive("HYG", HD + 100), false);
@@ -104,12 +110,16 @@ test("OpenD loss / socket loss fails over to IB immediately", () => {
   assert.equal(r.futuLive("AAPL", t), true);
   assert.equal(r.ibDemand("AAPL", subs, t), false);
   // health frame with opend_connected:false
-  r.noteHealth({ opend_connected: false, quota: null }, t + 10);
+  r.noteHealth({ opend_connected: false, quota: null });
   assert.equal(r.futuLive("AAPL", t + 10), false);
   assert.equal(r.ibDemand("AAPL", subs, t + 10), true);
   // socket loss path
-  r.noteHealth({ opend_connected: true, quota: {} }, t + 20);
-  r.applyAssign({ gen: 2, ok: ["AAPL"], pending: [], rejected: [] }, t + 20);
+  r.noteHealth({ opend_connected: true, quota: {} });
+  r.applyAssign(
+    { gen: 2, ok: ["AAPL"], pending: [], rejected: [] },
+    t + 20,
+    2,
+  );
   assert.equal(r.futuLive("AAPL", t + 20 + HD + 1), true);
   r.noteSocket(false);
   assert.equal(r.futuLive("AAPL", t + 20 + HD + 1), false);
@@ -119,7 +129,7 @@ test("health deadline marks futu down (stalled service)", () => {
   const r = setup();
   r.setPref(futuClientA, "futu-first");
   liveFutu(r, ["AAPL"], 0);
-  r.noteDown("health_deadline", 100);
+  r.noteDown("health_deadline");
   assert.equal(r.isUp(), false);
   assert.equal(r.futuLive("AAPL", 100 + HD + 1), false);
 });
@@ -128,25 +138,98 @@ test("recovery: fresh health + new ok + full hold-down", () => {
   const r = setup();
   r.setPref(futuClientA, "futu-first");
   liveFutu(r, ["AAPL"], 0);
-  r.noteDown("socket_close", 50);
+  r.noteDown("socket_close");
   assert.equal(r.futuLive("AAPL", 2000), false);
-  // Recovery at t=1000: ok at 1000, live only at 1000+HD
+  // Recovery at t=1000 on a fresh want gen: ok at 1000, live only at 1000+HD
   r.noteSocket(true);
-  r.noteHealth({ opend_connected: true, quota: {} }, 1000);
-  r.applyAssign({ gen: 1, ok: ["AAPL"], pending: [], rejected: [] }, 1000);
+  r.noteHealth({ opend_connected: true, quota: {} });
+  r.applyAssign({ gen: 1, ok: ["AAPL"], pending: [], rejected: [] }, 1000, 1);
   assert.equal(r.futuLive("AAPL", 1000 + HD - 1), false);
   assert.equal(r.futuLive("AAPL", 1000 + HD), true);
 });
 
-test("symbol leaving ok mid-epoch needs a fresh hold-down to return", () => {
+test("same-gen assign applies partition changes: pending→ok→session", () => {
   const r = setup();
   r.setPref(futuClientA, "futu-first");
-  liveFutu(r, ["AAPL"], 0);
-  r.applyAssign({ gen: 2, ok: [], pending: [], rejected: [] }, HD + 1);
+  r.noteSocket(true);
+  r.noteHealth({ opend_connected: true, quota: {} });
+  const G = 3; // the current want gen — the service sends several assigns for it
+
+  // First assign: still pending (subscription not yet admitted).
+  const p1 = r.applyAssign(
+    { gen: G, ok: [], pending: [{ symbol: "AAPL", reason: "session" }], rejected: [] },
+    0,
+    G,
+  );
+  assert.equal(p1.ignored, false);
+  assert.equal(r.futuLive("AAPL", HD + 10), false);
+
+  // Same-gen assign completing the admission — accepted, hold-down starts now.
+  const p2 = r.applyAssign(
+    { gen: G, ok: ["AAPL"], pending: [], rejected: [] },
+    100,
+    G,
+  );
+  assert.deepEqual(p2.entered, ["AAPL"]);
+  assert.equal(r.futuLive("AAPL", 100 + HD - 1), false);
+  assert.equal(r.futuLive("AAPL", 100 + HD), true);
+
+  // Same-gen session pullback — symbol leaves ok → back to IB immediately.
+  r.applyAssign(
+    { gen: G, ok: [], pending: [{ symbol: "AAPL", reason: "session" }], rejected: [] },
+    2000,
+    G,
+  );
+  assert.equal(r.futuLive("AAPL", 2000 + HD), false);
+});
+
+test("same-gen no-change assign does NOT restart the hold-down", () => {
+  const r = setup();
+  r.setPref(futuClientA, "futu-first");
+  r.noteSocket(true);
+  r.noteHealth({ opend_connected: true, quota: {} });
+  const G = 5;
+  r.applyAssign({ gen: G, ok: ["AAPL"], pending: [], rejected: [] }, 0, G);
+  // Periodic quota-refresh assign, same ok — okSince must stay at t=0.
+  r.applyAssign({ gen: G, ok: ["AAPL"], pending: [], rejected: [] }, 900, G);
+  assert.equal(r.futuLive("AAPL", HD), true);
+});
+
+test("symbol leaving ok needs a fresh hold-down to return", () => {
+  const r = setup();
+  r.setPref(futuClientA, "futu-first");
+  liveFutu(r, ["AAPL"], 0, 2);
+  r.applyAssign({ gen: 2, ok: [], pending: [], rejected: [] }, HD + 1, 2);
   assert.equal(r.futuLive("AAPL", HD + 2), false);
-  r.applyAssign({ gen: 3, ok: ["AAPL"], pending: [], rejected: [] }, HD + 5);
+  r.applyAssign({ gen: 2, ok: ["AAPL"], pending: [], rejected: [] }, HD + 5, 2);
   assert.equal(r.futuLive("AAPL", HD + 5 + HD - 1), false);
   assert.equal(r.futuLive("AAPL", HD + 5 + HD), true);
+});
+
+test("assigns for a gen other than the current want gen are rejected", () => {
+  const r = setup();
+  r.noteSocket(true);
+  r.noteHealth({ opend_connected: true, quota: {} });
+  // Current want gen is 3 — a delayed assign for the previous want (gen 2)
+  // and a fabricated future gen are both ignored.
+  assert.equal(
+    r.applyAssign({ gen: 2, ok: ["AAPL"], pending: [], rejected: [] }, 0, 3)
+      .ignored,
+    true,
+  );
+  assert.equal(
+    r.applyAssign({ gen: 4, ok: ["AAPL"], pending: [], rejected: [] }, 1, 3)
+      .ignored,
+    true,
+  );
+  assert.equal(r.futuLive("AAPL", HD + 10), false);
+  // The current-gen assign applies.
+  assert.equal(
+    r.applyAssign({ gen: 3, ok: ["AAPL"], pending: [], rejected: [] }, 2, 3)
+      .ignored,
+    false,
+  );
+  assert.equal(r.futuLive("AAPL", HD + 2), true);
 });
 
 test("indexes stay on IB (pinned symbol never futu-live)", () => {
@@ -160,20 +243,11 @@ test("indexes stay on IB (pinned symbol never futu-live)", () => {
   assert.equal(r.ibDemand("SPX", subs, HD + 1), true);
 });
 
-test("stale gen assign is ignored", () => {
-  const r = setup();
-  liveFutu(r, ["AAPL"], 0);
-  r.applyAssign({ gen: 1, ok: [], pending: [], rejected: [] }, 10); // same gen
-  assert.equal(r.futuLive("AAPL", HD + 1), true); // unchanged
-  r.applyAssign({ gen: 0, ok: [], pending: [], rejected: [] }, 11); // lower gen
-  assert.equal(r.futuLive("AAPL", HD + 1), true);
-});
-
 test("down clears futu tick cache", () => {
   const r = setup();
   liveFutu(r, ["AAPL"], 0);
   r.recordTick("AAPL", { last: 1 });
-  r.noteDown("socket_close", 10);
+  r.noteDown("socket_close");
   assert.equal(r.futuData("AAPL"), undefined);
 });
 
@@ -185,13 +259,13 @@ test("status reports connected/opend_connected/quota", () => {
     quota: null,
   });
   r.noteSocket(true);
-  r.noteHealth({ opend_connected: true, quota: { remain: 800 } }, 5);
+  r.noteHealth({ opend_connected: true, quota: { remain: 800 } });
   assert.deepEqual(r.status(), {
     connected: true,
     opend_connected: true,
     quota: { remain: 800 },
   });
-  r.noteDown("health_deadline", 10);
+  r.noteDown("health_deadline");
   assert.deepEqual(r.status(), {
     connected: true,
     opend_connected: false,

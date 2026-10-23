@@ -34,10 +34,10 @@ export function createFutuQuotesClient({
   let open = false;
   let healthy = false; // a fresh health frame arrived this epoch
   let lastPongAt = 0;
-  let lastHealthAt = 0;
   let gen = 0;
   let want = [];
   let pingTimer = null;
+  let healthTimer = null; // armed/reset per health frame — the hard deadline
   let reconnectTimer = null;
   let socketDead = false;
   let lostReason = null; // reason we tore the socket down ourselves
@@ -73,6 +73,21 @@ export function createFutuQuotesClient({
     onDown(reason);
   }
 
+  function armHealthDeadline() {
+    clearHealthDeadline();
+    healthTimer = setTimeout(() => {
+      healthTimer = null;
+      markDown("health_deadline");
+    }, healthDeadlineMs);
+  }
+
+  function clearHealthDeadline() {
+    if (healthTimer) {
+      clearTimeout(healthTimer);
+      healthTimer = null;
+    }
+  }
+
   function handleSocketLost(reason) {
     if (socketDead) return;
     socketDead = true;
@@ -80,6 +95,7 @@ export function createFutuQuotesClient({
     open = false;
     ws = null;
     stopPing();
+    clearHealthDeadline();
     if (wasOpen) onSocket(false);
     healthy = false;
     onDown(lostReason ?? reason);
@@ -103,11 +119,14 @@ export function createFutuQuotesClient({
     }
     if (!msg || typeof msg !== "object") return;
     if (msg.type === "assign") {
+      // Assigns are valid only for the latest want gen sent on this socket —
+      // the service issues several assigns per gen as partitions move.
+      if (Number(msg.gen) !== gen) return;
       onAssign(msg);
     } else if (msg.type === "batch") {
       if (msg.updates && typeof msg.updates === "object") onBatch(msg.updates);
     } else if (msg.type === "health") {
-      lastHealthAt = Date.now();
+      armHealthDeadline(); // every valid health frame re-arms the deadline
       if (msg.opend_connected === false) {
         markDown("opend_lost");
       } else {
@@ -133,9 +152,6 @@ export function createFutuQuotesClient({
       }
       return; // the close event runs handleSocketLost
     }
-    if (healthy && now - lastHealthAt > healthDeadlineMs) {
-      markDown("health_deadline");
-    }
     try {
       sock.ping();
     } catch {
@@ -160,7 +176,6 @@ export function createFutuQuotesClient({
     socketDead = false;
     gen = 0; // each connection is an epoch with its own gen counter
     lastPongAt = Date.now();
-    lastHealthAt = Date.now(); // grace: deadline counted from open
     const sock = new WebSocketImpl(url);
     ws = sock;
     sock.on("open", () => {
@@ -170,11 +185,15 @@ export function createFutuQuotesClient({
       if (want.length) sendWant(); // re-arm on reconnect; fresh epoch starts empty
       onSocket(true);
       startPing();
+      armHealthDeadline(); // grace window for the first health frame
     });
     sock.on("pong", () => {
       lastPongAt = Date.now();
     });
-    sock.on("message", onMessage);
+    // Messages from a stale (replaced) socket are dropped.
+    sock.on("message", (raw) => {
+      if (ws === sock) onMessage(raw);
+    });
     sock.on("close", () => {
       if (ws === sock) handleSocketLost("socket_close");
     });
@@ -191,6 +210,7 @@ export function createFutuQuotesClient({
   function stop() {
     stopped = true;
     stopPing();
+    clearHealthDeadline();
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -205,5 +225,5 @@ export function createFutuQuotesClient({
     }
   }
 
-  return { start, stop, setWant, isOpen: () => open };
+  return { start, stop, setWant, isOpen: () => open, sentGen: () => gen };
 }
