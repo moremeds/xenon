@@ -13,6 +13,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from xenon.api import trading_mode
+from xenon.execution import broker_capabilities
 from xenon.execution.account_scope import AccountScope, resolve_from_app_state
 from xenon.execution.preflight import ReasonCode
 
@@ -98,7 +99,48 @@ def require_mode_verified(request: Request) -> None:
     _check_mode_verified(request.app.state)
 
 
-def ensure_order_allowed(kind: str, state) -> JSONResponse | None:
+_KIND_TO_OP = {
+    "order placement": "place_single",
+    "order cancellation": "cancel",
+    "order modification": "modify",
+    "order replacement": "replace",
+    "naked-short audit cancel": "cancel",
+}
+
+
+def _op_for_kind(kind: str) -> str | None:
+    """Capability operation for an `ensure_order_allowed` kind; None if unknown."""
+    if kind.startswith("wizard"):
+        return "wizard"
+    return _KIND_TO_OP.get(kind)
+
+
+def _broker_403(broker: str, kind: str, cause: str) -> JSONResponse:
+    message = f"{broker} is read-only for {kind}" + (f": {cause}" if cause else "")
+    return JSONResponse(
+        status_code=403,
+        content={
+            "detail": message,
+            "reason_code": ReasonCode.READ_ONLY_BROKER.value,
+            "reason_detail": message,
+        },
+    )
+
+
+def broker_capability_denial(broker: str, op: str | None, kind: str) -> JSONResponse | None:
+    """Capability check for one broker operation (`broker_capabilities`).
+
+    `XENON_READ_ONLY=1` wins first (403 `READ_ONLY_MODE`). A denied
+    capability → 403 JSONResponse with top-level `reason_code`
+    `READ_ONLY_BROKER`. Returns None when the operation is allowed.
+    """
+    if is_read_only():
+        return read_only_403()
+    ok, _, cause = broker_capabilities.evaluate(broker, op)
+    return None if ok else _broker_403(str(broker or "").upper(), kind, cause)
+
+
+def ensure_order_allowed(kind: str, state, op: str | None = None) -> JSONResponse | None:
     """Single guard for every order-mutating path.
 
     Called at the top of each order write entry point (HTTP routes and the
@@ -106,9 +148,13 @@ def ensure_order_allowed(kind: str, state) -> JSONResponse | None:
     going through a route). Checks, in order:
 
     1. `XENON_READ_ONLY=1` → 403 `READ_ONLY_MODE` JSONResponse.
-    2. Non-IB `app.state.broker` → 403 `READ_ONLY_BROKER` JSONResponse.
-       Broker denial precedes the mode check: FUTU carries no IB trading
-       mode to verify (see test_place_quote_gate.py
+    2. Non-IB `app.state.broker` → capability check
+       (`broker_capability_denial`; `op` defaults to the operation `kind`
+       names) → 403 `READ_ONLY_BROKER` JSONResponse. No Futu dispatch
+       exists in the order cores yet, so a non-IB broker is refused even
+       when its capability allows the operation. Broker denial precedes
+       the mode check: FUTU carries no IB trading mode to verify (see
+       test_place_quote_gate.py
        `test_futu_scope_rejects_before_ib_mode_verification`).
     3. Unverified trading mode → HTTPException 503 (same detail as
        `require_mode_verified`).
@@ -122,14 +168,8 @@ def ensure_order_allowed(kind: str, state) -> JSONResponse | None:
         return read_only_403()
     broker = str(getattr(state, "broker", "IB") or "IB").upper()
     if broker != "IB":
-        return JSONResponse(
-            status_code=403,
-            content={
-                "detail": f"{broker} is read-only for {kind}",
-                "reason_code": ReasonCode.READ_ONLY_BROKER.value,
-                "reason_detail": f"{broker} is read-only for {kind}",
-            },
-        )
+        denial = broker_capability_denial(broker, op or _op_for_kind(kind), kind)
+        return denial or _broker_403(broker, kind, "order dispatch for this broker is not wired")
     _check_mode_verified(state)
     return None
 

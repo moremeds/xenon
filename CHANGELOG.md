@@ -5,6 +5,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+- **Futu order capability table, default off (no Futu order path yet).** New `execution/broker_capabilities.py` lists per-broker operations: IB keeps every operation; FUTU `place_single` / `cancel` / `modify` are allowed only with `XENON_FUTU_TRADING=1` and a valid selected scope, and FUTU `replace` / `combo` / `wizard` are never allowed. New `execution/futu_scope.py`: `configured_scope()` reads `FUTU_TRADE_ACC_ID` (exact nonzero digits) + `FUTU_TRADE_ENV` (SIMULATE → paper, REAL → live), independent of the trading flag; `verify_live()` matches that scope against `get_acc_list()` rows (exact acc_id, env, US authority, ACTIVE; no first-account fallback). `guards.ensure_order_allowed` checks the capability for non-IB brokers (403 top-level `reason_code: READ_ONLY_BROKER`, `XENON_READ_ONLY` first) and still refuses every Futu write, because the order cores have no Futu dispatch.
+
 ## [0.14.0] — 2026-10-23
 
 Summary: the wizard protect take-profit goes through the Gate-4 reservation; the Futu closed-trades matcher applies reviewed splits and option re-codes; the IB NAV backfill works again and can load historical deposits/withdrawals into `ib_cash_flow`; docs match the real Postgres roles. No Alembic migration and no compose change.
