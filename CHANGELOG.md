@@ -5,6 +5,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+- New `xenon.futu_quotes` package: a `futu-quotes` service that streams Futu OpenD US stock/ETF `SubType.QUOTE` subscriptions to the ib_realtime relay over one internal WebSocket (`assign`/`batch`/`health` frames per `docs/architecture/futu-quotes.md`). Handles admission with a quota ceiling, epoch/`gen` fencing, 60 s minimum-lifetime + 60 s grace unsubscriptions, RTH-only session gating from `get_global_state().market_us`, last-value batching at ≤1 batch/100 ms, ET→UTC source timestamps with DST handling, and a per-symbol high-water mark that drops replayed stale quotes. Entry point `xenon-futu-quotes` is registered by the integration PR.
+
 ## [0.14.0] — 2026-10-23
 
 Summary: the wizard protect take-profit goes through the Gate-4 reservation; the Futu closed-trades matcher applies reviewed splits and option re-codes; the IB NAV backfill works again and can load historical deposits/withdrawals into `ib_cash_flow`; docs match the real Postgres roles. No Alembic migration and no compose change.
