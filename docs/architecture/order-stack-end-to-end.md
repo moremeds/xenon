@@ -166,7 +166,8 @@ The flow is **strictly one-way for order events.** There is no live push from Fa
 
 Important invariants (see `src/xenon/db/schema.py:222–248`):
 
-- `CHECK ck_order_sub_broker_ib_only` — only IB orders. Futu is read-only.
+- `CHECK ck_order_sub_broker` — `broker IN ('IB','FUTU')` (migration `2026_10_24_futu_order_sub`; was `ck_order_sub_broker_ib_only`). No Futu writer exists yet: Futu order capability is default-off (`execution/broker_capabilities.py`) and `ensure_order_allowed` still refuses every Futu write.
+- `UNIQUE uq_order_sub_broker_order_id(broker, account_env, broker_account, broker_order_id) WHERE broker_order_id IS NOT NULL` — the broker's own order id (Futu) as a string.
 - `CHECK ck_order_sub_account_env IN ('paper','live','sim','legacy_unknown')`.
 - `UNIQUE uq_order_sub_user_attempt(broker, account_env, broker_account, user_id, client_attempt_id)` — the idempotency key. `reserve_attempt` uses ON CONFLICT DO NOTHING against this.
 - `UNIQUE uq_order_sub_submission_scope(submission_id, broker, account_env, broker_account)` — the FK target for `regime_overrides`. Logically redundant under the PK, but Postgres requires an explicit UNIQUE for composite FKs (`schema.py:235–244`).
