@@ -28,10 +28,13 @@ from xenon.futu_quotes.admission import (
     ticker_of,
 )
 from xenon.futu_quotes.opend import (
+    OpAborted,
     OpenDDownError,
     OpenDError,
     OpenDLike,
     OpenDNotFoundError,
+    OpenDProviderError,
+    OpenDTransientError,
     classify_subscribe_error,
     classify_unsubscribe_error,
 )
@@ -90,6 +93,16 @@ class Batcher:
             return None
         return {"updates": updates, "marks": marks}
 
+    def drop(self, symbol: str) -> None:
+        """Discard a buffered value the moment its symbol leaves ``ok`` —
+        a flush-time fence alone cannot catch remove→re-add in one window."""
+        self.pending.pop(symbol, None)
+
+    def clear(self) -> None:
+        """Drop every buffered value (owner/session boundary)."""
+        self.pending.clear()
+        self.window_start = None
+
 
 class FutuQuotesService:
     """Core service; WS/socket plumbing is injected for tests."""
@@ -113,6 +126,7 @@ class FutuQuotesService:
         self.highwater = HighWaterMark()
 
         self.conn: Any = None
+        self._ok_set: set[str] = set()
         self._tasks: set[asyncio.Task] = set()
         self._eval_task: Optional[asyncio.Task] = None
         self._eval_again = False
@@ -132,6 +146,11 @@ class FutuQuotesService:
         self.conn = ws
         self.admission.gen = 0
         self.admission.release_desired()
+        # The new owner must not inherit a prior owner's buffered quotes
+        # or replay judgement.
+        self.batcher.clear()
+        self.highwater.reset_all()
+        self._ok_set = set()
         if old is not None and old is not ws:
             try:
                 await old.close()
@@ -198,6 +217,7 @@ class FutuQuotesService:
         """SDK disconnect callback (loop thread)."""
         logger.warning("OpenD connection lost")
         self.admission.mark_disconnected()
+        self.batcher.clear()  # dead-session ticks must not carry over
         self._opend_down.set()
         self._kick()
 
@@ -244,14 +264,21 @@ class FutuQuotesService:
             for _ in range(200):
                 res = self.admission.evaluate(emit_always=self._eval_emit_always)
                 self._eval_emit_always = False
+                # A symbol leaving ok loses its buffered quote NOW — waiting
+                # for the flush-time fence misses remove→re-add in one window.
+                ok_now = set(res.partition["ok"])
+                for s in self._ok_set - ok_now:
+                    self.batcher.drop(s)
+                self._ok_set = ok_now
                 if res.changed and self.conn is not None and self.admission.gen > 0:
                     await self._send(self.admission.assign_frame(res.partition))
+                epoch = self.admission.epoch
                 if res.actions.verify:
-                    self._spawn(self._do_verify(res.actions.verify))
+                    self._spawn(self._do_verify(res.actions.verify, epoch))
                 for sym in res.actions.subscribe:
-                    self._spawn(self._do_subscribe(sym))
+                    self._spawn(self._do_subscribe(sym, epoch))
                 for sym in res.actions.unsubscribe:
-                    self._spawn(self._do_unsubscribe(sym))
+                    self._spawn(self._do_unsubscribe(sym, epoch))
                 await self._emit_health()
                 if not res.changed and not res.actions.any() and not self._eval_again:
                     break
@@ -269,25 +296,30 @@ class FutuQuotesService:
     # provider actions
     # ------------------------------------------------------------------
 
-    async def _do_verify(self, symbols: list[str]) -> None:
+    async def _do_verify(self, symbols: list[str], epoch: int) -> None:
         codes = [self.admission.state(s).code for s in symbols]
         try:
             rows = await self.opend.get_market_snapshot(codes)
         except OpenDDownError:
             self._on_opend_down()
-            for s in symbols:
-                self.admission.verify_result(s, "transient")
+            if epoch == self.admission.epoch:
+                for s in symbols:
+                    self.admission.verify_result(s, "transient")
             return
-        except OpenDNotFoundError:
-            for s in symbols:
-                self.admission.verify_result(s, "unknown_symbol")
-            self._kick()
+        except OpenDTransientError:
+            if epoch == self.admission.epoch:
+                for s in symbols:
+                    self.admission.verify_result(s, "transient")
+                self._kick()
             return
         except OpenDError:
-            for s in symbols:
-                self.admission.verify_result(s, "transient")
-            self._kick()
+            # Whole-call failure — the SDK gives no per-code attribution, so
+            # one bad code must not poison the rest: isolate per code.
+            if epoch == self.admission.epoch:
+                await self._verify_split(symbols, epoch)
             return
+        if epoch != self.admission.epoch:
+            return  # stale-session result
         found = {str(r.get("code")): r for r in rows if isinstance(r, dict)}
         for s in symbols:
             row = found.get(self.admission.state(s).code)
@@ -297,22 +329,75 @@ class FutuQuotesService:
                 self.admission.verify_result(s, _classify_snapshot_row(row))
         self._kick()
 
-    async def _do_subscribe(self, symbol: str) -> None:
-        code = self.admission.state(symbol).code
+    async def _verify_split(self, symbols: list[str], epoch: int) -> None:
+        """A batch snapshot call failed with no per-code detail — retry each
+        code alone so a single bad code cannot reject its batch-mates."""
+        for s in symbols:
+            if epoch != self.admission.epoch:
+                return
+            code = self.admission.state(s).code
+            try:
+                rows = await self.opend.get_market_snapshot([code])
+            except OpenDDownError:
+                self._on_opend_down()
+                self.admission.verify_result(s, "transient")
+            except (OpenDNotFoundError, OpenDProviderError):
+                self.admission.verify_result(s, "unknown_symbol")
+            except OpenDError:
+                self.admission.verify_result(s, "transient")
+            else:
+                row = rows[0] if rows else None
+                self.admission.verify_result(
+                    s,
+                    _classify_snapshot_row(row) if isinstance(row, dict) else "unknown_symbol",
+                )
+            await asyncio.sleep(0)  # yield — the serialized adapter paces calls
+        self._kick()
+
+    async def _do_subscribe(self, symbol: str, epoch: int) -> None:
+        st = self.admission.state(symbol)
+        code = st.code
+
+        def still_wanted() -> bool:
+            """Re-checked under the adapter lock right before the SDK call."""
+            return (
+                epoch == self.admission.epoch
+                and symbol in self.admission.desired
+                and not st.subscribed
+                and self.admission.opend_connected
+                and self.admission.session_open
+            )
+
+        if not still_wanted():
+            st.subscribing = False
+            st.subscribing_reconfirm = False
+            self._kick()
+            return
         try:
-            res = await self.opend.subscribe([code])
+            res = await self.opend.subscribe([code], pre=still_wanted)
+        except OpAborted:
+            st.subscribing = False
+            st.subscribing_reconfirm = False
+            self._kick()
+            return
         except OpenDDownError:
             self._on_opend_down()
             return
         except OpenDNotFoundError as exc:
+            if epoch != self.admission.epoch:
+                return
             # Unknown/invalid code — never retried; lands rejected/unknown_symbol.
             self.admission.subscribe_result(symbol, str(exc), "unknown_symbol")
             self._kick()
             return
         except OpenDError as exc:
+            if epoch != self.admission.epoch:
+                return
             self.admission.subscribe_result(symbol, str(exc), classify_subscribe_error(str(exc)))
             self._kick()
             return
+        if epoch != self.admission.epoch:
+            return  # stale-session completion — never certifies the new one
         err = res.get(code)
         if err is None:
             self.admission.subscribe_result(symbol, None)
@@ -324,22 +409,47 @@ class FutuQuotesService:
             self._spawn(self.refresh_quota_once())
         self._kick()
 
-    async def _do_unsubscribe(self, symbol: str) -> None:
-        code = self.admission.state(symbol).code
+    async def _do_unsubscribe(self, symbol: str, epoch: int) -> None:
+        st = self.admission.state(symbol)
+        code = st.code
+
+        def still_due() -> bool:
+            """Re-checked under the adapter lock right before the SDK call."""
+            return (
+                epoch == self.admission.epoch
+                and symbol not in self.admission.desired
+                and st.subscribed
+                and self.admission.opend_connected
+            )
+
+        if not still_due():
+            st.unsub_inflight = False
+            self._kick()
+            return
         try:
-            res = await self.opend.unsubscribe([code])
+            res = await self.opend.unsubscribe([code], pre=still_due)
+        except OpAborted:
+            st.unsub_inflight = False
+            self._kick()
+            return
         except OpenDDownError:
             self._on_opend_down()
             return
         except OpenDNotFoundError as exc:
+            if epoch != self.admission.epoch:
+                return
             # Code unknown to OpenD ⇒ nothing is subscribed there.
             self.admission.unsubscribe_result(symbol, str(exc), "not_subscribed")
             self._kick()
             return
         except OpenDError as exc:
+            if epoch != self.admission.epoch:
+                return
             self.admission.unsubscribe_result(symbol, str(exc), "provider_error")
             self._kick()
             return
+        if epoch != self.admission.epoch:
+            return  # stale-session completion
         err = res.get(code)
         kind = None if err is None else classify_unsubscribe_error(err)
         self.admission.unsubscribe_result(symbol, err, kind)
@@ -353,6 +463,7 @@ class FutuQuotesService:
 
     async def poll_session_once(self) -> None:
         """get_global_state().market_us ∈ {MORNING, AFTERNOON} ⇒ open."""
+        epoch = self.admission.epoch
         try:
             gs = await self.opend.get_global_state()
             open_ = Admission.session_is_open(gs.get("market_us"))
@@ -361,10 +472,13 @@ class FutuQuotesService:
             return
         except OpenDError:
             open_ = False
+        if epoch != self.admission.epoch:
+            return  # stale-session poll result
         self.admission.set_session_open(open_)
         self._kick()
 
     async def refresh_quota_once(self) -> None:
+        epoch = self.admission.epoch
         try:
             data = await self.opend.query_subscription()
         except OpenDDownError:
@@ -372,6 +486,8 @@ class FutuQuotesService:
             return
         except OpenDError:
             return
+        if epoch != self.admission.epoch:
+            return  # stale-session poll result
         self.admission.apply_quota_snapshot(data)
         self.admission.refresh_quota_requested = False
         await self._emit_health()
@@ -446,13 +562,22 @@ class FutuQuotesService:
     # test seam
     # ------------------------------------------------------------------
 
-    async def drain(self, rounds: int = 50) -> None:
-        """Await pending tasks until quiescent. Test helper."""
+    async def drain(self, rounds: int = 50, timeout: float = 5.0) -> None:
+        """Await pending tasks until quiescent. Test helper.
+
+        ``asyncio.wait`` (not gather): a parked deferred provider call must
+        not hang the test — and unlike wait_for+gather it never cancels the
+        awaited task.
+        """
         for _ in range(rounds):
             tasks = [t for t in self._tasks if not t.done()]
             if not tasks:
                 break
-            await asyncio.gather(*tasks, return_exceptions=True)
+            done, pending = await asyncio.wait(tasks, timeout=timeout)
+            for t in done:
+                _ = t.exception() if not t.cancelled() else None
+            if not done:
+                break  # everything left is parked (e.g. a deferred provider call)
 
 
 def _classify_snapshot_row(row: dict) -> str:

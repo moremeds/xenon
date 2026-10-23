@@ -15,7 +15,7 @@ import json
 import time
 from typing import Any, Callable, Optional
 
-from xenon.futu_quotes.opend import OpenDDownError
+from xenon.futu_quotes.opend import OpAborted, OpenDDownError
 from xenon.futu_quotes.server import FutuQuotesService
 
 
@@ -47,18 +47,26 @@ class _FakeOpenD:
         self._require_conn()
         return [self._snapshots[c] for c in codes if c in self._snapshots]
 
-    async def subscribe(self, codes: list[str]) -> dict[str, Optional[str]]:
+    async def subscribe(
+        self, codes: list[str], *, pre: Optional[Callable[[], bool]] = None
+    ) -> dict[str, Optional[str]]:
         self._require_conn()
         out: dict[str, Optional[str]] = {}
         for c in codes:
+            if pre is not None and not pre():
+                raise OpAborted(f"selftest pre declined {c}")
             self.subscribed.add(c)
             out[c] = None
         return out
 
-    async def unsubscribe(self, codes: list[str]) -> dict[str, Optional[str]]:
+    async def unsubscribe(
+        self, codes: list[str], *, pre: Optional[Callable[[], bool]] = None
+    ) -> dict[str, Optional[str]]:
         self._require_conn()
         out: dict[str, Optional[str]] = {}
         for c in codes:
+            if pre is not None and not pre():
+                raise OpAborted(f"selftest pre declined {c}")
             self.subscribed.discard(c)
             out[c] = None
         return out

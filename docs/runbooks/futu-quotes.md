@@ -68,6 +68,21 @@ Liveness uses WebSocket protocol ping/pong: ping every 10 s, pong timeout
   desired set, ≥60 s after subscribe plus a further 60 s grace; "too early"
   provider rejections are retried. Re-adds inside the grace window cancel
   the unsubscribe.
+- Operation fencing: every provider call is reserved per symbol
+  (`subscribing`/`unsub_inflight`), re-validated under the serialized
+  adapter lock immediately before the SDK call, and bound to the OpenD
+  session epoch at issue — results from a dead session are discarded and
+  never certify the replacement session. A failed unsubscribe never frees
+  the local record (the provider may still hold and count it); retries are
+  bounded-escalated. On reconnect, desired symbols believed subscribed are
+  *reconfirmed* idempotently without reserving a second quota unit, while
+  genuinely new admissions still respect the ceiling.
+- Buffered quotes are dropped the moment a symbol leaves `ok`, and the
+  whole coalesce window is cleared on relay-owner replacement and on OpenD
+  loss — a stale tick can never reach a new owner or a re-added symbol.
+- Snapshot verification batches fall back to per-code calls when the batch
+  call fails: OpenD reports whole-call errors only, so one invalid code
+  cannot reject its batch-mates.
 
 ## Quota
 

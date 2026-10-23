@@ -19,18 +19,26 @@ from xenon.clients.futu_client import _probe_opend
 
 try:
     from futu import (
+        RET_ERROR,
         RET_OK,
         OpenQuoteContext,
         StockQuoteHandlerBase,
         SubType,
     )
 except ImportError:  # pragma: no cover — futu-api missing
+    RET_ERROR = None  # type: ignore[assignment]
     RET_OK = None  # type: ignore[assignment]
     OpenQuoteContext = None  # type: ignore[assignment]
     StockQuoteHandlerBase = object  # type: ignore[assignment,misc]
     SubType = None  # type: ignore[assignment]
 
 logger = logging.getLogger("xenon.futu_quotes.opend")
+
+
+class OpAborted(Exception):
+    """A queued provider call was declined by its ``pre`` re-check while
+    waiting for the serialized adapter lock (stale epoch / unwanted /
+    already resolved). Not a provider result — nothing was sent."""
 
 
 class OpenDError(Exception):
@@ -142,9 +150,13 @@ class OpenDLike(Protocol):
 
     async def get_market_snapshot(self, codes: list[str]) -> list[dict]: ...
 
-    async def subscribe(self, codes: list[str]) -> dict[str, Optional[str]]: ...
+    async def subscribe(
+        self, codes: list[str], *, pre: Optional[Callable[[], bool]] = None
+    ) -> dict[str, Optional[str]]: ...
 
-    async def unsubscribe(self, codes: list[str]) -> dict[str, Optional[str]]: ...
+    async def unsubscribe(
+        self, codes: list[str], *, pre: Optional[Callable[[], bool]] = None
+    ) -> dict[str, Optional[str]]: ...
 
     async def query_subscription(self) -> dict: ...
 
@@ -171,14 +183,22 @@ class _QuoteContext(OpenQuoteContext if OpenQuoteContext is not None else object
         if cb is not None:
             self._fq_loop.call_soon_threadsafe(cb)
 
-    def on_api_socket_reconnected(self) -> None:  # noqa: D102
+    def on_api_socket_reconnected(self) -> tuple:  # noqa: D102
+        # The base returns (ret, msg) — OpenContextBase._init_connect_sync
+        # unpacks it even on the first connect. Preserve the contract; only
+        # a successful SDK resubscribe counts as recovery for us.
         try:
-            super().on_api_socket_reconnected()
-        except Exception:  # pragma: no cover - SDK internals
-            pass
-        cb = self._fq_on_reconnect
-        if cb is not None:
-            self._fq_loop.call_soon_threadsafe(cb)
+            ret, msg = super().on_api_socket_reconnected()
+        except Exception as exc:  # pragma: no cover - SDK internals
+            logger.exception("OpenD reconnect resubscribe raised")
+            return RET_ERROR, f"xenon reconnect callback: {exc}"
+        if ret == RET_OK:
+            cb = self._fq_on_reconnect
+            if cb is not None:
+                self._fq_loop.call_soon_threadsafe(cb)
+        else:
+            logger.warning("OpenD reconnect resubscribe failed: %s", msg)
+        return ret, msg
 
 
 class _StockQuoteHandler(StockQuoteHandlerBase):  # type: ignore[misc]
@@ -269,7 +289,7 @@ class FutuOpenD:
         async with self._lock:
             try:
                 return await asyncio.to_thread(fn)
-            except OpenDError:
+            except (OpAborted, OpenDError):
                 raise
             except Exception as exc:
                 raise _classify_call_error(str(exc)) from exc
@@ -285,11 +305,20 @@ class FutuOpenD:
 
         return await self._call(_run)
 
-    async def subscribe(self, codes: list[str]) -> dict[str, Optional[str]]:
-        """Per-code subscribe; returns ``{code: None | error_message}``."""
+    async def subscribe(
+        self, codes: list[str], *, pre: Optional[Callable[[], bool]] = None
+    ) -> dict[str, Optional[str]]:
+        """Per-code subscribe; returns ``{code: None | error_message}``.
+
+        ``pre`` re-runs inside the serialized lock right before the SDK
+        call; a False verdict aborts that code with ``OpAborted``.
+        """
         out: dict[str, Optional[str]] = {}
         for code in codes:
+
             def _run(code: str = code) -> Optional[str]:
+                if pre is not None and not pre():
+                    raise OpAborted(f"subscribe pre-check declined {code}")
                 ret, msg = self._ctx.subscribe([code], [SubType.QUOTE])
                 return None if ret == RET_OK else str(msg)
 
@@ -299,10 +328,15 @@ class FutuOpenD:
                 out[code] = str(exc) or exc.__class__.__name__
         return out
 
-    async def unsubscribe(self, codes: list[str]) -> dict[str, Optional[str]]:
+    async def unsubscribe(
+        self, codes: list[str], *, pre: Optional[Callable[[], bool]] = None
+    ) -> dict[str, Optional[str]]:
         out: dict[str, Optional[str]] = {}
         for code in codes:
+
             def _run(code: str = code) -> Optional[str]:
+                if pre is not None and not pre():
+                    raise OpAborted(f"unsubscribe pre-check declined {code}")
                 ret, msg = self._ctx.unsubscribe([code], [SubType.QUOTE])
                 return None if ret == RET_OK else str(msg)
 

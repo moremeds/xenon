@@ -29,7 +29,7 @@ UNSUB_GRACE_S = 60.0
 BACKOFF_BASE_S = 5.0
 BACKOFF_CAP_S = 120.0
 UNSUB_RETRY_S = 15.0
-MAX_UNSUB_ATTEMPTS = 20
+UNSUB_RETRY_CAP_S = 120.0
 
 PENDING_REASONS = ("subscribing", "session", "opend_down", "backoff")
 REJECTED_REASONS = ("quota", "unknown_symbol", "not_supported", "provider_error")
@@ -57,6 +57,15 @@ class SymbolState:
     verify_inflight: bool = False
     subscribed_at: Optional[float] = None
     subscribing: bool = False
+    # In-flight op reservations: one outstanding provider call per symbol per
+    # kind at a time; the op's pre-check re-validates demand under the adapter
+    # lock before anything is sent.
+    unsub_inflight: bool = False
+    # Believed-owned after an OpenD reconnect: needs an idempotent reconfirm
+    # that must NOT reserve a second quota unit (the SDK restores its own subs).
+    reconfirm: bool = False
+    # The in-flight subscribe was issued as a reconfirm, not a new admission.
+    subscribing_reconfirm: bool = False
     rejected_reason: Optional[str] = None
     retry_at: float = 0.0
     backoff_step: int = 0
@@ -99,7 +108,7 @@ class Admission:
         backoff_base_s: float = BACKOFF_BASE_S,
         backoff_cap_s: float = BACKOFF_CAP_S,
         unsub_retry_s: float = UNSUB_RETRY_S,
-        max_unsub_attempts: int = MAX_UNSUB_ATTEMPTS,
+        unsub_retry_cap_s: float = UNSUB_RETRY_CAP_S,
     ) -> None:
         self.now = now
         self.quota_cap = quota_cap
@@ -108,9 +117,12 @@ class Admission:
         self.backoff_base_s = backoff_base_s
         self.backoff_cap_s = backoff_cap_s
         self.unsub_retry_s = unsub_retry_s
-        self.max_unsub_attempts = max_unsub_attempts
+        self.unsub_retry_cap_s = unsub_retry_cap_s
 
         self.gen = 0
+        # OpenD session epoch: bumped on every disconnect and (re)connect.
+        # Provider ops and callbacks carrying an older epoch are discarded.
+        self.epoch = 0
         self.desired: list[str] = []
         self.session_open = False
         self.opend_connected = False
@@ -179,6 +191,7 @@ class Admission:
         return str(market_us or "").upper() in _OPEN_US_STATES
 
     def mark_disconnected(self) -> None:
+        self.epoch += 1
         self.opend_connected = False
         self.session_open = False
         self.provider_own_used = None
@@ -186,23 +199,28 @@ class Admission:
         self.provider_all_used = None
         for st in self.symbols.values():
             st.subscribing = False
+            st.subscribing_reconfirm = False
             st.verify_inflight = False
+            st.unsub_inflight = False
 
     def mark_connected(self) -> None:
         """Reconnect: never assume subscriptions survived.
 
-        Wanted symbols lose their local sub record so evaluation
-        resubscribes them (provider-side subscribe is idempotent).
+        Wanted symbols believed subscribed become ``reconfirm``: an
+        idempotent resubscribe that does not reserve a second quota unit —
+        the provider may already count them (the SDK restores its own subs).
         Unwanted-but-believed-subscribed symbols get an immediate
         unsubscribe attempt; if OpenD already dropped them the
         ``not_subscribed`` reply clears the record the same as a success.
         """
+        self.epoch += 1
         self.opend_connected = True
         for st in self.symbols.values():
             if not st.subscribed:
                 continue
             if st.symbol in self.desired:
                 st.subscribed_at = None
+                st.reconfirm = True
             else:
                 st.unsub_retry_at = 0.0
 
@@ -223,8 +241,15 @@ class Admission:
         return sum(1 for st in self.symbols.values() if st.subscribed)
 
     def controlled_used(self) -> int:
-        """own_used + in-flight admissions (the ≤ ceiling invariant)."""
-        inflight = sum(1 for st in self.symbols.values() if st.subscribing)
+        """own_used + in-flight NEW admissions (the ≤ ceiling invariant).
+
+        Reconfirms are excluded: a believed-owned sub is already inside
+        ``own_used``/provider counts; charging it twice would deadlock
+        recovery at the ceiling.
+        """
+        inflight = sum(
+            1 for st in self.symbols.values() if st.subscribing and not st.subscribing_reconfirm
+        )
         return max(self.provider_own_used or 0, self.own_used()) + inflight
 
     def quota_report(self) -> dict:
@@ -296,20 +321,24 @@ class Admission:
                     rejected.append({"symbol": sym, "reason": reason})
                 else:
                     pending.append({"symbol": sym, "reason": "backoff"})
-            elif self.controlled_used() >= self.ceiling():
+            elif self.controlled_used() >= self.ceiling() and not st.reconfirm:
                 st.rejected_reason = "quota"
                 st.retry_at = now + self._backoff(st)
                 st.backoff_step += 1
                 rejected.append({"symbol": sym, "reason": "quota"})
             else:
                 st.subscribing = True
+                st.subscribing_reconfirm = st.reconfirm
+                st.reconfirm = False
                 st.rejected_reason = None
                 actions.subscribe.append(sym)
                 pending.append({"symbol": sym, "reason": "subscribing"})
 
-        # Unsubscribe pass: subscribed but no longer desired.
+        # Unsubscribe pass: subscribed but no longer desired. The op is
+        # RESERVED per symbol before it is emitted (unsub_inflight) so a
+        # due op can never fan out across eval passes.
         for st in self.symbols.values():
-            if not st.subscribed or st.symbol in self.desired:
+            if not st.subscribed or st.symbol in self.desired or st.unsub_inflight:
                 continue
             if st.unwanted_since is None:
                 st.unwanted_since = now
@@ -320,6 +349,7 @@ class Admission:
             if st.unsub_retry_at is not None:
                 due = max(due, st.unsub_retry_at)
             if now >= due and self.opend_connected:
+                st.unsub_inflight = True
                 actions.unsubscribe.append(st.symbol)
 
         partition = {"ok": ok, "pending": pending, "rejected": rejected}
@@ -363,9 +393,11 @@ class Admission:
     def subscribe_result(self, symbol: str, err: Optional[str], reason: Optional[str] = None) -> None:
         """Record a provider subscribe outcome. A late completion still
         lands: the subscription is real at OpenD whether or not the symbol
-        is still wanted (assignment re-evaluation decides ``ok``)."""
+        is still wanted (assignment re-evaluation decides ``ok``). The
+        service discards stale-epoch results before reaching here."""
         st = self.state(symbol)
         st.subscribing = False
+        st.subscribing_reconfirm = False
         if err is None:
             st.subscribed_at = self.now()
             st.rejected_reason = None
@@ -394,9 +426,11 @@ class Admission:
 
         Success — or a "was never subscribed" reply — clears the local
         record. ``too_early`` retries at the 60 s mark; other errors retry
-        every ``unsub_retry_s`` up to ``max_unsub_attempts``.
+        with bounded escalation. A failed unsubscribe never frees the local
+        record: the provider may still hold and count the subscription.
         """
         st = self.state(symbol)
+        st.unsub_inflight = False
         if err is None or kind == "not_subscribed":
             st.subscribed_at = None
             st.unsub_retry_at = None
@@ -414,14 +448,15 @@ class Admission:
             st.unsub_retry_at = max(
                 st.subscribed_at + self.min_lifetime_s, now + 1.0
             )
-        elif st.unsub_attempts >= self.max_unsub_attempts:
-            # Stop retrying: drop the local record. Reconciled on next
-            # query_subscription if OpenD still holds it.
-            st.subscribed_at = None
-            st.unsub_retry_at = None
-            st.unsub_attempts = 0
         else:
-            st.unsub_retry_at = now + self.unsub_retry_s
+            # A failed unsubscribe NEVER releases the local record — the
+            # provider may still hold (and count) the subscription. Bounded
+            # backoff limits request rate while ownership stays counted.
+            delay = min(
+                self.unsub_retry_s * (1 << min(st.unsub_attempts - 1, 3)),
+                self.unsub_retry_cap_s,
+            )
+            st.unsub_retry_at = now + delay
 
     def is_ok(self, symbol: str) -> bool:
         """Producer fence: is ``symbol`` in the current ok set?"""
