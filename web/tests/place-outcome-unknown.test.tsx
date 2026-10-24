@@ -7,12 +7,20 @@
  */
 import React from "react";
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
-import { render, cleanup, fireEvent, waitFor, renderHook, act } from "@testing-library/react";
+import {
+  render,
+  cleanup,
+  fireEvent,
+  waitFor,
+  renderHook,
+  act,
+} from "@testing-library/react";
 import type { PortfolioPosition } from "@/lib/types";
 
 const xenonFetch = vi.fn();
 vi.mock("@/lib/xenonApi", async () => {
-  const actual = await vi.importActual<typeof import("@/lib/xenonApi")>("@/lib/xenonApi");
+  const actual =
+    await vi.importActual<typeof import("@/lib/xenonApi")>("@/lib/xenonApi");
   return { ...actual, xenonFetch: (...args: unknown[]) => xenonFetch(...args) };
 });
 vi.mock("@/lib/OrderActionsContext", () => ({
@@ -27,17 +35,32 @@ vi.mock("@/lib/OrderActionsContext", () => ({
   }),
 }));
 vi.mock("@/components/ModifyOrderModal", () => ({ default: () => null }));
+vi.mock("@/lib/futuAccountEnv", () => ({
+  useFutuAccountEnv: () => "paper",
+  futuScopeQuery: (env: string) => `?broker=FUTU&account_env=${env}`,
+}));
+vi.mock("@/lib/useFutuTrading", () => ({
+  useFutuTrading: () => ({ paper: true, live: false }),
+  futuTradingEnabledForEnv: () => true,
+}));
+
 vi.mock("@/components/Modal", () => ({
-  default: ({ children }: { children: React.ReactNode }) => <div data-testid="modal">{children}</div>,
+  default: ({ children }: { children: React.ReactNode }) => (
+    <div data-testid="modal">{children}</div>
+  ),
 }));
 
 import { XenonApiError } from "@/lib/xenonApi";
-import { isPlaceOutcomeUnknown, errorFromResponseBody } from "@/lib/order/responseError";
+import {
+  isPlaceOutcomeUnknown,
+  errorFromResponseBody,
+} from "@/lib/order/responseError";
 import { useClientAttemptId } from "@/components/ticker-detail/useClientAttemptId";
 import PositionOrderModal from "@/components/PositionOrderModal";
 
 const UNKNOWN_BODY = {
-  detail: "Order outcome unknown — check working orders before placing it again. Do not resubmit.",
+  detail:
+    "Order outcome unknown — check working orders before placing it again. Do not resubmit.",
   reason_code: "PLACE_OUTCOME_UNKNOWN",
   submission_id: "sub-1",
 };
@@ -62,48 +85,86 @@ afterEach(() => cleanup());
 
 describe("Next /api/orders/place — uncertain outcome", () => {
   it("passes FastAPI's 502 PLACE_OUTCOME_UNKNOWN body through unchanged", async () => {
-    xenonFetch.mockRejectedValueOnce(new XenonApiError(502, UNKNOWN_BODY.detail, UNKNOWN_BODY));
+    xenonFetch.mockRejectedValueOnce(
+      new XenonApiError(502, UNKNOWN_BODY.detail, UNKNOWN_BODY),
+    );
     const { POST } = await import("../app/api/orders/place/route");
-    const res = await POST(post("http://localhost/api/orders/place", placeBody));
+    const res = await POST(
+      post("http://localhost/api/orders/place", placeBody),
+    );
     expect(res.status).toBe(502);
     expect(await res.json()).toEqual(UNKNOWN_BODY);
   });
 
   it("maps its own fetch timeout to 502 PLACE_OUTCOME_UNKNOWN, not a 500", async () => {
-    xenonFetch.mockRejectedValueOnce(Object.assign(new Error("timed out"), { name: "TimeoutError" }));
+    xenonFetch.mockRejectedValueOnce(
+      Object.assign(new Error("timed out"), { name: "TimeoutError" }),
+    );
     const { POST } = await import("../app/api/orders/place/route");
-    const res = await POST(post("http://localhost/api/orders/place", placeBody));
+    const res = await POST(
+      post("http://localhost/api/orders/place", placeBody),
+    );
     expect(res.status).toBe(502);
     expect((await res.json()).reason_code).toBe("PLACE_OUTCOME_UNKNOWN");
   });
 
   it.each([
     ["socket reset (TypeError)", new TypeError("fetch failed")],
-    ["5xx without a reason_code", new XenonApiError(500, "Internal Server Error", null)],
+    [
+      "5xx without a reason_code",
+      new XenonApiError(500, "Internal Server Error", null),
+    ],
     ["unreadable 200 body", new SyntaxError("Unexpected token")],
   ])("after dispatch, %s → 502 PLACE_OUTCOME_UNKNOWN", async (_n, err) => {
     xenonFetch.mockRejectedValueOnce(err);
     const { POST } = await import("../app/api/orders/place/route");
-    const res = await POST(post("http://localhost/api/orders/place", placeBody));
+    const res = await POST(
+      post("http://localhost/api/orders/place", placeBody),
+    );
     expect(res.status).toBe(502);
     expect((await res.json()).reason_code).toBe("PLACE_OUTCOME_UNKNOWN");
   });
 
   it("a proven rejection (4xx, or 5xx with a known reason_code) stays terminal", async () => {
     const { POST } = await import("../app/api/orders/place/route");
-    xenonFetch.mockRejectedValueOnce(new XenonApiError(502, "rejected", { reason_code: "IB_REJECT", detail: "rejected" }));
-    expect((await (await POST(post("http://localhost/api/orders/place", placeBody))).json()).reason_code).toBe("IB_REJECT");
-    xenonFetch.mockRejectedValueOnce(new XenonApiError(409, "terminal", { reason_code: "ATTEMPT_ID_TERMINAL" }));
-    const r409 = await POST(post("http://localhost/api/orders/place", placeBody));
+    xenonFetch.mockRejectedValueOnce(
+      new XenonApiError(502, "rejected", {
+        reason_code: "IB_REJECT",
+        detail: "rejected",
+      }),
+    );
+    expect(
+      (
+        await (
+          await POST(post("http://localhost/api/orders/place", placeBody))
+        ).json()
+      ).reason_code,
+    ).toBe("IB_REJECT");
+    xenonFetch.mockRejectedValueOnce(
+      new XenonApiError(409, "terminal", {
+        reason_code: "ATTEMPT_ID_TERMINAL",
+      }),
+    );
+    const r409 = await POST(
+      post("http://localhost/api/orders/place", placeBody),
+    );
     expect(r409.status).toBe(409);
   });
 
   it("keeps persist_warning on a 200 accepted-but-not-saved place", async () => {
     xenonFetch
-      .mockResolvedValueOnce({ status: "ok", orderId: 7, permId: 8, persist_warning: "not saved", submission_id: "s" })
+      .mockResolvedValueOnce({
+        status: "ok",
+        orderId: 7,
+        permId: 8,
+        persist_warning: "not saved",
+        submission_id: "s",
+      })
       .mockResolvedValueOnce({});
     const { POST } = await import("../app/api/orders/place/route");
-    const res = await POST(post("http://localhost/api/orders/place", placeBody));
+    const res = await POST(
+      post("http://localhost/api/orders/place", placeBody),
+    );
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.persist_warning).toBe("not saved");
@@ -122,19 +183,34 @@ describe("Next /api/orders/modify — combo replacement after cancel", () => {
       limitPrice: 0.75,
       client_attempt_id: "c-rep-1",
       legs: [
-        { expiry: "20260327", strike: 190, right: "C", action: "BUY", ratio: 1 },
-        { expiry: "20260327", strike: 200, right: "C", action: "SELL", ratio: 1 },
+        {
+          expiry: "20260327",
+          strike: 190,
+          right: "C",
+          action: "BUY",
+          ratio: 1,
+        },
+        {
+          expiry: "20260327",
+          strike: 200,
+          right: "C",
+          action: "SELL",
+          ratio: 1,
+        },
       ],
     },
   };
 
   it("an uncertain replacement keeps the FastAPI PLACE_OUTCOME_UNKNOWN body, never 'place a new order manually'", async () => {
     xenonFetch.mockImplementation(async (path: string) => {
-      if (path === "/orders/replace") throw new XenonApiError(502, UNKNOWN_BODY.detail, UNKNOWN_BODY);
+      if (path === "/orders/replace")
+        throw new XenonApiError(502, UNKNOWN_BODY.detail, UNKNOWN_BODY);
       throw new Error(`unexpected ${path}`);
     });
     const { POST } = await import("../app/api/orders/modify/route");
-    const res = await POST(post("http://localhost/api/orders/modify", replaceBody));
+    const res = await POST(
+      post("http://localhost/api/orders/modify", replaceBody),
+    );
     expect(res.status).toBe(502);
     const body = await res.json();
     expect(body).toEqual(UNKNOWN_BODY);
@@ -145,7 +221,12 @@ describe("Next /api/orders/modify — combo replacement after cancel", () => {
     xenonFetch.mockResolvedValue({ status: "ok" });
     const { POST } = await import("../app/api/orders/modify/route");
     const { client_attempt_id: _drop, ...noId } = replaceBody.replaceOrder;
-    const res = await POST(post("http://localhost/api/orders/modify", { ...replaceBody, replaceOrder: noId }));
+    const res = await POST(
+      post("http://localhost/api/orders/modify", {
+        ...replaceBody,
+        replaceOrder: noId,
+      }),
+    );
     expect(res.status).toBe(400);
     expect((await res.json()).reason_code).toBe("INVALID_ORDER_BODY");
     expect(xenonFetch).not.toHaveBeenCalled();
@@ -153,25 +234,37 @@ describe("Next /api/orders/modify — combo replacement after cancel", () => {
 
   it.each([
     ["socket reset (TypeError)", new TypeError("fetch failed")],
-    ["5xx without a reason_code", new XenonApiError(500, "Internal Server Error", null)],
-  ])("replacement forward %s is uncertain, never 'place a new order manually'", async (_n, err) => {
-    xenonFetch.mockImplementation(async () => {
-      throw err;
-    });
-    const { POST } = await import("../app/api/orders/modify/route");
-    const res = await POST(post("http://localhost/api/orders/modify", replaceBody));
-    const body = await res.json();
-    expect(res.status).toBe(502);
-    expect(body.reason_code).toBe("PLACE_OUTCOME_UNKNOWN");
-    expect(String(body.error ?? "")).not.toMatch(/Place a new order manually/);
-  });
+    [
+      "5xx without a reason_code",
+      new XenonApiError(500, "Internal Server Error", null),
+    ],
+  ])(
+    "replacement forward %s is uncertain, never 'place a new order manually'",
+    async (_n, err) => {
+      xenonFetch.mockImplementation(async () => {
+        throw err;
+      });
+      const { POST } = await import("../app/api/orders/modify/route");
+      const res = await POST(
+        post("http://localhost/api/orders/modify", replaceBody),
+      );
+      const body = await res.json();
+      expect(res.status).toBe(502);
+      expect(body.reason_code).toBe("PLACE_OUTCOME_UNKNOWN");
+      expect(String(body.error ?? "")).not.toMatch(
+        /Place a new order manually/,
+      );
+    },
+  );
 });
 
 describe("UI — submitted, status unknown", () => {
   it("copy says submitted / do not resubmit", () => {
     expect(isPlaceOutcomeUnknown(UNKNOWN_BODY)).toBe(true);
     expect(isPlaceOutcomeUnknown({ reason_code: "IB_REJECT" })).toBe(false);
-    expect(errorFromResponseBody(UNKNOWN_BODY, "x")).toMatch(/submitted, status unknown.*Do not resubmit/i);
+    expect(errorFromResponseBody(UNKNOWN_BODY, "x")).toMatch(
+      /submitted, status unknown.*Do not resubmit/i,
+    );
   });
 
   it("uncertain is sticky: no later response or field edit rotates the id", () => {
@@ -188,21 +281,60 @@ describe("UI — submitted, status unknown", () => {
 
   it("PositionOrderModal shows the message and disables submit (no retry)", async () => {
     const pos = {
-      id: 1, ticker: "TSLA", structure: "Stock", structure_type: "Stock", risk_profile: "equity",
-      expiry: "", contracts: 300, direction: "LONG", entry_cost: 96000, max_risk: null, market_value: 105000,
-      legs: [{ direction: "LONG", contracts: 300, type: "Stock", strike: null, entry_cost: 96000, avg_cost: 320,
-        market_price: 350, market_value: 105000, market_price_is_calculated: false }],
-      ib_daily_pnl: null, kelly_optimal: null, target: null, stop: null, entry_date: "",
+      id: 1,
+      ticker: "TSLA",
+      structure: "Stock",
+      structure_type: "Stock",
+      risk_profile: "equity",
+      expiry: "",
+      contracts: 300,
+      direction: "LONG",
+      entry_cost: 96000,
+      max_risk: null,
+      market_value: 105000,
+      legs: [
+        {
+          direction: "LONG",
+          contracts: 300,
+          type: "Stock",
+          strike: null,
+          entry_cost: 96000,
+          avg_cost: 320,
+          market_price: 350,
+          market_value: 105000,
+          market_price_is_calculated: false,
+        },
+      ],
+      ib_daily_pnl: null,
+      kelly_optimal: null,
+      target: null,
+      stop: null,
+      entry_date: "",
     } as unknown as PortfolioPosition;
-    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 502, json: async () => UNKNOWN_BODY });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({
+        ok: false,
+        status: 502,
+        json: async () => UNKNOWN_BODY,
+      });
     (global as any).fetch = fetchMock;
     const { getByRole, findByText } = render(
-      <PositionOrderModal position={pos} prices={{ TSLA: { last: 350, bid: 349.9, ask: 350.1 } as any }} onClose={() => {}} />,
+      <PositionOrderModal
+        position={pos}
+        prices={{ TSLA: { last: 350, bid: 349.9, ask: 350.1 } as any }}
+        onClose={() => {}}
+      />,
     );
     const submit = getByRole("button", { name: /^Submit/i });
     fireEvent.click(submit);
     await findByText(/submitted, status unknown/i);
-    await waitFor(() => expect((getByRole("button", { name: /^Submit/i }) as HTMLButtonElement).disabled).toBe(true));
+    await waitFor(() =>
+      expect(
+        (getByRole("button", { name: /^Submit/i }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(true),
+    );
     fireEvent.click(getByRole("button", { name: /^Submit/i }));
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -217,11 +349,35 @@ describe("submitPlaceOrder — every form's single place entry", () => {
   });
   const cases: Array<[string, Reply, "ok" | "uncertain" | "terminal"]> = [
     ["502 PLACE_OUTCOME_UNKNOWN", ok(502, UNKNOWN_BODY), "uncertain"],
-    ["network failure after dispatch (TypeError)", async () => { throw new TypeError("fetch failed"); }, "uncertain"],
+    [
+      "network failure after dispatch (TypeError)",
+      async () => {
+        throw new TypeError("fetch failed");
+      },
+      "uncertain",
+    ],
     ["500 without a reason_code", ok(500, { error: "internal" }), "uncertain"],
-    ["200 with an unreadable body", async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError("x"); } }), "uncertain"],
-    ["502 IB_REJECT", ok(502, { reason_code: "IB_REJECT", detail: "rejected" }), "terminal"],
-    ["400 validation", ok(400, { reason_code: "INVALID_ORDER_BODY" }), "terminal"],
+    [
+      "200 with an unreadable body",
+      async () => ({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new SyntaxError("x");
+        },
+      }),
+      "uncertain",
+    ],
+    [
+      "502 IB_REJECT",
+      ok(502, { reason_code: "IB_REJECT", detail: "rejected" }),
+      "terminal",
+    ],
+    [
+      "400 validation",
+      ok(400, { reason_code: "INVALID_ORDER_BODY" }),
+      "terminal",
+    ],
     ["200 accepted", ok(200, { status: "ok", orderId: 1 }), "ok"],
   ];
 
@@ -236,7 +392,9 @@ describe("submitPlaceOrder — every form's single place entry", () => {
       out = await submitPlaceOrder(result.current, { symbol: "SPY" });
     });
     expect(out!.kind).toBe(kind);
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body).client_attempt_id).toBe(first);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).client_attempt_id).toBe(
+      first,
+    );
     if (kind === "uncertain") {
       expect(result.current.id).toBe(first);
       expect(result.current.uncertain).toBe(true);
@@ -255,18 +413,35 @@ describe("submitPlaceOrder — every form's single place entry", () => {
 
 describe("BookTab stock form — uncertain place blocks a resubmit", () => {
   it("shows the message, disables submit, never sends twice", async () => {
-    const BookTab = (await import("@/components/ticker-detail/BookTab")).default;
-    const fetchMock = vi.fn(async () => ({ ok: false, status: 502, json: async () => UNKNOWN_BODY }));
+    const BookTab = (await import("@/components/ticker-detail/BookTab"))
+      .default;
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 502,
+      json: async () => UNKNOWN_BODY,
+    }));
     (global as any).fetch = fetchMock;
     const { getByPlaceholderText, getByRole, findByText } = render(
-      <BookTab ticker="SPY" position={null} prices={{}} openOrders={[]} tickerPriceData={null} />,
+      <BookTab
+        ticker="SPY"
+        position={null}
+        prices={{}}
+        openOrders={[]}
+        tickerPriceData={null}
+      />,
     );
-    fireEvent.change(getByPlaceholderText("Shares"), { target: { value: "1" } });
-    fireEvent.change(getByPlaceholderText("0.00"), { target: { value: "500" } });
+    fireEvent.change(getByPlaceholderText("Shares"), {
+      target: { value: "1" },
+    });
+    fireEvent.change(getByPlaceholderText("0.00"), {
+      target: { value: "500" },
+    });
     fireEvent.click(getByRole("button", { name: /^Place Order$/ }));
     fireEvent.click(getByRole("button", { name: /^Confirm Order$/ }));
     await findByText(/submitted, status unknown/i);
-    const confirm = getByRole("button", { name: /Confirm Order|Placing/ }) as HTMLButtonElement;
+    const confirm = getByRole("button", {
+      name: /Confirm Order|Placing/,
+    }) as HTMLButtonElement;
     await waitFor(() => expect(confirm.disabled).toBe(true));
     fireEvent.click(confirm);
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -277,40 +452,72 @@ async function expectBlockedAfterUncertain(
   ui: React.ReactElement,
   qtyPlaceholder: string,
 ) {
-  const fetchMock = vi.fn(async () => ({ ok: false, status: 502, json: async () => UNKNOWN_BODY }));
+  const fetchMock = vi.fn(async () => ({
+    ok: false,
+    status: 502,
+    json: async () => UNKNOWN_BODY,
+  }));
   (global as any).fetch = fetchMock;
   const { getByPlaceholderText, getByRole, findByText } = render(ui);
-  fireEvent.change(getByPlaceholderText(qtyPlaceholder), { target: { value: "1" } });
+  fireEvent.change(getByPlaceholderText(qtyPlaceholder), {
+    target: { value: "1" },
+  });
   fireEvent.change(getByPlaceholderText("0.00"), { target: { value: "5" } });
   fireEvent.click(getByRole("button", { name: /^Place Order$/ }));
   fireEvent.click(getByRole("button", { name: /^Confirm Order$/ }));
   await findByText(/submitted, status unknown/i);
-  const confirm = getByRole("button", { name: /Confirm Order|Placing/ }) as HTMLButtonElement;
+  const confirm = getByRole("button", {
+    name: /Confirm Order|Placing/,
+  }) as HTMLButtonElement;
   await waitFor(() => expect(confirm.disabled).toBe(true));
   fireEvent.click(confirm);
-  expect(fetchMock.mock.calls.filter(([u]) => u === "/api/orders/place")).toHaveLength(1);
+  expect(
+    fetchMock.mock.calls.filter(([u]) => u === "/api/orders/place"),
+  ).toHaveLength(1);
 }
 
 describe("OrderTab / InstrumentDetailModal — uncertain place blocks a resubmit", () => {
   it("OrderTab new-order form", async () => {
-    const OrderTab = (await import("@/components/ticker-detail/OrderTab")).default;
+    const OrderTab = (await import("@/components/ticker-detail/OrderTab"))
+      .default;
     const { TickerDetailProvider } = await import("@/lib/TickerDetailContext");
     await expectBlockedAfterUncertain(
       <TickerDetailProvider>
-        <OrderTab ticker="QQQ" position={null} portfolio={null} prices={{}} openOrders={[]} tickerPriceData={null} />
+        <OrderTab
+          ticker="QQQ"
+          position={null}
+          portfolio={null}
+          prices={{}}
+          openOrders={[]}
+          tickerPriceData={null}
+        />
       </TickerDetailProvider>,
       "Shares",
     );
   });
 
   it("InstrumentDetailModal option form", async () => {
-    const InstrumentDetailModal = (await import("@/components/InstrumentDetailModal")).default;
+    const InstrumentDetailModal = (
+      await import("@/components/InstrumentDetailModal")
+    ).default;
     const leg = {
-      direction: "LONG", contracts: 1, type: "Call", strike: 500, entry_cost: 100, avg_cost: 1,
-      market_price: 1, market_value: 100,
+      direction: "LONG",
+      contracts: 1,
+      type: "Call",
+      strike: 500,
+      entry_cost: 100,
+      avg_cost: 1,
+      market_price: 1,
+      market_value: 100,
     } as any;
     await expectBlockedAfterUncertain(
-      <InstrumentDetailModal leg={leg} ticker="SPY" expiry="2026-12-18" prices={{}} onClose={() => {}} />,
+      <InstrumentDetailModal
+        leg={leg}
+        ticker="SPY"
+        expiry="2026-12-18"
+        prices={{}}
+        onClose={() => {}}
+      />,
       "Contracts",
     );
   });
@@ -319,23 +526,33 @@ describe("OrderTab / InstrumentDetailModal — uncertain place blocks a resubmit
 // PR-08: same attempt id, different body, and that attempt may be at IB.
 const ALREADY_PLACED_BODY = {
   reason_code: "ATTEMPT_ALREADY_PLACED",
-  detail: "attempt c-unc-1 belongs to an existing order; the requested terms are not confirmed",
+  detail:
+    "attempt c-unc-1 belongs to an existing order; the requested terms are not confirmed",
   state: "WORKING",
   submission_id: "sub-1",
 };
 
 describe("ATTEMPT_ALREADY_PLACED — a same-id different body never invites a resubmit", () => {
   it("Next /api/orders/place passes the 409 body through unchanged", async () => {
-    xenonFetch.mockRejectedValueOnce(new XenonApiError(409, ALREADY_PLACED_BODY.detail, ALREADY_PLACED_BODY));
+    xenonFetch.mockRejectedValueOnce(
+      new XenonApiError(409, ALREADY_PLACED_BODY.detail, ALREADY_PLACED_BODY),
+    );
     const { POST } = await import("../app/api/orders/place/route");
-    const res = await POST(post("http://localhost/api/orders/place", placeBody));
+    const res = await POST(
+      post("http://localhost/api/orders/place", placeBody),
+    );
     expect(res.status).toBe(409);
     expect((await res.json()).reason_code).toBe("ATTEMPT_ALREADY_PLACED");
   });
 
   it("submitPlaceOrder locks the form like an uncertain place, with the 'already placed' copy", async () => {
-    const { submitPlaceOrder, ATTEMPT_ALREADY_PLACED_COPY } = await import("@/lib/order/submitPlace");
-    const fetchMock = vi.fn(async () => ({ ok: false, status: 409, json: async () => ALREADY_PLACED_BODY }));
+    const { submitPlaceOrder, ATTEMPT_ALREADY_PLACED_COPY } =
+      await import("@/lib/order/submitPlace");
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 409,
+      json: async () => ALREADY_PLACED_BODY,
+    }));
     (global as any).fetch = fetchMock;
     const { result } = renderHook(() => useClientAttemptId({ ticker: "SPY" }));
     const first = result.current.id;
@@ -343,7 +560,10 @@ describe("ATTEMPT_ALREADY_PLACED — a same-id different body never invites a re
     await act(async () => {
       out = await submitPlaceOrder(result.current, { symbol: "SPY" });
     });
-    expect(out).toEqual({ kind: "uncertain", message: ATTEMPT_ALREADY_PLACED_COPY });
+    expect(out).toEqual({
+      kind: "uncertain",
+      message: ATTEMPT_ALREADY_PLACED_COPY,
+    });
     expect(ATTEMPT_ALREADY_PLACED_COPY).toBe(
       "This attempt id belongs to an existing order. The requested terms are not confirmed. Check working orders; do not resubmit.",
     );
@@ -360,21 +580,62 @@ describe("ATTEMPT_ALREADY_PLACED — a same-id different body never invites a re
 
   it("PositionOrderModal shows the copy and keeps submit disabled", async () => {
     const pos = {
-      id: 1, ticker: "TSLA", structure: "Stock", structure_type: "Stock", risk_profile: "equity",
-      expiry: "", contracts: 300, direction: "LONG", entry_cost: 96000, max_risk: null, market_value: 105000,
-      legs: [{ direction: "LONG", contracts: 300, type: "Stock", strike: null, entry_cost: 96000, avg_cost: 320,
-        market_price: 350, market_value: 105000, market_price_is_calculated: false }],
-      ib_daily_pnl: null, kelly_optimal: null, target: null, stop: null, entry_date: "",
+      id: 1,
+      ticker: "TSLA",
+      structure: "Stock",
+      structure_type: "Stock",
+      risk_profile: "equity",
+      expiry: "",
+      contracts: 300,
+      direction: "LONG",
+      entry_cost: 96000,
+      max_risk: null,
+      market_value: 105000,
+      legs: [
+        {
+          direction: "LONG",
+          contracts: 300,
+          type: "Stock",
+          strike: null,
+          entry_cost: 96000,
+          avg_cost: 320,
+          market_price: 350,
+          market_value: 105000,
+          market_price_is_calculated: false,
+        },
+      ],
+      ib_daily_pnl: null,
+      kelly_optimal: null,
+      target: null,
+      stop: null,
+      entry_date: "",
     } as unknown as PortfolioPosition;
-    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 409, json: async () => ALREADY_PLACED_BODY });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: async () => ALREADY_PLACED_BODY,
+      });
     (global as any).fetch = fetchMock;
     const { getByRole, findByText, queryByText } = render(
-      <PositionOrderModal position={pos} prices={{ TSLA: { last: 350, bid: 349.9, ask: 350.1 } as any }} onClose={() => {}} />,
+      <PositionOrderModal
+        position={pos}
+        prices={{ TSLA: { last: 350, bid: 349.9, ask: 350.1 } as any }}
+        onClose={() => {}}
+      />,
     );
     fireEvent.click(getByRole("button", { name: /^Submit/i }));
-    await findByText(/belongs to an existing order\. The requested terms are not confirmed/i);
+    await findByText(
+      /belongs to an existing order\. The requested terms are not confirmed/i,
+    );
     expect(queryByText(/rebuild the ticket/i)).toBeNull();
-    await waitFor(() => expect((getByRole("button", { name: /^Submit/i }) as HTMLButtonElement).disabled).toBe(true));
+    await waitFor(() =>
+      expect(
+        (getByRole("button", { name: /^Submit/i }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(true),
+    );
     fireEvent.click(getByRole("button", { name: /^Submit/i }));
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

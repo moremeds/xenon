@@ -20,28 +20,21 @@ import {
 import { randomAttemptId } from "@/components/ticker-detail/useClientAttemptId";
 import { type FutuAccountEnv, useFutuAccountEnv } from "@/lib/futuAccountEnv";
 import {
+  computeNextModifySequence,
   findOpenOrderInSnapshot,
+  FUTU_MANAGEMENT_UNCONFIRMED_COPY,
   FUTU_MODIFY_SENT_UNCONFIRMED_COPY,
   futuCancelApiPath,
+  futuManagementLockKey,
   futuModifyApiPath,
   futuOrdersApiPath,
   isFutuOpenOrder,
   openOrderActionKey,
   orderStillOpen,
+  recordAppliedModifySequence,
 } from "@/lib/futuOpenOrder";
-
-function futuModifyTermsMatch(
-  liveOrder: OpenOrder | undefined,
-  request: ModifyRequestWithOutsideRth,
-): boolean {
-  if (!liveOrder) return false;
-  const priceConfirmed =
-    request.newPrice == null || liveOrder.limitPrice === request.newPrice;
-  const quantityConfirmed =
-    request.newQuantity == null ||
-    liveOrder.totalQuantity === request.newQuantity;
-  return priceConfirmed && quantityConfirmed;
-}
+import { ordersScopeKey, resolveFutuEnv } from "@/lib/orderActionScope";
+import { isUncertainFutuManagementResponse } from "@/lib/futuManagementUncertain";
 
 /** Result surfaced to callers of requestCancel/requestModify so the row can
  *  render a FAILED pill (F6.2). `status` is the HTTP status from the Next.js
@@ -89,7 +82,11 @@ type OrderActionsContextValue = {
     request: ModifyOrderRequest,
   ) => Promise<ActionResult>;
   drainNotifications: () => Notification[];
-  setOrdersUpdater: (fn: ((data: OrdersData) => void) | null) => void;
+  setOrdersUpdater: (
+    fn: ((data: OrdersData) => void) | null,
+    scopeKey?: string | null,
+  ) => void;
+  isFutuManagementLocked: (order: OpenOrder) => boolean;
   /** permIds whose combo replacement ended uncertain: the replacement form
    * for that order is locked (no retry) until the page reloads. */
   lockedReplacements: Set<number>;
@@ -101,16 +98,6 @@ const OrderActionsContext = createContext<OrderActionsContextValue | null>(
 
 const POLL_INTERVAL_MS = 5_000;
 const POLL_MAX_COUNT = 24; // ~2 min
-
-function resolveFutuEnv(
-  order: OpenOrder,
-  fallback: FutuAccountEnv,
-): FutuAccountEnv {
-  if (order.accountEnv === "paper" || order.accountEnv === "live") {
-    return order.accountEnv;
-  }
-  return fallback;
-}
 
 export function OrderActionsProvider({ children }: { children: ReactNode }) {
   const futuAccountEnv = useFutuAccountEnv();
@@ -132,6 +119,40 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
   const modifySeqCountsRef = useRef<Map<string, number>>(new Map());
   const futuEnvRef = useRef(futuAccountEnv);
   futuEnvRef.current = futuAccountEnv;
+  const ordersUpdaterScopeRef = useRef<string | null>(null);
+  const futuUnconfirmedRef = useRef<Set<string>>(new Set());
+  const [futuUnconfirmedKeys, setFutuUnconfirmedKeys] = useState<Set<string>>(
+    () => new Set(),
+  );
+
+  const markFutuUnconfirmed = useCallback(
+    (env: FutuAccountEnv, brokerOrderId: string) => {
+      const key = futuManagementLockKey(env, brokerOrderId);
+      futuUnconfirmedRef.current.add(key);
+      setFutuUnconfirmedKeys(new Set(futuUnconfirmedRef.current));
+    },
+    [],
+  );
+
+  const clearFutuUnconfirmed = useCallback(
+    (env: FutuAccountEnv, brokerOrderId: string) => {
+      const key = futuManagementLockKey(env, brokerOrderId);
+      if (!futuUnconfirmedRef.current.delete(key)) return;
+      setFutuUnconfirmedKeys(new Set(futuUnconfirmedRef.current));
+    },
+    [],
+  );
+
+  const isFutuManagementLocked = useCallback(
+    (order: OpenOrder) => {
+      if (!order.brokerOrderId) return false;
+      const env = resolveFutuEnv(order, futuAccountEnv);
+      return futuUnconfirmedRef.current.has(
+        futuManagementLockKey(env, order.brokerOrderId),
+      );
+    },
+    [futuAccountEnv, futuUnconfirmedKeys],
+  );
 
   useEffect(() => {
     pendingModifiesRef.current = pendingModifies;
@@ -158,7 +179,13 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   /** Apply optimistic modify prices before pushing data to the UI */
-  const pushOrdersData = useCallback((data: OrdersData) => {
+  const pushOrdersData = useCallback((data: OrdersData, scopeKey: string) => {
+    if (
+      ordersUpdaterScopeRef.current != null &&
+      ordersUpdaterScopeRef.current !== scopeKey
+    ) {
+      return;
+    }
     const currentModifies = pendingModifiesRef.current;
     if (currentModifies.size === 0) {
       ordersUpdaterRef.current?.(data);
@@ -195,6 +222,7 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
 
   const startCancelPoll = useCallback(
     (order: OpenOrder) => {
+      if (isFutuOpenOrder(order)) return;
       const actionKey = openOrderActionKey(order);
       pollCountsRef.current.set(actionKey, 0);
 
@@ -233,7 +261,7 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
               ...prev,
             ]);
 
-            pushOrdersData(data);
+            pushOrdersData(data, ordersScopeKey(order, futuEnvRef.current));
             pushNotification({
               type: "success",
               message: `${order.symbol} order cancelled`,
@@ -246,14 +274,14 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
               next.delete(actionKey);
               return next;
             });
-            pushOrdersData(data);
+            pushOrdersData(data, ordersScopeKey(order, futuEnvRef.current));
             pushNotification({
               type: "error",
               message: `${order.symbol} cancellation failed — order still open. Try cancelling again.`,
               duration: 0,
             });
           } else {
-            pushOrdersData(data);
+            pushOrdersData(data, ordersScopeKey(order, futuEnvRef.current));
             scheduleNext();
           }
         } catch {
@@ -276,47 +304,151 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
       const actionKey = openOrderActionKey(order);
       const futu = isFutuOpenOrder(order);
       const env = resolveFutuEnv(order, futuAccountEnv);
+      const scopeKey = ordersScopeKey(order, futuAccountEnv);
       const cancelUrl = futu ? futuCancelApiPath(env) : "/api/orders/cancel";
       const cancelBody =
         futu && order.brokerOrderId
           ? { brokerOrderId: order.brokerOrderId }
           : { orderId: order.orderId, permId: order.permId };
+      if (
+        futu &&
+        order.brokerOrderId &&
+        futuUnconfirmedRef.current.has(
+          futuManagementLockKey(env, order.brokerOrderId),
+        )
+      ) {
+        const message = FUTU_MANAGEMENT_UNCONFIRMED_COPY;
+        pushNotification({ type: "error", message, duration: 0 });
+        return {
+          ok: false,
+          status: 409,
+          reasonCode: "FUTU_SEND_UNCERTAIN",
+          message,
+        };
+      }
       try {
         const res = await fetch(cancelUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(cancelBody),
         });
-        const json = await res.json().catch(() => ({}));
+        const json = (await res.json().catch(() => ({}))) as Record<
+          string,
+          unknown
+        >;
         if (!res.ok) {
+          if (
+            futu &&
+            order.brokerOrderId &&
+            isUncertainFutuManagementResponse(res.status, json)
+          ) {
+            markFutuUnconfirmed(env, order.brokerOrderId);
+            const message = FUTU_MANAGEMENT_UNCONFIRMED_COPY;
+            pushNotification({ type: "error", message, duration: 0 });
+            return {
+              ok: false,
+              status: res.status,
+              reasonCode: readReasonCode(json),
+              message,
+            };
+          }
           const reasonCode = readReasonCode(json);
           const message = reasonCode
             ? getReasonToast(reasonCode).copy
-            : json?.error ||
+            : (typeof json?.error === "string" ? json.error : null) ||
               (typeof json?.detail === "string"
                 ? json.detail
-                : json?.detail?.message) ||
+                : (json?.detail as { message?: string } | undefined)
+                    ?.message) ||
               "Cancel failed";
           pushNotification({ type: "error", message });
           return { ok: false, status: res.status, reasonCode, message };
         }
+
+        if (futu) {
+          if (json.orders) {
+            pushOrdersData(json.orders as OrdersData, scopeKey);
+          } else {
+            const data = await refreshOrders(order);
+            if (data) pushOrdersData(data, scopeKey);
+          }
+          const state = String(json.state ?? "").toUpperCase();
+          const confirmed = json.confirmed;
+          if (order.brokerOrderId) {
+            clearFutuUnconfirmed(env, order.brokerOrderId);
+          }
+          if (confirmed === true && state === "CANCELLED") {
+            pushNotification({
+              type: "success",
+              message: `${order.symbol} order cancelled`,
+            });
+            return { ok: true };
+          }
+          if (state === "FILLED") {
+            pushNotification({
+              type: "success",
+              message: `${order.symbol} order filled`,
+            });
+            return { ok: true };
+          }
+          if (state === "REJECTED") {
+            const message = `${order.symbol} cancel rejected by Futu`;
+            pushNotification({ type: "error", message });
+            return { ok: false, status: 409, reasonCode: "IB_REJECT", message };
+          }
+          if (confirmed === false) {
+            pushNotification({
+              type: "warning",
+              message: FUTU_MODIFY_SENT_UNCONFIRMED_COPY,
+            });
+            return { ok: true };
+          }
+          pushNotification({
+            type: "success",
+            message: `${order.symbol} cancel accepted`,
+          });
+          return { ok: true };
+        }
+
         setPendingCancels((prev) => new Map(prev).set(actionKey, order));
         startCancelPoll(order);
-        if (json.orders) pushOrdersData(json.orders as OrdersData);
+        if (json.orders) {
+          pushOrdersData(json.orders as OrdersData, scopeKey);
+        }
         return { ok: true };
       } catch {
+        if (futu && order.brokerOrderId) {
+          markFutuUnconfirmed(env, order.brokerOrderId);
+          const message = FUTU_MANAGEMENT_UNCONFIRMED_COPY;
+          pushNotification({ type: "error", message, duration: 0 });
+          return {
+            ok: false,
+            status: 0,
+            reasonCode: "FUTU_SEND_UNCERTAIN",
+            message,
+          };
+        }
         const message = "Cancel request failed";
         pushNotification({ type: "error", message });
         return { ok: false, status: 0, reasonCode: null, message };
       }
     },
-    [pushNotification, startCancelPoll, pushOrdersData, futuAccountEnv],
+    [
+      pushNotification,
+      startCancelPoll,
+      pushOrdersData,
+      futuAccountEnv,
+      refreshOrders,
+      markFutuUnconfirmed,
+      clearFutuUnconfirmed,
+    ],
   );
 
   /* ── Modify polling ─────────────────────────────────── */
 
   const startModifyPoll = useCallback(
     (order: OpenOrder, request: ModifyRequestWithOutsideRth) => {
+      if (isFutuOpenOrder(order)) return;
       const actionKey = openOrderActionKey(order);
       pollCountsRef.current.set(actionKey, 0);
 
@@ -332,18 +464,14 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
           }
 
           const liveOrder = findOpenOrderInSnapshot(data, order);
-          const futu = isFutuOpenOrder(order);
-          const confirmed = futu
-            ? futuModifyTermsMatch(liveOrder, request)
-            : Boolean(
-                liveOrder &&
-                (request.newPrice == null ||
-                  (liveOrder.limitPrice != null &&
-                    Math.abs(liveOrder.limitPrice - request.newPrice) <
-                      0.001)) &&
-                (request.newQuantity == null ||
-                  liveOrder.totalQuantity === request.newQuantity),
-              );
+          const confirmed = Boolean(
+            liveOrder &&
+            (request.newPrice == null ||
+              (liveOrder.limitPrice != null &&
+                Math.abs(liveOrder.limitPrice - request.newPrice) < 0.001)) &&
+            (request.newQuantity == null ||
+              liveOrder.totalQuantity === request.newQuantity),
+          );
 
           if (confirmed) {
             pollTimersRef.current.delete(actionKey);
@@ -355,7 +483,7 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
               return next;
             });
 
-            ordersUpdaterRef.current?.(data);
+            pushOrdersData(data, ordersScopeKey(order, futuEnvRef.current));
             const messageParts: string[] = [];
             if (request.newPrice != null) {
               messageParts.push(`price $${request.newPrice.toFixed(2)}`);
@@ -380,7 +508,7 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
               return next;
             });
 
-            ordersUpdaterRef.current?.(data);
+            pushOrdersData(data, ordersScopeKey(order, futuEnvRef.current));
             if (!isFutuOpenOrder(order)) {
               pushNotification({
                 type: "error",
@@ -389,7 +517,7 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
               });
             }
           } else {
-            pushOrdersData(data);
+            pushOrdersData(data, ordersScopeKey(order, futuEnvRef.current));
             scheduleNext();
           }
         } catch {
@@ -444,7 +572,11 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
 
       const { outsideRth, ...requestBody } = request;
       const seqKey = openOrderActionKey(order);
-      const nextSeq = (modifySeqCountsRef.current.get(seqKey) ?? 0) + 1;
+      const nextSeq = computeNextModifySequence(
+        order,
+        seqKey,
+        modifySeqCountsRef.current,
+      );
       modifySeqCountsRef.current.set(seqKey, nextSeq);
       let res: Response;
       try {
@@ -523,14 +655,31 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
       const actionKey = openOrderActionKey(order);
       const futu = isFutuOpenOrder(order);
       const env = resolveFutuEnv(order, futuAccountEnv);
+      const scopeKey = ordersScopeKey(order, futuAccountEnv);
       const modifyUrl = futu ? futuModifyApiPath(env) : "/api/orders/modify";
+      if (
+        futu &&
+        order.brokerOrderId &&
+        futuUnconfirmedRef.current.has(
+          futuManagementLockKey(env, order.brokerOrderId),
+        )
+      ) {
+        const message = FUTU_MANAGEMENT_UNCONFIRMED_COPY;
+        pushNotification({ type: "error", message, duration: 0 });
+        return {
+          ok: false,
+          status: 409,
+          reasonCode: "FUTU_SEND_UNCERTAIN",
+          message,
+        };
+      }
       try {
         const { outsideRth, ...requestBody } = request;
-        const baseSeq =
-          order.modifySequence ??
-          modifySeqCountsRef.current.get(actionKey) ??
-          0;
-        const nextSeq = baseSeq + 1;
+        const nextSeq = computeNextModifySequence(
+          order,
+          actionKey,
+          modifySeqCountsRef.current,
+        );
         modifySeqCountsRef.current.set(actionKey, nextSeq);
         const modifyBody =
           futu && order.brokerOrderId
@@ -554,6 +703,21 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
         const json = await res.json().catch(() => ({}));
         if (!res.ok) {
           const reasonCode = readReasonCode(json);
+          if (
+            futu &&
+            order.brokerOrderId &&
+            isUncertainFutuManagementResponse(res.status, json)
+          ) {
+            markFutuUnconfirmed(env, order.brokerOrderId);
+            const message = FUTU_MANAGEMENT_UNCONFIRMED_COPY;
+            pushNotification({ type: "error", message, duration: 0 });
+            return {
+              ok: false,
+              status: res.status,
+              reasonCode,
+              message,
+            };
+          }
           if (reasonCode === "MODIFY_STALE") {
             const detail = (json as { detail?: unknown })?.detail;
             const applied =
@@ -566,19 +730,23 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
           }
           const message = reasonCode
             ? getReasonToast(reasonCode).copy
-            : json?.error ||
+            : (typeof json?.error === "string" ? json.error : null) ||
               (typeof json?.detail === "string"
                 ? json.detail
-                : json?.detail?.message) ||
+                : (json?.detail as { message?: string } | undefined)
+                    ?.message) ||
               "Modify failed";
           pushNotification({ type: "error", message });
           return { ok: false, status: res.status, reasonCode, message };
         }
         const appliedSeq = (json as { applied_sequence?: unknown })
           ?.applied_sequence;
-        if (typeof appliedSeq === "number") {
-          modifySeqCountsRef.current.set(actionKey, appliedSeq);
-        }
+        recordAppliedModifySequence(
+          actionKey,
+          modifySeqCountsRef.current,
+          typeof appliedSeq === "number" ? appliedSeq : undefined,
+          nextSeq,
+        );
         if (request.newPrice != null || request.newQuantity != null) {
           const pm: PendingModify = {
             order,
@@ -589,7 +757,7 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
         }
 
         if (json.orders) {
-          pushOrdersData(json.orders as OrdersData);
+          pushOrdersData(json.orders as OrdersData, scopeKey);
         }
 
         const hasFieldChange =
@@ -597,6 +765,9 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
 
         if (futu && hasFieldChange) {
           const serverConfirmed = (json as { confirmed?: unknown }).confirmed;
+          if (order.brokerOrderId) {
+            clearFutuUnconfirmed(env, order.brokerOrderId);
+          }
           if (serverConfirmed === true) {
             setPendingModifies((prev) => {
               const next = new Map(prev);
@@ -622,9 +793,11 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
               type: "warning",
               message: FUTU_MODIFY_SENT_UNCONFIRMED_COPY,
             });
-            startModifyPoll(order, request);
           } else {
-            startModifyPoll(order, request);
+            pushNotification({
+              type: "warning",
+              message: FUTU_MODIFY_SENT_UNCONFIRMED_COPY,
+            });
           }
         } else if (hasFieldChange) {
           startModifyPoll(order, request);
@@ -636,6 +809,17 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
         }
         return { ok: true };
       } catch {
+        if (futu && order.brokerOrderId) {
+          markFutuUnconfirmed(env, order.brokerOrderId);
+          const message = FUTU_MANAGEMENT_UNCONFIRMED_COPY;
+          pushNotification({ type: "error", message, duration: 0 });
+          return {
+            ok: false,
+            status: 0,
+            reasonCode: "FUTU_SEND_UNCERTAIN",
+            message,
+          };
+        }
         const message = "Modify request failed";
         pushNotification({ type: "error", message });
         return { ok: false, status: 0, reasonCode: null, message };
@@ -647,6 +831,8 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
       pushOrdersData,
       requestReplace,
       futuAccountEnv,
+      markFutuUnconfirmed,
+      clearFutuUnconfirmed,
     ],
   );
 
@@ -658,8 +844,12 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setOrdersUpdater = useCallback(
-    (fn: ((data: OrdersData) => void) | null) => {
+    (
+      fn: ((data: OrdersData) => void) | null,
+      scopeKey: string | null = null,
+    ) => {
       ordersUpdaterRef.current = fn;
+      ordersUpdaterScopeRef.current = scopeKey;
     },
     [],
   );
@@ -685,6 +875,7 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
         drainNotifications,
         setOrdersUpdater,
         lockedReplacements,
+        isFutuManagementLocked,
       }}
     >
       {children}

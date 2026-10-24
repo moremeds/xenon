@@ -15,6 +15,15 @@ vi.mock("@/components/Modal", () => ({
 const markSubmitted = vi.fn();
 const markTerminal = vi.fn();
 const onFieldEdit = vi.fn();
+vi.mock("@/lib/futuAccountEnv", () => ({
+  useFutuAccountEnv: () => "paper",
+  futuScopeQuery: (env: string) => `?broker=FUTU&account_env=${env}`,
+}));
+vi.mock("@/lib/useFutuTrading", () => ({
+  useFutuTrading: () => ({ paper: true, live: false }),
+  futuTradingEnabledForEnv: () => true,
+}));
+
 vi.mock("@/components/ticker-detail/useClientAttemptId", () => ({
   useClientAttemptId: () => ({
     id: "test-attempt-id-123",

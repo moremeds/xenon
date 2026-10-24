@@ -406,11 +406,14 @@ export default function WorkspaceShell({
   const syncNow = isOrdersPage ? ordersSyncNow : portfolioSyncNow;
   const syncTarget = isOrdersPage ? "orders" : "portfolio";
 
+  const ordersScopeKey =
+    activeAccount === "futu" ? `FUTU:${futuAccountEnv}` : "IB";
+
   // Register the orders-data updater so the cancel provider can push fresh data
   useEffect(() => {
-    setOrdersUpdater(updateOrdersData);
-    return () => setOrdersUpdater(null);
-  }, [setOrdersUpdater, updateOrdersData]);
+    setOrdersUpdater(updateOrdersData, ordersScopeKey);
+    return () => setOrdersUpdater(null, null);
+  }, [setOrdersUpdater, updateOrdersData, ordersScopeKey]);
 
   // Drain cancel-context notifications into the toast system
   useEffect(() => {

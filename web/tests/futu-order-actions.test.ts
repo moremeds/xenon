@@ -98,7 +98,17 @@ describe("OrderActionsContext Futu cancel", () => {
   it("POST cancel includes brokerOrderId and scoped query", async () => {
     fetchSpy.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ status: "ok", orders: { open_orders: [] } }),
+      json: async () => ({
+        status: "ok",
+        confirmed: true,
+        state: "CANCELLED",
+        orders: {
+          open_orders: [],
+          executed_orders: [],
+          open_count: 0,
+          executed_count: 0,
+        },
+      }),
     });
 
     const { result } = renderHook(() => useOrderActions(), { wrapper });

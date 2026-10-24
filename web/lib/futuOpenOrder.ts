@@ -75,6 +75,40 @@ export function findOpenOrderInSnapshot(
 export const FUTU_MODIFY_SENT_UNCONFIRMED_COPY =
   "sent, Futu has not reported the new terms yet";
 
+/** Uncertain cancel/modify — hide row actions until reconciliation or reload. */
+export const FUTU_MANAGEMENT_UNCONFIRMED_COPY =
+  "unconfirmed — check the Futu app";
+
+export function futuManagementLockKey(
+  env: FutuAccountEnv,
+  brokerOrderId: string,
+): string {
+  return `${env}:${brokerOrderId}`;
+}
+
+export function computeNextModifySequence(
+  order: OpenOrder,
+  actionKey: string,
+  localSeqByKey: Map<string, number>,
+): number {
+  const rowSeq = order.modifySequence ?? 0;
+  const localSeq = localSeqByKey.get(actionKey) ?? 0;
+  return Math.max(rowSeq, localSeq) + 1;
+}
+
+export function recordAppliedModifySequence(
+  actionKey: string,
+  localSeqByKey: Map<string, number>,
+  applied: number | undefined,
+  sentSequence: number,
+): void {
+  const next = Math.max(
+    localSeqByKey.get(actionKey) ?? 0,
+    typeof applied === "number" ? applied : sentSequence,
+  );
+  localSeqByKey.set(actionKey, next);
+}
+
 /** Last 4 of broker account for ticket badge (never full number). */
 export function futuAccountTail(
   accountId: string | null | undefined,

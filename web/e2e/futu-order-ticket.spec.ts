@@ -439,6 +439,33 @@ test.describe("Futu order ticket", () => {
     }
   });
 
+  test("env switch closes open cancel dialog without POST /cancel", async ({
+    page,
+  }) => {
+    const { captured } = await installOrderFlowMocks(page, {
+      paper: true,
+      live: false,
+    });
+    await openFutuTab(page);
+    await page.locator(".position-order-btn").first().click();
+    await expect(page.getByRole("dialog")).toContainText("SIMULATE");
+    await page.locator("#position-order-price").fill("178.50");
+    await page.getByRole("button", { name: "Submit close" }).click();
+    await page.goto("/orders");
+    await expect(page.getByRole("button", { name: "CANCEL" })).toBeVisible();
+    await page.getByRole("button", { name: "CANCEL" }).click();
+    await expect(
+      page.getByRole("button", { name: "Cancel Order" }),
+    ).toBeVisible();
+    await page.getByTestId("futu-env-real").click({ force: true });
+    await expect(
+      page.getByRole("button", { name: "Cancel Order" }),
+    ).toHaveCount(0);
+    expect(
+      captured.some((c) => c.url.includes("/cancel") && c.method === "POST"),
+    ).toBe(false);
+  });
+
   test("REAL with trading.live=false: no order action buttons", async ({
     page,
   }) => {

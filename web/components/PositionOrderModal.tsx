@@ -3,7 +3,13 @@
 import { useEffect, useMemo, useState } from "react";
 import type { PortfolioPosition } from "@/lib/types";
 import type { FutuAccountEnv } from "@/lib/futuAccountEnv";
-import { futuScopeQuery } from "@/lib/futuAccountEnv";
+import { futuScopeQuery, useFutuAccountEnv } from "@/lib/futuAccountEnv";
+import {
+  scopesMatch,
+  ticketAnchorFromTable,
+  type TicketAnchor,
+} from "@/lib/orderActionScope";
+import { futuTradingEnabledForEnv, useFutuTrading } from "@/lib/useFutuTrading";
 import {
   checkNakedShortRisk,
   type NakedShortPortfolio,
@@ -54,6 +60,8 @@ type Props = {
     accountTail: string | null;
     portfolioPositions: PortfolioPosition[];
   };
+  /** Broker/env captured when the ticket opened (F2). */
+  ticketAnchor?: TicketAnchor | null;
 };
 
 function unifiedLegsFromPosition(pos: PortfolioPosition): UnifiedOrderLeg[] {
@@ -76,7 +84,10 @@ export default function PositionOrderModal({
   onClose,
   onSubmitted,
   futuTicket,
+  ticketAnchor = null,
 }: Props) {
+  const futuEnv = useFutuAccountEnv();
+  const futuTrading = useFutuTrading();
   const [intent, setIntent] = useState<Intent>("close");
 
   const draft: TicketDraft = useMemo(
@@ -100,6 +111,21 @@ export default function PositionOrderModal({
   const [error, setError] = useState<string | null>(null);
 
   const attemptId = useClientAttemptId({ ticker: position.ticker });
+
+  const currentAnchor = futuTicket
+    ? ticketAnchorFromTable(true, futuTicket.env)
+    : ticketAnchorFromTable(false, futuEnv);
+
+  useEffect(() => {
+    if (!ticketAnchor) return;
+    if (!scopesMatch(ticketAnchor, currentAnchor)) onClose();
+  }, [ticketAnchor, currentAnchor, onClose]);
+
+  useEffect(() => {
+    if (!futuTicket || !ticketAnchor) return;
+    if (futuTrading === null) return;
+    if (!futuTradingEnabledForEnv(futuTrading, futuTicket.env)) onClose();
+  }, [futuTrading, futuTicket, ticketAnchor, onClose]);
 
   // Reseed price ONLY when intent toggles (Close ↔ Add). We deliberately do NOT
   // reseed on live mid changes — that would clobber whatever the user has typed
@@ -142,6 +168,14 @@ export default function PositionOrderModal({
       nakedShortWarning
     )
       return;
+    if (ticketAnchor && !scopesMatch(ticketAnchor, currentAnchor)) {
+      setError("Account scope changed — reopen the ticket.");
+      return;
+    }
+    if (futuTicket && !futuTradingEnabledForEnv(futuTrading, futuTicket.env)) {
+      setError("Futu trading is disabled for this environment.");
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {

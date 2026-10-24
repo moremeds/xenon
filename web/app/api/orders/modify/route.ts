@@ -244,6 +244,9 @@ export async function POST(request: Request): Promise<Response> {
       ...(typeof result.confirmed === "boolean"
         ? { confirmed: result.confirmed }
         : {}),
+      ...(typeof result.applied_sequence === "number"
+        ? { applied_sequence: result.applied_sequence }
+        : {}),
     });
   } catch (error) {
     return passThroughXenonError(error, requestId);

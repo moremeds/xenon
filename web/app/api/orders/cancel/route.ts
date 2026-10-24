@@ -59,6 +59,13 @@ export async function POST(request: Request): Promise<Response> {
       status: "ok",
       message: result.message,
       orders,
+      ...(typeof result.confirmed === "boolean"
+        ? { confirmed: result.confirmed }
+        : {}),
+      ...(typeof result.state === "string" ? { state: result.state } : {}),
+      ...(typeof result.brokerOrderId === "string"
+        ? { brokerOrderId: result.brokerOrderId }
+        : {}),
     });
   } catch (error) {
     return passThroughXenonError(error, requestId);

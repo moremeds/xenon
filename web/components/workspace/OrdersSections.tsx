@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CheckCircle2,
   ChevronDown,
@@ -50,6 +50,13 @@ import {
 } from "./fillGrouping";
 import { HistoricalTradesSection } from "./HistoricalTradesSection";
 import { futuManageableOpenOrder, isFutuOpenOrder } from "@/lib/futuOpenOrder";
+import { useFutuAccountEnv } from "@/lib/futuAccountEnv";
+import {
+  orderActionScope,
+  scopesMatch,
+  type OrderActionScope,
+} from "@/lib/orderActionScope";
+import { futuTradingEnabledForEnv, useFutuTrading } from "@/lib/useFutuTrading";
 
 export function OrdersSections({
   orders,
@@ -66,6 +73,15 @@ export function OrdersSections({
 }) {
   // Futu is read-only: no order modify/cancel surfaces (mirrors the position table gate).
   const readonly = activeAccount === "futu" && !futuOrderActionsEnabled;
+  const futuEnv = useFutuAccountEnv();
+  const futuTrading = useFutuTrading();
+  const viewScope: OrderActionScope = useMemo(
+    () =>
+      activeAccount === "futu"
+        ? { broker: "FUTU", accountEnv: futuEnv }
+        : { broker: "IB" },
+    [activeAccount, futuEnv],
+  );
   const {
     isPendingCancel: checkPendingCancel,
     isPendingModify: checkPendingModify,
@@ -73,6 +89,7 @@ export function OrdersSections({
     requestCancel,
     requestModify,
     lockedReplacements,
+    isFutuManagementLocked,
   } = useOrderActions();
   const futuComboActionsHidden =
     activeAccount === "futu" && futuOrderActionsEnabled;
@@ -99,8 +116,38 @@ export function OrdersSections({
   } | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
 
+  useEffect(() => {
+    setCancelTarget(null);
+    setModifyTarget(null);
+  }, [viewScope.broker, viewScope.accountEnv, futuOrderActionsEnabled]);
+
+  const canManageOrder = useCallback(
+    (o: OpenOrder) => {
+      if (!scopesMatch(orderActionScope(o, futuEnv), viewScope)) return false;
+      if (isFutuOpenOrder(o)) {
+        if (!futuManageableOpenOrder(o)) return false;
+        if (isFutuManagementLocked(o)) return false;
+        if (
+          !futuTradingEnabledForEnv(
+            futuTrading,
+            o.accountEnv === "paper" || o.accountEnv === "live"
+              ? o.accountEnv
+              : futuEnv,
+          )
+        ) {
+          return false;
+        }
+      }
+      return true;
+    },
+    [futuEnv, viewScope, futuTrading, isFutuManagementLocked],
+  );
+
   const handleCancel = useCallback(async () => {
-    if (!cancelTarget) return;
+    if (!cancelTarget || !canManageOrder(cancelTarget)) {
+      setCancelTarget(null);
+      return;
+    }
     setActionLoading(true);
     const result = await requestCancel(cancelTarget);
     setActionLoading(false);
@@ -109,11 +156,14 @@ export function OrdersSections({
     if (result.ok) {
       setCancelTarget(null);
     }
-  }, [cancelTarget, requestCancel]);
+  }, [cancelTarget, requestCancel, canManageOrder]);
 
   const handleModify = useCallback(
     async (request: ModifyOrderRequest) => {
-      if (!modifyTarget) return;
+      if (!modifyTarget || !canManageOrder(modifyTarget.requestOrder)) {
+        setModifyTarget(null);
+        return;
+      }
       setActionLoading(true);
       const result = await requestModify(
         modifyTarget.requestOrder,
@@ -126,7 +176,7 @@ export function OrdersSections({
         setModifyTarget(null);
       }
     },
-    [modifyTarget, requestModify],
+    [modifyTarget, requestModify, canManageOrder],
   );
 
   const handleCancelCombo = useCallback(
@@ -221,7 +271,8 @@ export function OrdersSections({
   }
 
   const canModify = (o: OpenOrder) => {
-    if (isFutuOpenOrder(o)) return futuManageableOpenOrder(o);
+    if (!canManageOrder(o)) return false;
+    if (isFutuOpenOrder(o)) return true;
     return o.orderType === "LMT" || o.orderType === "STP LMT";
   };
   const execCount = orders.executed_count + cancelledOrders.length;
@@ -229,13 +280,19 @@ export function OrdersSections({
   return (
     <>
       <CancelOrderDialog
-        order={cancelTarget}
+        order={
+          cancelTarget && canManageOrder(cancelTarget) ? cancelTarget : null
+        }
         loading={actionLoading}
         onConfirm={handleCancel}
         onClose={() => setCancelTarget(null)}
       />
       <ModifyOrderModal
-        order={modifyTarget?.modalOrder ?? null}
+        order={
+          modifyTarget && canManageOrder(modifyTarget.requestOrder)
+            ? modifyTarget.modalOrder
+            : null
+        }
         loading={actionLoading}
         prices={prices}
         portfolio={portfolio}
