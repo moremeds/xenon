@@ -604,7 +604,10 @@ order_submissions = Table(
     # multiplier, guarantee mode, original/replacement qty) for Gate-4
     # coverage. NULL for pre-PR-03a rows and snapshot-imported orders.
     Column("legs", JSONB),
-    CheckConstraint("broker = 'IB'", name="ck_order_sub_broker_ib_only"),
+    # The broker's own order id as a string (Futu order ids); NULL for IB
+    # rows, which use ib_order_id / perm_id. Unique per scope when set.
+    Column("broker_order_id", Text),
+    CheckConstraint("broker IN ('IB','FUTU')", name="ck_order_sub_broker"),
     CheckConstraint(
         "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
         name="ck_order_sub_account_env",
@@ -645,6 +648,15 @@ order_submissions = Table(
     Index("ix_order_sub_state_ticker", "state", "ticker"),
     Index("ix_order_sub_perm_id", "broker", "account_env", "broker_account", "perm_id"),
     Index("ix_order_sub_ib_order_id", "broker", "account_env", "broker_account", "ib_order_id"),
+    Index(
+        "uq_order_sub_broker_order_id",
+        "broker",
+        "account_env",
+        "broker_account",
+        "broker_order_id",
+        unique=True,
+        postgresql_where=text("broker_order_id IS NOT NULL"),
+    ),
 )
 
 order_events = Table(
