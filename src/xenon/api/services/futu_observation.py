@@ -367,6 +367,14 @@ def _order_observation(
     )
 
 
+def observation_from_row(row: dict, scope: AccountScope, read_at: datetime) -> orders_store.FutuOrderObservation | None:
+    """One fresh order row read by the order dispatch (X3c), parsed like a
+    pass row. No option metadata lookup: an own row keeps its stored legs
+    (`orders_store._futu_state_values`), an unresolved leg list never
+    replaces a stored one (`merge_observed_legs`)."""
+    return _order_observation(row, scope, _MetaCache(None), read_at)
+
+
 def _position_entry(row: dict, scope: AccountScope, metas: _MetaCache) -> dict | None:
     """One US position row → payload position (one leg); None when the row
     cannot be classified (unparseable code, missing qty, side contradicts sign)."""

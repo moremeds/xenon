@@ -142,14 +142,12 @@ async def test_a2_replaced_account_stays_observed_and_vetoes_only_its_env(monkey
             resp = guards.ensure_order_allowed("order placement", _state(), account_env="paper")
             assert resp.status_code == 403 and resp.body and b"FUTU_SCOPE_CHANGE_PENDING" in resp.body
     assert len([r for r in caplog.records if "FUTU_SCOPE_CHANGE_PENDING" in r.getMessage()]) == 1
-    live = guards.ensure_order_allowed("order placement", _state(), account_env="live")
-    assert b"FUTU_SCOPE_CHANGE_PENDING" not in live.body  # the veto is per env
+    assert guards.ensure_order_allowed("order placement", _state(), account_env="live") is None  # per env
 
     _resolve_all()  # the old rows are resolved
     await loops.reconcile()
     assert set(loops.loops) == {NEW_PAPER, LIVE}
-    resp = guards.ensure_order_allowed("order placement", _state(), account_env="paper")
-    assert b"FUTU_SCOPE_CHANGE_PENDING" not in resp.body
+    assert guards.ensure_order_allowed("order placement", _state(), account_env="paper") is None
     await loops.stop()
 
 
@@ -180,9 +178,7 @@ def test_a2_plain_toggle_between_configured_scopes_never_vetoes(monkeypatch):
     _observe_working()  # unresolved paper row of the configured paper account
 
     for env in ("paper", "live", "paper"):
-        resp = guards.ensure_order_allowed("order placement", _state(), account_env=env)
-        assert b"FUTU_SCOPE_CHANGE_PENDING" not in resp.body
-        assert b"READ_ONLY_BROKER" in resp.body  # Task 3 has not wired the dispatch yet
+        assert guards.ensure_order_allowed("order placement", _state(), account_env=env) is None  # no veto
     assert guards.futu_scope_change_pending("paper") == [] and guards.futu_scope_change_pending("live") == []
 
 

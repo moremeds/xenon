@@ -18,9 +18,15 @@ from sqlalchemy import update
 
 from scripts.tests.test_futu_observation import (  # noqa: F401 — autouse fixture
     ACC,
+    CALL_CODE,
+    ORDER_COLS,
+    OTHER_ACC,
     SCOPE,
+    SPY_META,
     FakeTradeCtx,
+    _acc_row,
     _env,
+    _frame,
     _order,
     _pos,
     resolver,
@@ -246,3 +252,346 @@ def test_orders_refresh_applies_the_same_scope_rule(monkeypatch, db_scope):
 def test_ib_payload_shape_unchanged():
     body = orders_payload_for_scope(AccountScope(broker="IB", account_env="paper", broker_account="DU0000000"))
     assert set(body) == {"last_sync", "open_orders", "executed_orders", "open_count", "executed_count"}
+
+
+# -- X3c Task 3: FUTU dispatch (place / cancel / modify) ----------------------
+#
+# A fake Futu trade context (no OpenD), driven through the real routes, the
+# real Futu order worker, Gate 4 and the observation mirror. Ids, quantities
+# and prices are made-up test values, not market data.
+
+LIVE_ACC = "281756479345015777"
+SECRET = "0123456789abcdef0123456789ABCDEF"  # made-up, format-valid
+
+
+class FakeOrderCtx(FakeTradeCtx):
+    """FakeTradeCtx plus the trade mutations, over an in-memory order book."""
+
+    def __init__(self, *, place="ok", modify="apply", cancel="cancelled"):
+        super().__init__(accounts=[_acc_row(), _acc_row(LIVE_ACC, env="REAL")])
+        self.place_mode, self.modify_mode, self.cancel_mode = place, modify, cancel
+        self.book: dict[str, dict] = {}
+        self.mutations: list[tuple[str, dict]] = []
+        self.unlocks = 0
+        self._next = 8812345678900000001
+
+    def unlock_trade(self, **kw):
+        self.unlocks += 1
+        self.calls.append(("unlock_trade", {}))
+        return 0, "ok"
+
+    def place_order(self, **kw):
+        self.mutations.append(("place_order", kw))
+        if self.place_mode == "lost":
+            return -1, "timeout"
+        oid = str(self._next)
+        self._next += 1
+        row = _order(order_id=oid, code=kw["code"], side=kw["trd_side"], qty=float(kw["qty"]), remark=kw["remark"])
+        row["price"] = kw["price"]
+        self.book[oid] = row
+        if self.place_mode == "error_after_send":
+            return -1, "timeout"
+        return 0, _frame(ORDER_COLS, [row])
+
+    def modify_order(self, **kw):
+        self.mutations.append(("modify_order", kw))
+        row = self.book[kw["order_id"]]
+        if kw["modify_order_op"] == "CANCEL":
+            row["order_status"] = {"cancelled": "CANCELLED_ALL", "pending": "SUBMITTED"}[self.cancel_mode]
+        elif self.modify_mode == "apply":
+            row["qty"], row["price"] = float(kw["qty"]), kw["price"]
+        return 0, _frame(["trd_env", "order_id"], [{"trd_env": kw["trd_env"], "order_id": kw["order_id"]}])
+
+    def order_list_query(self, **kw):
+        rows = [
+            r
+            for r in self.book.values()
+            if kw.get("order_id") in (None, r["order_id"]) and kw.get("code") in (None, r["code"])
+        ]
+        return self._after("open_orders", kw, _frame(ORDER_COLS, rows))
+
+
+class _NoIB:
+    """server.order_owner / ib_pool stand-in: any IB use fails the test."""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"FUTU request reached IB ({name})")
+
+
+@pytest.fixture
+def futu_ib_quotes(monkeypatch):
+    """FUTU trading on for both envs; the IB quote gate is the real one."""
+    from fastapi.testclient import TestClient
+
+    from xenon.api import server
+    from xenon.api.futu_order_worker import FutuOrderWorker
+
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_REAL", LIVE_ACC)
+    monkeypatch.setenv("XENON_FUTU_TRADING", "simulate,real")
+    monkeypatch.setenv("FUTU_TRADE_PWD_MD5", SECRET)
+    ctx = FakeOrderCtx()
+    worker = FutuOrderWorker(connect=lambda scope: (ctx, lambda: None))
+    monkeypatch.setattr(server.app.state, "futu_order_worker", worker, raising=False)
+    monkeypatch.setattr(server, "order_owner", _NoIB())
+    ns = type("Futu", (), {})()
+    ns.ctx, ns.client, ns.worker = ctx, TestClient(server.app), worker
+    return ns
+
+
+@pytest.fixture
+def futu(futu_ib_quotes, monkeypatch):
+    """As futu_ib_quotes, with the IB quote gate passing."""
+    from xenon.api.services import order_entry
+
+    async def _quote_ok(body, submission_id):
+        return None
+
+    monkeypatch.setattr(order_entry, "_quote_gate", _quote_ok)
+    return futu_ib_quotes
+
+
+def _stock(cid="futu-place-1", **kw):
+    return {
+        "type": "stock",
+        "symbol": "SPY",
+        "action": "BUY",
+        "quantity": 2,
+        "limitPrice": 500.2,
+        "client_attempt_id": cid,
+        **kw,
+    }
+
+
+def _post(futu, path, body, env="paper"):
+    return futu.client.post(path, params={"broker": "FUTU", "account_env": env}, json=body)
+
+
+def _row(sid):
+    with get_sync_engine().connect() as conn:
+        return conn.execute(order_submissions.select().where(order_submissions.c.submission_id == sid)).first()
+
+
+def _fill_count():
+    from sqlalchemy import func, select
+
+    from xenon.db.schema import order_fills
+
+    with get_sync_engine().connect() as conn:
+        return conn.execute(select(func.count()).select_from(order_fills)).scalar()
+
+
+@pytest.mark.parametrize("env, acc, trd_env, unlocks", [("paper", ACC, "SIMULATE", 0), ("live", LIVE_ACC, "REAL", 1)])
+def test_futu_place_binds_own_row_in_the_request_scope(futu, env, acc, trd_env, unlocks):
+    resp = _post(futu, "/orders/place", _stock(), env=env)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    sid, oid = body["submission_id"], body["brokerOrderId"]
+    assert isinstance(oid, str) and body["broker"] == "FUTU" and body["accountEnv"] == env
+    assert acc not in resp.text  # no account number in the reply
+    [(name, kw)] = futu.ctx.mutations
+    assert name == "place_order" and kw["acc_id"] == int(acc) and kw["trd_env"] == trd_env
+    assert kw["remark"] == f"xo:{sid}" and kw["code"] == "US.SPY" and kw["trd_side"] == "BUY"
+    assert futu.ctx.unlocks == unlocks  # unlock only for REAL
+    row = _row(sid)
+    assert (row.broker, row.account_env, row.broker_account) == ("FUTU", env, acc)
+    assert row.broker_order_id == oid and row.state == "WORKING" and row.ib_order_id is None
+    assert (row.ticker, row.action, row.quantity) == ("SPY", "BUY", 2)
+    assert row.legs["futu_code"] == "US.SPY"
+    assert _fill_count() == 0  # the dispatch never writes order_fills
+
+
+def test_futu_place_option_row_carries_the_futu_code(futu, monkeypatch):
+    from xenon.api.services import order_entry
+
+    async def _meta(body):
+        return [dict(SPY_META)]
+
+    monkeypatch.setattr(order_entry, "_resolve_gate4_leg_meta", _meta)
+    body = _stock(type="option", expiry="2026-12-18", right="C", strike=500, limitPrice=1.25)
+
+    resp = _post(futu, "/orders/place", body)
+
+    assert resp.status_code == 200, resp.text
+    row = _row(resp.json()["submission_id"])
+    assert futu.ctx.mutations[0][1]["code"] == CALL_CODE == row.legs["futu_code"]
+    assert (row.security_type, row.right, float(row.strike)) == ("OPT", "C", 500.0)
+    assert row.expiry.strftime("%Y%m%d") == "20261218"
+
+
+@pytest.mark.parametrize("mode", ["lost", "error_after_send"])
+def test_futu_uncertain_place_is_unknown_or_recovered_by_remark_never_resent(futu, mode):
+    futu.ctx.place_mode = mode
+
+    resp = _post(futu, "/orders/place", _stock())
+
+    assert [m[0] for m in futu.ctx.mutations] == ["place_order"]  # never re-sent
+    remark_reads = [kw for name, kw in futu.ctx.calls if name == "open_orders" and kw.get("code") == "US.SPY"]
+    assert remark_reads and all(kw["refresh_cache"] is True and kw["acc_id"] == int(ACC) for kw in remark_reads)
+    if mode == "lost":  # no order carries the remark → UNKNOWN, demand kept
+        assert resp.status_code == 502 and resp.json()["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
+        row = _row(resp.json()["submission_id"])
+        assert row.state == "UNKNOWN" and row.broker_order_id is None
+    else:  # the order exists: found by its exact remark and bound
+        assert resp.status_code == 200, resp.text
+        row = _row(resp.json()["submission_id"])
+        assert row.state == "WORKING" and row.broker_order_id == next(iter(futu.ctx.book))
+
+
+def test_futu_place_with_ib_quotes_down_is_503_naming_ib(futu_ib_quotes, monkeypatch):
+    from xenon.api import server
+    from xenon.api.services import order_entry
+
+    monkeypatch.setattr(server, "ib_pool", None)  # IB data role down
+    monkeypatch.setattr(order_entry, "_now", lambda: datetime(2026, 10, 21, 15, 0, tzinfo=timezone.utc))  # RTH
+
+    resp = _post(futu_ib_quotes, "/orders/place", _stock(cid="futu-ib-down"))
+
+    assert resp.status_code == 503 and resp.json()["reason_code"] == "QUOTE_UNAVAILABLE"
+    assert "IB" in resp.json()["detail"]
+    assert futu_ib_quotes.ctx.mutations == []  # never sent, never re-routed
+
+
+@pytest.mark.parametrize(
+    "path, body, code",
+    [
+        ("/orders/place", {**_stock(), "type": "combo", "legs": []}, "READ_ONLY_BROKER"),
+        ("/orders/replace", {"replaceOrder": _stock()}, "READ_ONLY_BROKER"),
+    ],
+)
+def test_futu_combo_and_replace_are_refused_and_never_reach_ib(futu, path, body, code):
+    resp = _post(futu, path, body)
+
+    assert resp.status_code == 403 and resp.json()["reason_code"] == code
+    assert futu.ctx.mutations == [] and futu.ctx.calls == []
+
+
+def test_futu_mutation_without_account_env_is_refused(futu):
+    resp = futu.client.post("/orders/place", params={"broker": "FUTU"}, json=_stock())
+
+    assert resp.status_code == 400 and resp.json()["reason_code"] == "FUTU_SCOPE_REQUIRED"
+    assert futu.ctx.mutations == []
+
+
+def _placed(futu, cid="futu-manage-1"):
+    resp = _post(futu, "/orders/place", _stock(cid=cid))
+    assert resp.status_code == 200, resp.text
+    return resp.json()["submission_id"], resp.json()["brokerOrderId"]
+
+
+def test_futu_cancel_keeps_demand_until_fresh_evidence_is_terminal(futu):
+    sid, oid = _placed(futu)
+    futu.ctx.cancel_mode = "pending"  # RET_OK, but Futu still reports the order working
+
+    resp = _post(futu, "/orders/cancel", {"brokerOrderId": oid})
+
+    assert resp.status_code == 200 and resp.json()["confirmed"] is False
+    assert _row(sid).state == "WORKING"  # demand kept
+    futu.ctx.cancel_mode = "cancelled"
+
+    resp = _post(futu, "/orders/cancel", {"brokerOrderId": oid})
+
+    assert resp.status_code == 200 and resp.json()["confirmed"] is True
+    assert _row(sid).state == "CANCELLED"
+    cancels = [kw for name, kw in futu.ctx.mutations if name == "modify_order"]
+    assert all(kw["modify_order_op"] == "CANCEL" and kw["acc_id"] == int(ACC) for kw in cancels)
+
+
+def test_futu_management_ids_resolve_inside_the_request_scope_only(futu):
+    _sid, oid = _placed(futu)
+
+    for path, body in (
+        ("/orders/cancel", {"brokerOrderId": oid}),
+        ("/orders/modify", {"brokerOrderId": oid, "newPrice": 500.1, "modifySequence": 1}),
+    ):
+        resp = _post(futu, path, body, env="live")  # the paper order, asked in the live scope
+        assert resp.status_code == 404 and resp.json()["reason_code"] == "ORDER_NOT_FOUND"
+    resp = _post(futu, "/orders/cancel", {"orderId": 5})  # an IB id is not a Futu id
+    assert resp.status_code == 400 and resp.json()["reason_code"] == "ORDER_IDENTIFIER_REQUIRED"
+    assert [m[0] for m in futu.ctx.mutations] == ["place_order"]
+
+
+def test_futu_modify_runs_the_real_path_under_test_mode(futu, monkeypatch):
+    """The IB modify returns early under XENON_API_TEST_MODE; the FUTU modify
+    never does: it runs on the fake context and settles from evidence."""
+    monkeypatch.setenv("XENON_API_TEST_MODE", "1")
+    sid, oid = _placed(futu)
+
+    resp = _post(
+        futu, "/orders/modify", {"brokerOrderId": oid, "newQuantity": 3, "newPrice": 500.1, "modifySequence": 1}
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["confirmed"] is True and resp.json()["confirmedQuantity"] == 3
+    [(_, kw)] = [m for m in futu.ctx.mutations if m[0] == "modify_order"]
+    assert (kw["modify_order_op"], kw["qty"], kw["price"], kw["acc_id"]) == ("NORMAL", 3, 500.1, int(ACC))
+    row = _row(sid)
+    assert row.quantity == 3 and float(row.limit_price) == 500.1 and row.modify_sequence == 1
+    assert row.legs.get("pending_amend_qty") is None and row.legs.get("pending_amend_id") is None
+
+
+def test_futu_modify_without_fresh_evidence_keeps_the_larger_reservation(futu):
+    sid, oid = _placed(futu)
+    futu.ctx.modify_mode = "ignore"  # RET_OK, but Futu reports the old terms
+
+    resp = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newQuantity": 5, "modifySequence": 1})
+
+    assert resp.status_code == 200 and resp.json()["confirmed"] is False
+    row = _row(sid)
+    assert row.quantity == 2 and row.legs["pending_amend_qty"] == 5  # Gate 4 reserves max(2, 5)
+    resp = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newQuantity": 4, "modifySequence": 2})
+    assert resp.status_code == 409 and resp.json()["reason_code"] == "MODIFY_PENDING"
+    stale = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newPrice": 500.1, "modifySequence": 1})
+    assert stale.status_code == 409 and stale.json()["reason_code"] == "MODIFY_STALE"
+    assert len([m for m in futu.ctx.mutations if m[0] == "modify_order"]) == 1
+
+
+def test_futu_modify_after_the_send_window_sends_nothing(futu, monkeypatch):
+    from xenon.execution import gate4
+
+    sid, oid = _placed(futu)
+    monkeypatch.setattr(gate4, "MODIFY_SEND_WINDOW_S", -1)  # send_by already passed
+
+    resp = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newQuantity": 3, "modifySequence": 1})
+
+    assert resp.status_code == 503 and resp.json()["reason_code"] == "FUTU_SEND_WINDOW_CLOSED"
+    assert [m[0] for m in futu.ctx.mutations] == ["place_order"]
+    assert _row(sid).legs.get("pending_amend_id") is None  # proven unsent: the amend is released
+
+
+# -- /health futu.trading -----------------------------------------------------
+
+
+def _trading():
+    from xenon.api.routes import system
+
+    health = system._compute_futu_health()
+    assert ACC not in str(health) and LIVE_ACC not in str(health)
+    return health["trading"]
+
+
+def test_health_trading_all_true(futu):
+    assert _trading() == {"paper": True, "live": True}
+
+
+@pytest.mark.parametrize(
+    "change, expected",
+    [
+        (lambda mp: mp.setenv("XENON_FUTU_TRADING", "real"), {"paper": False, "live": True}),  # env not enabled
+        (lambda mp: mp.delenv("FUTU_TRADE_ACC_ID_REAL"), {"paper": True, "live": False}),  # no account
+        (lambda mp: mp.delenv("FUTU_TRADE_PWD_MD5"), {"paper": True, "live": False}),  # secret missing
+        (lambda mp: mp.setenv("FUTU_TRADE_PWD_MD5", "not-md5"), {"paper": True, "live": False}),  # malformed
+        (lambda mp: mp.setenv("XENON_READ_ONLY", "1"), {"paper": False, "live": False}),
+    ],
+)
+def test_health_trading_false_reasons(futu, monkeypatch, change, expected):
+    change(monkeypatch)
+    assert _trading() == expected
+
+
+def test_health_trading_false_under_scope_change_veto(futu, monkeypatch):
+    other = AccountScope(broker="FUTU", account_env="paper", broker_account=OTHER_ACC)
+    ctx = FakeTradeCtx(open_orders=[_order(order_id="7101", code="US.SPY", side="BUY")])
+    assert fo.run_pass(other, ctx, resolve_meta=resolver(), audit=False)["complete"]
+
+    assert _trading() == {"paper": False, "live": True}  # unresolved row of another paper account

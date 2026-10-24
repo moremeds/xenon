@@ -49,7 +49,8 @@ def _compute_futu_health() -> dict[str, Any]:
     display snapshot (`/futu/sync`), `observation` its newest observation
     pass, `held_rows` its rows held by FUTU_FILL_UNPRICED / FUTU_FILL_CONFLICT /
     FUTU_NOT_OBSERVED; never another account's row. A DB failure leaves the
-    fields None.
+    fields None. `trading` = {"paper", "live"} booleans
+    (`order_entry.futu_trading_status`).
     The account number is not reported (`/health` is unauthenticated).
     """
     from xenon.api import server
@@ -66,6 +67,9 @@ def _compute_futu_health() -> dict[str, Any]:
         **_futu_scope_health(scope, loops),
         "observation_loop": loops is not None and loops.running,
         "scope_env": scope.account_env if scope is not None else None,
+        # Per env: would a Futu order pass the guard now (X4b hides order
+        # actions otherwise). Booleans only, no account number.
+        "trading": order_entry.futu_trading_status(),
         # Per observed scope; the account number is not reported.
         "scopes": [
             {

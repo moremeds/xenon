@@ -245,9 +245,9 @@ def ensure_order_allowed(
        names) → 403 `READ_ONLY_BROKER` JSONResponse. FUTU first needs the
        request's `account_env` (missing / invalid → 400
        `FUTU_SCOPE_REQUIRED`), and after the capability the per-env scope
-       change veto (403 `FUTU_SCOPE_CHANGE_PENDING`, §11 A2). No Futu dispatch
-       exists in the order cores yet, so a non-IB broker is refused even
-       when its capability allows the operation. Broker denial precedes
+       change veto (403 `FUTU_SCOPE_CHANGE_PENDING`, §11 A2). An allowed
+       FUTU operation (place_single, cancel, modify) returns None: the core
+       dispatches it to the Futu order worker. Broker denial precedes
        the mode check: FUTU carries no IB trading mode to verify (see
        test_place_quote_gate.py
        `test_futu_scope_rejects_before_ib_mode_verification`).
@@ -272,7 +272,7 @@ def ensure_order_allowed(
         denial = broker_capability_denial(broker, operation, kind, account_env)
         if denial is None and broker == "FUTU":
             denial = _futu_change_pending_denial(account_env, kind)
-        return denial or _broker_403(broker, kind, "order dispatch for this broker is not wired")
+        return denial
     _check_mode_verified(state)
     return None
 

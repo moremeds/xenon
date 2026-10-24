@@ -115,12 +115,21 @@ def test_ensure_ib_unchanged():
     assert exc.value.status_code == 503
 
 
-@pytest.mark.parametrize("kind", ["order placement", "order cancellation", "order modification", "order replacement", "wizard submit"])
+_DISPATCHED = ["order placement", "order cancellation", "order modification"]
+
+
+@pytest.mark.parametrize("kind", [*_DISPATCHED, "order replacement", "wizard submit"])
 @pytest.mark.parametrize("enabled", [False, True])
-def test_ensure_futu_always_refused_in_x3a(monkeypatch, kind, enabled):
+def test_ensure_futu_refused_unless_enabled_and_dispatched(monkeypatch, kind, enabled):
+    """X3c: an enabled env passes place / cancel / modify to the Futu
+    dispatch (None); replace and wizard stay refused; nothing passes while
+    the env is not enabled."""
     if enabled:
         _enable_futu(monkeypatch)
     resp = guards.ensure_order_allowed(kind, _state("FUTU", mode_verified=False), account_env="paper")
+    if enabled and kind in _DISPATCHED:
+        assert resp is None
+        return
     assert resp.status_code == 403
     body = _body(resp)
     assert body["reason_code"] == "READ_ONLY_BROKER"

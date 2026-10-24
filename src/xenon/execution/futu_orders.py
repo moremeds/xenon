@@ -210,7 +210,10 @@ def _trd_env(account_env: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _secret(environ: Mapping[str, str]) -> str:
+def trade_secret(environ: Mapping[str, str]) -> str:
+    """The REAL unlock secret (`FUTU_TRADE_PWD_MD5`), format-checked only:
+    missing or not 32 hex characters → `FutuOrderRefused` (503). Also the
+    `/health` `futu.trading.live` check (which keeps only pass / fail)."""
     secret = environ.get(PWD_MD5_ENV, "")
     if not secret:
         raise FutuOrderRefused(UNLOCK_SECRET_MISSING, f"{PWD_MD5_ENV} is not set", 503)
@@ -235,7 +238,7 @@ def unlock(ctx: Any, account_env: str, *, environ: Mapping[str, str] | None = No
     function (not logged, not in the exception)."""
     if _trd_env(account_env) != "REAL":
         return
-    secret = _secret(os.environ if environ is None else environ)
+    secret = trade_secret(os.environ if environ is None else environ)
     raised = None
     try:
         ret, data = ctx.unlock_trade(password_md5=secret)

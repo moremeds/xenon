@@ -1,6 +1,8 @@
 """Order-entry HTTP routes: /orders/quote, /orders/place, /orders/cancel, /orders/replace, /orders/modify.
 
 Thin handlers: read-only refusal, body decode, then the core in services/order_entry.py.
+`?broker=FUTU&account_env=paper|live` selects the Futu dispatch (place / cancel /
+modify; replace is refused); it never falls back to IB.
 """
 
 from __future__ import annotations
@@ -15,6 +17,12 @@ from xenon.execution import quote_tokens
 from xenon.execution.quote_tokens import QuotePayload
 
 router = APIRouter()
+
+
+def _broker_scope(request: Request) -> dict:
+    """`?broker=` (default: app.state.broker, i.e. IB) and, for FUTU, the
+    request scope `?account_env=paper|live` (the only wire name, §11 A3)."""
+    return {"broker": request.query_params.get("broker"), "account_env": request.query_params.get("account_env")}
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +64,7 @@ async def orders_place(request: Request):
     if is_read_only():
         return read_only_403()
     body = await request.json()
-    return await order_entry.place(body)
+    return await order_entry.place(body, **_broker_scope(request))
 
 
 @router.post("/orders/cancel")
@@ -76,7 +84,7 @@ async def orders_cancel(request: Request):
     if is_read_only():
         return read_only_403()
     body = await request.json()
-    return await order_entry.cancel(body)
+    return await order_entry.cancel(body, **_broker_scope(request))
 
 
 @router.post("/orders/replace")
@@ -88,7 +96,7 @@ async def orders_replace(request: Request):
     if is_read_only():
         return read_only_403()
     body = await request.json()
-    return await order_entry.replace(body)
+    return await order_entry.replace(body, **_broker_scope(request))
 
 
 @router.post("/orders/modify")
@@ -107,4 +115,4 @@ async def orders_modify(request: Request):
     if is_read_only():
         return read_only_403()
     body = await request.json()
-    return await order_entry.modify(body)
+    return await order_entry.modify(body, **_broker_scope(request))
