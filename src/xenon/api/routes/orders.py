@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
-import re
+import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -14,7 +13,7 @@ from sqlalchemy import desc, select
 
 from xenon.api.guards import get_broker_scope
 from xenon.db.engine import get_sync_engine
-from xenon.db.schema import futu_orders, futu_trades, order_fills, order_submissions
+from xenon.db.schema import order_fills, order_submissions
 from xenon.execution.account_scope import AccountScope
 
 router = APIRouter()
@@ -174,135 +173,105 @@ def _fill_sec_type(row: dict[str, Any], metadata: dict[str, Any]) -> str:
     return str(submission_sec_type or "STK")
 
 
-# --- Futu read path: shape futu_orders/futu_trades into the IB OpenOrder/ExecutedOrder contract ---
+# --- Futu read path: the execution ledger (order_submissions + order_fills) ---
+# The observation loop (services/futu_observation.py) mirrors every Futu order
+# of the configured scope into the ledger. futu_orders / futu_trades are the
+# nightly history tables and are not read here. Futu ids (~19 digits) stay
+# strings; there is no numeric surrogate: orderId / permId are 0 (no IB id).
 
-_FUTU_STATUS = {
-    "SUBMITTING": "PendingSubmit",
-    "WAITING_SUBMIT": "PendingSubmit",
-    "SUBMITTED": "Submitted",
-    "FILLED_PART": "PartiallyFilled",
-    "FILLED_ALL": "Filled",
-    "CANCELLED_ALL": "Cancelled",
-    "CANCELLED_PART": "Cancelled",
-    "CANCELLING_PART": "Submitted",
-    "CANCELLING_ALL": "Submitted",
-}
-_FUTU_TYPE = {"NORMAL": "LMT", "MARKET": "MKT"}  # else passthrough raw Futu label
-_FUTU_OPEN_STATUSES = ("SUBMITTING", "SUBMITTED", "WAITING_SUBMIT", "FILLED_PART", "CANCELLING_PART", "CANCELLING_ALL")
-# OCC option symbol: <underlier><YYMMDD><C|P><strike*1000>.
-_OCC = re.compile(r"^(?P<u>[A-Z]+)(?P<y>\d{2})(?P<m>\d{2})(?P<d>\d{2})(?P<cp>[CP])(?P<strike>\d+)$")
+# Non-terminal ledger states shown as open. UNKNOWN is a Futu order whose
+# status could not be mapped (pending, timed out): it still holds demand.
+FUTU_OPEN_STATES = ACTIVE_STATES | {"UNKNOWN"}
 
 
-def _futu_contract(ticker: str) -> dict[str, Any]:
-    m = _OCC.match(ticker)
-    if not m:
-        return {"conId": None, "symbol": ticker, "secType": "STK", "strike": None, "right": None, "expiry": None}
-    return {
-        "conId": None,
-        "symbol": m["u"],
-        "secType": "OPT",
-        "strike": int(m["strike"]) / 1000.0,
-        "right": m["cp"],
-        "expiry": f"20{m['y']}-{m['m']}-{m['d']}",
-    }
+def _scope_fields(scope: AccountScope) -> dict[str, str]:
+    return {"broker": scope.broker, "accountEnv": scope.account_env, "brokerAccount": scope.broker_account}
 
 
-def _futu_surrogate_id(futu_order_id: str) -> int:
-    """Stable JS-safe (< 2^48) surrogate so frontend `${orderId}-${permId}` keys don't collide.
-
-    Futu order ids are ~19-digit strings — using them as JS numbers loses precision past
-    2^53. Frontend prefers the string submissionId for the key; this is the numeric fallback.
-    """
-    return int(hashlib.sha1(str(futu_order_id).encode()).hexdigest()[:12], 16)
+# Futu order types (SDK `OrderType`): NORMAL / MARKET map to the IB labels,
+# every other type is passed through as Futu's own label.
+_FUTU_ORDER_TYPE = {"NORMAL": "LMT", "MARKET": "MKT"}
 
 
-def _futu_open_order(row: dict[str, Any]) -> dict[str, Any]:
-    contract = _futu_contract(str(row["ticker"]))
-    total = int(row["quantity"])
-    filled = int(row.get("filled_qty") or 0)
-    oid = _futu_surrogate_id(row["futu_order_id"])
-    return {
-        "submissionId": str(row["futu_order_id"]),
-        "orderId": oid,
-        "permId": oid,
-        "symbol": _display_symbol(contract["symbol"], contract["secType"], contract["right"], contract["strike"]),
-        "contract": contract,
-        "action": row["action"],
-        "orderType": _FUTU_TYPE.get(row["order_type"], row["order_type"]),
-        "totalQuantity": total,
-        "limitPrice": _float_or_none(row.get("limit_price")),
-        "auxPrice": _float_or_none(row.get("aux_price")),
-        "status": _FUTU_STATUS.get(row["status"], row["status"]),
-        "filled": filled,
-        "remaining": max(total - filled, 0),
-        "avgFillPrice": _float_or_none(row.get("avg_fill_price")),
-        "tif": str(row.get("tif") or "DAY"),
-        "modifySequence": 0,
-    }
+def _futu_open_order(row: dict[str, Any], scope: AccountScope) -> dict[str, Any]:
+    out = _open_order(row)
+    info = (row.get("legs") or {}).get("futu_order") if isinstance(row.get("legs"), dict) else None
+    order_type = (info or {}).get("order_type")
+    out.update(
+        orderId=0,
+        permId=0,
+        brokerOrderId=_str_or_none(row.get("broker_order_id")),
+        # Observed type and trigger price; never inferred from the limit price.
+        orderType=_FUTU_ORDER_TYPE.get(order_type, order_type) if order_type else "UNKNOWN",
+        auxPrice=_float_or_none((info or {}).get("aux_price")),
+        # Raw Futu status: several statuses map to UNKNOWN, this tells them apart.
+        futuStatus=(info or {}).get("status"),
+        tif=str(row.get("tif") or "DAY"),
+        **_scope_fields(scope),
+    )
+    return out
 
 
-def _futu_executed_order(row: dict[str, Any]) -> dict[str, Any]:
-    contract = _futu_contract(str(row["ticker"]))
-    side = str(row["action"]).upper()
-    return {
-        "execId": str(row["futu_deal_id"]),
-        "symbol": _display_symbol(contract["symbol"], contract["secType"], contract["right"], contract["strike"]),
-        "contract": contract,
-        "side": "BOT" if side == "BUY" else "SLD" if side == "SELL" else side,
-        "quantity": float(row["quantity"]),
-        "avgPrice": _float_or_none(row.get("price")),
-        "commission": _float_or_none(row.get("fees")),
-        "realizedPNL": None,
-        "time": _iso(row.get("filled_at")),
-        "exchange": "FUTU",
-    }
+def _futu_executed_order(row: dict[str, Any], scope: AccountScope) -> dict[str, Any]:
+    out = _executed_order(row)
+    if not out["exchange"]:
+        out["exchange"] = "FUTU"
+    out.update(
+        submissionId=row.get("submission_id"),
+        brokerOrderId=_str_or_none(row.get("submission_broker_order_id")),
+        **_scope_fields(scope),
+    )
+    return out
 
 
-def _futu_orders_payload(scope: AccountScope, *, limit: int) -> dict[str, Any]:
-    engine = get_sync_engine()
-    with engine.connect() as conn:
-        open_rows = [
-            dict(r._mapping)
-            for r in conn.execute(
-                select(futu_orders)
-                .where(
-                    futu_orders.c.broker == scope.broker,
-                    futu_orders.c.account_env == scope.account_env,
-                    futu_orders.c.broker_account == scope.broker_account,
-                    futu_orders.c.status.in_(_FUTU_OPEN_STATUSES),
-                )
-                .order_by(desc(futu_orders.c.updated_at))
-                .limit(limit)
-            ).all()
-        ]
-        fill_rows = [
-            dict(r._mapping)
-            for r in conn.execute(
-                select(futu_trades)
-                .where(
-                    futu_trades.c.broker == scope.broker,
-                    futu_trades.c.account_env == scope.account_env,
-                    futu_trades.c.broker_account == scope.broker_account,
-                    futu_trades.c.filled_at >= _today_et_start_utc(),
-                )
-                .order_by(desc(futu_trades.c.filled_at), desc(futu_trades.c.futu_deal_id))
-                .limit(limit)
-            ).all()
-        ]
-    open_orders = [_futu_open_order(row) for row in open_rows]
-    executed_orders = [_futu_executed_order(row) for row in fill_rows]
+def _str_or_none(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
+def _futu_empty(**fields: Any) -> dict[str, Any]:
     return {
         "last_sync": datetime.now(timezone.utc).isoformat(),
-        "open_orders": open_orders,
-        "executed_orders": executed_orders,
-        "open_count": len(open_orders),
-        "executed_count": len(executed_orders),
+        "open_orders": [],
+        "executed_orders": [],
+        "open_count": 0,
+        "executed_count": 0,
+        "scope": None,
+        **fields,
     }
 
 
-def orders_payload_for_scope(scope: AccountScope, *, limit: int = 200) -> dict[str, Any]:
-    if scope.broker == "FUTU":
-        return _futu_orders_payload(scope, limit=limit)
+def _futu_ledger_payload(request_scope: AccountScope, *, limit: int) -> dict[str, Any]:
+    """FUTU orders for the configured trade scope (`FUTU_TRADE_ACC_ID` +
+    `FUTU_TRADE_ENV`), from Postgres only, so it keeps serving while OpenD is
+    offline. Served only when the request scope (the tab's account) equals the
+    configured scope exactly; otherwise empty lists with
+    `scope_reason: "scope_mismatch"` and both scopes, so one account's orders
+    never show under another account. No configured scope → empty lists plus
+    the reason; there is no latest-account fallback."""
+    from xenon.execution import futu_scope
+
+    scope, reason = futu_scope.configured_scope()
+    if scope is None:
+        return _futu_empty(scope_reason=reason)
+    if (request_scope.broker, request_scope.account_env, request_scope.broker_account) != (
+        scope.broker,
+        scope.account_env,
+        scope.broker_account,
+    ):
+        return _futu_empty(
+            scope_reason="scope_mismatch",
+            request_scope=_scope_fields(request_scope),
+            configured_scope=_scope_fields(scope),
+        )
+    payload = _ledger_payload(scope, limit=limit, open_states=FUTU_OPEN_STATES)
+    payload["open_orders"] = [_futu_open_order(r, scope) for r in payload.pop("_open_rows")]
+    payload["executed_orders"] = [_futu_executed_order(r, scope) for r in payload.pop("_fill_rows")]
+    payload["scope"] = _scope_fields(scope)
+    return payload
+
+
+def _ledger_payload(scope: AccountScope, *, limit: int, open_states: set[str]) -> dict[str, Any]:
+    """Raw open-order and today's-fill rows for `scope`; callers shape them."""
     engine = get_sync_engine()
     with engine.connect() as conn:
         open_rows = [
@@ -313,7 +282,7 @@ def orders_payload_for_scope(scope: AccountScope, *, limit: int = 200) -> dict[s
                     order_submissions.c.broker == scope.broker,
                     order_submissions.c.account_env == scope.account_env,
                     order_submissions.c.broker_account == scope.broker_account,
-                    order_submissions.c.state.in_(ACTIVE_STATES),
+                    order_submissions.c.state.in_(open_states),
                 )
                 .order_by(desc(order_submissions.c.updated_at))
                 .limit(limit)
@@ -326,6 +295,7 @@ def orders_payload_for_scope(scope: AccountScope, *, limit: int = 200) -> dict[s
                     order_fills,
                     order_submissions.c.security_type.label("submission_security_type"),
                     order_submissions.c.con_id.label("submission_con_id"),
+                    order_submissions.c.broker_order_id.label("submission_broker_order_id"),
                 )
                 .select_from(
                     order_fills.outerjoin(
@@ -343,16 +313,22 @@ def orders_payload_for_scope(scope: AccountScope, *, limit: int = 200) -> dict[s
                 .limit(limit)
             ).all()
         ]
-
-    open_orders = [_open_order(row) for row in open_rows]
-    executed_orders = [_executed_order(row) for row in fill_rows]
     return {
         "last_sync": datetime.now(timezone.utc).isoformat(),
-        "open_orders": open_orders,
-        "executed_orders": executed_orders,
-        "open_count": len(open_orders),
-        "executed_count": len(executed_orders),
+        "_open_rows": open_rows,
+        "_fill_rows": fill_rows,
+        "open_count": len(open_rows),
+        "executed_count": len(fill_rows),
     }
+
+
+def orders_payload_for_scope(scope: AccountScope, *, limit: int = 200) -> dict[str, Any]:
+    if scope.broker == "FUTU":
+        return _futu_ledger_payload(scope, limit=limit)
+    payload = _ledger_payload(scope, limit=limit, open_states=ACTIVE_STATES)
+    payload["open_orders"] = [_open_order(row) for row in payload.pop("_open_rows")]
+    payload["executed_orders"] = [_executed_order(row) for row in payload.pop("_fill_rows")]
+    return payload
 
 
 @router.get("/orders")
@@ -361,4 +337,4 @@ async def orders_list(
     limit: int = Query(200, ge=1, le=1000),
 ) -> dict[str, Any]:
     """Return scoped open order submissions plus recent execution fills (IB or FUTU)."""
-    return orders_payload_for_scope(scope, limit=limit)
+    return await asyncio.to_thread(orders_payload_for_scope, scope, limit=limit)

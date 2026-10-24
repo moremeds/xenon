@@ -8,17 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import json
 import logging
 import os
 import threading
-from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from xenon.clients.futu_client import FutuClient
 from xenon.clients.futu_exceptions import FutuConnectionError, FutuError
+from xenon.execution.account_scope import AccountScope
 
 router = APIRouter()
 logger = logging.getLogger("xenon.api")
@@ -56,15 +55,24 @@ def _get_futu_lock() -> asyncio.Lock:
 
 
 def _get_futu_client() -> FutuClient:
-    """Lazy-init the shared FutuClient singleton."""
+    """Lazy-init the shared FutuClient singleton.
+
+    With a configured trade scope (`FUTU_TRADE_ACC_ID` + `FUTU_TRADE_ENV`)
+    the display client selects exactly that account and environment, so
+    display and trade use one Futu environment. `FUTU_TRD_ENV` (first account
+    of that env) applies only when no scope is configured."""
     global _futu_client
     if _futu_client is None:
+        from xenon.execution import futu_scope
+
+        scope, _ = futu_scope.configured_scope()
         _futu_client = FutuClient(
             host=os.environ.get("FUTU_OPEND_HOST", "127.0.0.1"),
             port=int(os.environ.get("FUTU_OPEND_PORT", "11111")),
             security_firm=os.environ.get("FUTU_SECURITY_FIRM", "FUTUSECURITIES"),
-            trd_env=os.environ.get("FUTU_TRD_ENV", "REAL"),
+            trd_env=futu_scope.trd_env_for(scope) if scope else os.environ.get("FUTU_TRD_ENV", "REAL"),
             filter_trading_market=os.environ.get("FUTU_MARKET", "US"),
+            acc_id=int(scope.broker_account) if scope else None,
         )
     return _futu_client
 
@@ -104,40 +112,129 @@ def _futu_cleanup_after_timeout(
     marker.set_result(None)
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers: the display snapshot lives in Postgres (no data/*.json)
 # ---------------------------------------------------------------------------
+#
+# A /futu/sync result is stored as an `account_snapshots` row (broker FUTU)
+# whose payload has NO `observation` key: a display snapshot. The observation
+# loop's rows carry `observation` and serve Gate 4; they read no balances
+# (bankroll column 0), so display readers never select them.
 
 
-def _read_cache(path: Path) -> Optional[dict]:
-    """Read a JSON cache file, return None if missing/corrupt."""
+def _display_rows(scope: Optional[AccountScope]):
+    """Display rows of `scope` (broker, env and account), or of every FUTU
+    scope when `scope` is None (only used to tell "mismatch" from "never")."""
+    from sqlalchemy import desc, select
+
+    from xenon.db.schema import account_snapshots
+
+    conds = [account_snapshots.c.broker == "FUTU", ~account_snapshots.c.payload.has_key("observation")]
+    if scope is not None:
+        conds += [
+            account_snapshots.c.broker == scope.broker,
+            account_snapshots.c.account_env == scope.account_env,
+            account_snapshots.c.broker_account == scope.broker_account,
+        ]
+    return (
+        select(account_snapshots.c.payload, account_snapshots.c.snapshot_at)
+        .where(*conds)
+        .order_by(desc(account_snapshots.c.snapshot_at), desc(account_snapshots.c.id))
+    )
+
+
+def latest_display_snapshot(scope: AccountScope) -> Optional[dict]:
+    """Newest Futu display snapshot payload of exactly `scope`, or None. Never
+    another account's or environment's row."""
+    from xenon.db.engine import get_sync_engine
+
+    with get_sync_engine().connect() as conn:
+        row = conn.execute(_display_rows(scope).limit(1)).first()
+    return dict(row.payload) if row is not None and row.payload else None
+
+
+def _any_display_snapshot() -> bool:
+    from xenon.db.engine import get_sync_engine
+
+    with get_sync_engine().connect() as conn:
+        return conn.execute(_display_rows(None).limit(1)).first() is not None
+
+
+def client_scope(client: Optional[FutuClient]) -> Optional[AccountScope]:
+    """The scope of a connected client's matched account, else None."""
+    from xenon.execution.account_scope import env_from_trd_env
+
+    if client is None or not client.is_connected():
+        return None
+    acc_id = getattr(client, "_acc_id", None)
+    matched = getattr(client, "trd_env_of_matched_account", None)
+    trd_env = matched() if callable(matched) else None
+    if acc_id is None or trd_env is None:
+        return None
     try:
-        return json.loads(path.read_text())
-    except Exception:
+        return AccountScope(broker="FUTU", account_env=env_from_trd_env(trd_env), broker_account=str(acc_id))
+    except ValueError:
         return None
 
 
-def _write_cache(path: Path, data: dict) -> None:
-    """Write JSON to cache file atomically via temp file + os.replace()."""
-    import tempfile
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp", prefix=".cache_")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp_path, str(path))
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+def _scope_fields(scope: AccountScope) -> dict:
+    return {"broker": scope.broker, "accountEnv": scope.account_env, "brokerAccount": scope.broker_account}
 
 
-def _atomic_save(path: str, data: dict) -> str:
-    """Use the project's atomic_save for portfolio/orders files."""
-    from xenon.utils.atomic_io import atomic_save
+def _selected_scope(client: Optional[FutuClient]) -> Optional[AccountScope]:
+    """The Futu display scope: the configured trade scope (the same one
+    `GET /futu/portfolio` reads), else the client's own matched account."""
+    from xenon.execution import futu_scope
 
-    return atomic_save(path, data)
+    configured, _ = futu_scope.configured_scope()
+    return configured if configured is not None else client_scope(client)
+
+
+def _sync_scope_mismatch(selected: AccountScope, matched: Optional[AccountScope]) -> dict:
+    """`/futu/sync` answer when the client's account is not the selected
+    scope: no payload of another account or environment, nothing stored."""
+    logger.warning("Futu sync: client account is not the selected Futu scope — nothing served or stored")
+    return {
+        **_FUTU_NEVER_SYNCED,
+        "code": "scope_mismatch",
+        "scope": _scope_fields(selected),
+        "client_scope": _scope_fields(matched) if matched is not None else None,
+    }
+
+
+def _persist_display_snapshot(client: FutuClient, result: dict) -> bool:
+    """Store one /futu/sync result as a FUTU display snapshot for the client's
+    matched account. No-op (False) under XENON_READ_ONLY=1 or when the matched
+    account is unknown."""
+    from decimal import Decimal
+
+    from sqlalchemy import func, insert
+
+    from xenon.api.guards import is_read_only
+    from xenon.db.engine import get_sync_engine
+    from xenon.db.schema import account_snapshots
+
+    if is_read_only():
+        return False
+    scope = client_scope(client)
+    if scope is None:
+        logger.warning("Futu display snapshot not stored: matched account unknown")
+        return False
+    net_liq = (result.get("account_summary") or {}).get("net_liquidation")
+    net_liq_d = Decimal(str(net_liq)) if isinstance(net_liq, (int, float)) else None
+    with get_sync_engine().begin() as conn:
+        conn.execute(
+            insert(account_snapshots).values(
+                account=scope.broker_account,
+                bankroll=net_liq_d if net_liq_d is not None else Decimal(0),
+                net_liquidation=net_liq_d,
+                payload=result,
+                broker=scope.broker,
+                account_env=scope.account_env,
+                broker_account=scope.broker_account,
+                snapshot_at=func.clock_timestamp(),
+            )
+        )
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -158,25 +255,23 @@ def _futu_in_cooldown() -> bool:
     return _time.monotonic() - _futu_last_sync_monotonic < FUTU_COOLDOWN_S
 
 
-def _maybe_preserve_partial_failure(new_result: dict) -> Optional[dict]:
+def _maybe_preserve_partial_failure(new_result: dict, scope: Optional[AccountScope]) -> Optional[dict]:
     """Refuse to overwrite a good snapshot with a degraded one.
 
-    Returns the previous cached file when the new result has warnings AND
-    fewer positions than the cache. Writes a sidecar
-    `data/futu_portfolio.error.json` so the rejected payload is inspectable.
+    Returns the previous display snapshot of the same `scope` (Postgres)
+    when the new result has warnings AND fewer positions than it. No scope
+    (matched account unknown) → nothing to compare. The rejected result is not stored;
+    its counts and warnings are logged.
 
     Returns None when there is nothing to preserve (caller proceeds with
     the normal save path).
     """
-    from xenon.api import server
-
     new_warnings = new_result.get("warnings") or []
     new_count = new_result.get("count", 0)
-    if not new_warnings:
+    if not new_warnings or scope is None:
         return None
 
-    cached_path = server.DATA_DIR / "futu_portfolio.json"
-    prev = _read_cache(cached_path)
+    prev = latest_display_snapshot(scope)
     if prev is None:
         return None
 
@@ -184,23 +279,18 @@ def _maybe_preserve_partial_failure(new_result: dict) -> Optional[dict]:
     if new_count >= prev_count:
         return None  # new snapshot isn't degraded
 
-    error_path = server.DATA_DIR / "futu_portfolio.error.json"
-    try:
-        _write_cache(error_path, new_result)
-    except Exception as exc:
-        logger.warning("Failed to write futu error sidecar: %s", exc)
     logger.warning(
-        "Futu sync degraded (new=%d, prev=%d, warnings=%d) — preserved prior snapshot",
+        "Futu sync degraded (new=%d, prev=%d, warnings=%s) — preserved prior snapshot",
         new_count,
         prev_count,
-        len(new_warnings),
+        new_warnings[:20],
     )
     return prev
 
 
 @router.post("/futu/sync")
 async def futu_sync():
-    """Force-fetch Futu positions + account, write data/futu_portfolio.json.
+    """Force-fetch Futu positions + account, store a FUTU display snapshot in Postgres.
 
     Patterns:
     - **Singleflight.** Concurrent callers serialize on an asyncio lock AND
@@ -209,8 +299,8 @@ async def futu_sync():
       OpenD roundtrip.
     - **10s cooldown.** Repeat calls within 10s return the cached result.
     - **Partial-failure preservation (tribunal T15).** If the new snapshot
-      has warnings and fewer positions than the cache, the cache is
-      preserved untouched and a sidecar error file is written.
+      has warnings and fewer positions than the previous display snapshot
+      (Postgres), that snapshot is returned and the new one is not stored.
     - **Off-loop blocking calls.** The Futu SDK is fully sync; the call runs
       on a dedicated single-worker executor. While a worker is still alive
       (e.g. after a timeout), new requests 503 instead of queueing behind the
@@ -224,8 +314,12 @@ async def futu_sync():
     lock = _get_futu_lock()
 
     # Early cooldown check — avoids lock contention when cache is fresh.
+    # Serves only the connected client's own scope.
     if _futu_in_cooldown():
-        cached = _read_cache(server.DATA_DIR / "futu_portfolio.json")
+        matched, selected = client_scope(_futu_client), _selected_scope(_futu_client)
+        if selected is not None and matched is not None and matched != selected:
+            return _sync_scope_mismatch(selected, matched)
+        cached = await asyncio.to_thread(latest_display_snapshot, selected) if selected is not None else None
         if cached:
             return {"ok": True, **cached}
 
@@ -241,7 +335,10 @@ async def futu_sync():
         # Re-check inside lock — race guard so two tabs inside the lock
         # window piggyback on the same result.
         if _futu_in_cooldown():
-            cached = _read_cache(server.DATA_DIR / "futu_portfolio.json")
+            matched, selected = client_scope(_futu_client), _selected_scope(_futu_client)
+            if selected is not None and matched is not None and matched != selected:
+                return _sync_scope_mismatch(selected, matched)
+            cached = await asyncio.to_thread(latest_display_snapshot, selected) if selected is not None else None
             if cached:
                 return {"ok": True, **cached}
 
@@ -293,16 +390,26 @@ async def futu_sync():
         except FutuError as exc:
             raise HTTPException(status_code=502, detail=f"Futu error: {exc}")
 
+        # The fetched account must be the selected scope before anything is
+        # served, preserved or stored.
+        matched, selected = client_scope(client), _selected_scope(client)
+        if selected is not None and matched != selected:
+            return _sync_scope_mismatch(selected, matched)
+
         # Partial-failure guard: if this snapshot looks worse than the
         # cache, keep the cache and return it with a warning tag.
-        preserved = _maybe_preserve_partial_failure(result)
+        preserved = await asyncio.to_thread(_maybe_preserve_partial_failure, result, selected)
         if preserved is not None:
             preserved_warnings = list(preserved.get("warnings") or []) + [
                 "partial_failure_preserved",
             ]
             return {"ok": True, **preserved, "warnings": preserved_warnings}
 
-        _atomic_save(str(server.DATA_DIR / "futu_portfolio.json"), result)
+        try:
+            await asyncio.to_thread(_persist_display_snapshot, client, result)
+        except Exception as exc:  # noqa: BLE001 — the fetch itself succeeded
+            logger.warning("Futu display snapshot not stored: %s", exc)
+            result = {**result, "warnings": list(result.get("warnings") or []) + ["display_snapshot_not_stored"]}
         _futu_last_sync_monotonic = _time.monotonic()
 
         # Persist FUTU NAV to xenon.nav_history (spec §10). Best-effort —
@@ -326,8 +433,8 @@ async def futu_sync():
         return {"ok": True, **result}
 
 
-# Canonical "never synced" envelope — used by /futu/portfolio when no cache
-# file exists yet. HTTP 200 with a failure-shaped body (tribunal T14) so
+# Canonical "never synced" envelope — used by /futu/portfolio when no display
+# snapshot exists yet. HTTP 200 with a failure-shaped body (tribunal T14) so
 # the UI can distinguish "first boot" from "sync failed" without a 404
 # flashing an error state.
 _FUTU_NEVER_SYNCED = {
@@ -342,17 +449,25 @@ _FUTU_NEVER_SYNCED = {
 
 
 @router.get("/futu/portfolio")
-async def futu_portfolio():
-    """Read the cached Futu portfolio snapshot.
+async def futu_portfolio(request: Request):
+    """Read the newest Futu display snapshot of the request scope from Postgres.
 
-    Does not hit OpenD — serves the last written `data/futu_portfolio.json`.
-    Returns HTTP 200 with `{ok:false, code:"never_synced"}` on first boot
-    so the UI can render a "click sync" prompt distinctly from errors.
+    The scope is the FUTU read scope (`guards.get_broker_scope`: the connected
+    client's matched account, else the last-synced scope). Does not hit
+    OpenD. Returns HTTP 200 with `{ok:false, code:"never_synced"}` when that
+    scope (or no scope) has no snapshot, and `code:"scope_mismatch"` when only
+    other Futu scopes have one; another account's row is never served.
     Clients that need fresh data call `POST /futu/sync`.
     """
-    from xenon.api import server
+    from xenon.api.guards import get_broker_scope
 
-    cached = _read_cache(server.DATA_DIR / "futu_portfolio.json")
-    if cached is None:
+    try:
+        scope = get_broker_scope(request, "FUTU")
+    except HTTPException:
         return dict(_FUTU_NEVER_SYNCED)
-    return {"ok": True, **cached}
+    # Off the event loop: a slow Postgres must not stall every API request.
+    cached = await asyncio.to_thread(latest_display_snapshot, scope)
+    if cached is None:
+        code = "scope_mismatch" if await asyncio.to_thread(_any_display_snapshot) else "never_synced"
+        return {**_FUTU_NEVER_SYNCED, "code": code, "scope": _scope_fields(scope)}
+    return {"ok": True, **cached, "scope": _scope_fields(scope)}

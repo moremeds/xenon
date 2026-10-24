@@ -8,10 +8,8 @@ path; this guard blocks NEW JSON writes. Together they enforce the
 "everything writes to DB first; website reads from DB" invariant.
 
 Audit (2026-06-02, this guard's initial cut)
-- src/xenon/api/routes/futu.py — writes `data/futu_portfolio{,.error}.json`
-  (Futu sidecar; migration to PG in progress in a separate change)
 - src/xenon/execution/futu_sync.py — writes `data/futu_portfolio.json`
-  (same)
+  (manual CLI sidecar; the API route `routes/futu.py` moved to Postgres in X3b)
 - src/xenon/execution/ib_reconcile.py — writes `data/reconciliation.json`
   (CLI audit artifact, not runtime state)
 - web/app/api/ticker/{info,seasonality}/route.ts — writes
@@ -58,9 +56,8 @@ _SCAN_ROOTS = (
 # write, don't allowlist.
 _ALLOWLIST: frozenset[str] = frozenset(
     {
-        # Futu sidecar — separate Futu→PG migration in flight (see CLAUDE.md
-        # memory "Postgres read-side gap"). When that lands, drop these.
-        "src/xenon/api/routes/futu.py",
+        # Futu CLI sidecar (`xenon-futu-sync`, manual). The API route
+        # (`routes/futu.py`) stores its snapshot in Postgres since X3b.
         "src/xenon/execution/futu_sync.py",
         # IB reconcile CLI artifact — `data/reconciliation.json` is a
         # report, not runtime state. Manual CLI invocation only.

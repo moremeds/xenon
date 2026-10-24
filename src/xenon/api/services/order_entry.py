@@ -26,6 +26,7 @@ from xenon.api.guards import ensure_order_allowed
 from xenon.api.order_owner import BROKER_DISCONNECTED, ORDERS_HALTED
 from xenon.clients.ib_client import pool_client_id
 from xenon.db.engine import get_sync_engine
+from xenon.db.queries.portfolio import DISPLAY_SNAPSHOT
 from xenon.db.schema import account_snapshots
 from xenon.execution import gate4, ib_order_manage, ib_place_order, orders_store, preflight, quote_guard, quote_tokens
 from xenon.execution.account_scope import resolve_from_app_state
@@ -51,6 +52,7 @@ def _load_portfolio_view_sync() -> tuple[PortfolioView | None, datetime | None]:
             .where(account_snapshots.c.broker == scope["broker"])
             .where(account_snapshots.c.account_env == scope["account_env"])
             .where(account_snapshots.c.broker_account == scope["broker_account"])
+            .where(DISPLAY_SNAPSHOT)
             .order_by(account_snapshots.c.snapshot_at.desc())
             .limit(1)
         )
