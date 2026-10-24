@@ -338,7 +338,7 @@ async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
     # OpenD connect, no writes. Placed before the mode check and the test-mode
     # short-circuit so the single contract holds under every flag combination.
     if is_read_only():
-        return orders_payload_for_scope(scope)
+        return await asyncio.to_thread(orders_payload_for_scope, scope)
 
     # IB requires a verified trading mode before any work — including the
     # test-mode short-circuit — so a mode mismatch is refused even in test mode
@@ -358,7 +358,7 @@ async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
         loop = getattr(request.app.state, "futu_observation_loop", None)
         if loop is not None and loop.scope == scope:
             await loop.refresh()
-        return orders_payload_for_scope(scope)
+        return await asyncio.to_thread(orders_payload_for_scope, scope)
 
     # IB path — mode already verified above; touch the gateway.
     result = await server._run_ib_script_with_recovery(
@@ -366,4 +366,4 @@ async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
     )
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
-    return orders_payload_for_scope(scope)
+    return await asyncio.to_thread(orders_payload_for_scope, scope)

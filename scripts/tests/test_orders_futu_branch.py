@@ -72,7 +72,7 @@ def test_futu_open_orders_come_from_the_ledger_with_string_ids():
     assert body["scope"] == {"broker": "FUTU", "accountEnv": "paper", "brokerAccount": ACC}
     assert body["open_count"] == 1
     row = body["open_orders"][0]
-    assert row["submissionId"] == f"futu-{WORKING_ID}"
+    assert row["submissionId"] == f"futu-paper-{ACC}-{WORKING_ID}"
     assert row["brokerOrderId"] == WORKING_ID and isinstance(row["brokerOrderId"], str)
     assert row["modifySequence"] == 3
     assert (row["broker"], row["accountEnv"], row["brokerAccount"]) == ("FUTU", "paper", ACC)
@@ -92,7 +92,7 @@ def test_futu_executed_orders_come_from_order_fills():
     assert set(by_order) == {WORKING_ID, FILLED_ID}
     stock = by_order[FILLED_ID]
     assert stock["execId"] == f"futu:{ACC}:ord:{FILLED_ID}:10"
-    assert stock["submissionId"] == f"futu-{FILLED_ID}"
+    assert stock["submissionId"] == f"futu-paper-{ACC}-{FILLED_ID}"
     assert (stock["side"], stock["quantity"], stock["avgPrice"]) == ("BOT", 10.0, 2.0)
     assert stock["exchange"] == "FUTU" and stock["broker"] == "FUTU" and stock["brokerAccount"] == ACC
     assert by_order[WORKING_ID]["side"] == "SLD" and by_order[WORKING_ID]["quantity"] == 1.0
@@ -207,18 +207,23 @@ def _route_client(monkeypatch, db_scope):
     return TestClient(server.app)
 
 
-def test_get_orders_route_refuses_a_mismatched_tab_scope(monkeypatch):
+def test_get_orders_route_uses_the_configured_scope_not_the_db_fallback(monkeypatch):
+    """R2 F5: with a configured trade scope, the route never takes another
+    account's last-synced scope; the configured ledger is served."""
     _observe()
 
     body = _route_client(monkeypatch, OTHER).get("/orders", params={"broker": "FUTU"}).json()
 
-    assert body["open_orders"] == [] and body["scope_reason"] == "scope_mismatch"
+    assert [r["brokerOrderId"] for r in body["open_orders"]] == [WORKING_ID]
+    assert body.get("scope_reason") is None
 
 
-@pytest.mark.parametrize("db_scope,expected", [(SCOPE, [WORKING_ID]), (OTHER, [])])
-def test_orders_refresh_applies_the_same_scope_rule(monkeypatch, db_scope, expected):
+@pytest.mark.parametrize("db_scope", [SCOPE, OTHER, None])
+def test_orders_refresh_applies_the_same_scope_rule(monkeypatch, db_scope):
     """No observation loop running (e.g. OpenD scope not started): refresh
-    returns the persisted ledger under the same scope rule."""
+    returns the persisted ledger of the configured scope, whatever the DB
+    fallback would say (and with no synced history at all)."""
+    expected = [WORKING_ID]
     from xenon.api import server
 
     _observe()
@@ -230,7 +235,7 @@ def test_orders_refresh_applies_the_same_scope_rule(monkeypatch, db_scope, expec
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert [r["brokerOrderId"] for r in body["open_orders"]] == expected
-    assert body.get("scope_reason") == (None if expected else "scope_mismatch")
+    assert body.get("scope_reason") is None
 
 
 def test_ib_payload_shape_unchanged():

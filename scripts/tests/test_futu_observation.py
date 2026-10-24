@@ -319,9 +319,9 @@ def test_control_pass_publishes_complete_and_accepts_covered_short():
 
 def test_history_window_covers_lag_across_date_boundary():
     as_of = datetime(2026, 11, 3, 5, 0, 30, tzinfo=timezone.utc)  # 00:00:30 ET
-    start, end = fo._history_window(as_of)
+    start, end = fo._history_window(as_of, as_of + timedelta(seconds=5))
     assert start == "2026-11-01 00:00:00"  # as_of - 60 s is 2026-11-02 23:59:30 ET; one more day back
-    assert end == "2026-11-04 23:59:59"
+    assert end == "2026-11-03 00:00:35"  # the read instant (ET), never a future end
 
 
 def test_real_scope_reads_with_real_env(monkeypatch):
@@ -344,7 +344,7 @@ def test_external_order_after_positions_read_blocks_next_short():
     assert result["complete"] is True
     row = _subs()["7001"]
     assert row.broker == "FUTU" and row.account_env == "paper" and row.broker_account == ACC
-    assert row.submission_id == "futu-7001" and row.state == "WORKING" and row.action == "SELL"
+    assert row.submission_id == f"futu-paper-{ACC}-7001" and row.state == "WORKING" and row.action == "SELL"
     leg = row.legs["legs"][0]
     assert (leg["tc"], leg["mult"], leg["und_sec"], row.legs["account"]) == ("SPY", 100, "STK", ACC)
     decision = _gate()
@@ -367,7 +367,7 @@ def test_external_short_placed_and_filled_between_reads_blocks_next_short(inject
     row = _subs()["7003"]
     assert row.state == "FILLED" and row.filled_qty == 1
     (fill,) = _fills()
-    assert fill.exec_id == f"futu:{ACC}:ord:7003:1" and fill.qty == 1 and fill.submission_id == "futu-7003"
+    assert fill.exec_id == f"futu:{ACC}:ord:7003:1" and fill.qty == 1 and fill.submission_id == f"futu-paper-{ACC}-7003"
     assert fill.price == Decimal("1.3000") and fill.metadata["time_basis"] == "order_updated_time"
     assert _gate().accept is False
 
@@ -626,7 +626,7 @@ def test_remark_binds_xenon_row_instead_of_new_external_row():
     _run(FakeTradeCtx(positions=[_pos("US.SPY", 100.0)], open_orders=[_order("7025", remark="xo:sub-xo-1")]))
     subs = _subs()
     assert subs["7025"].submission_id == "sub-xo-1" and subs["7025"].state == "WORKING"
-    assert not any(s.submission_id == "futu-7025" for s in subs.values())
+    assert not any(s.submission_id == f"futu-paper-{ACC}-7025" for s in subs.values())
 
 
 def test_remark_never_binds_across_scope():
@@ -650,7 +650,7 @@ def test_remark_never_binds_across_scope():
             )
         )
     _run(FakeTradeCtx(positions=[_pos("US.SPY", 100.0)], open_orders=[_order("7026", remark="xo:sub-xo-2")]))
-    assert _subs()["7026"].submission_id == "futu-7026"
+    assert _subs()["7026"].submission_id == f"futu-paper-{ACC}-7026"
 
 
 def test_stale_observation_never_terminalizes():

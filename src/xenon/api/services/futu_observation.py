@@ -155,11 +155,30 @@ def _read(name: str, fn: Callable[[], Any]) -> list[dict] | None:
     return _rows(data)
 
 
-def _history_window(as_of: datetime) -> tuple[str, str]:
-    """ET wall-clock window covering `as_of - FILL_LAG_S` across the date boundary."""
+def _history_window(as_of: datetime, now: datetime | None = None) -> tuple[str, str]:
+    """ET wall-clock window from the day before `as_of - FILL_LAG_S` up to
+    `now` (the read instant). The end is never in the future: OpenD may
+    reject or mis-filter a window that ends after the current time."""
     start = (as_of - timedelta(seconds=gate4.FILL_LAG_S)).astimezone(_ET).date() - timedelta(days=1)
-    end = as_of.astimezone(_ET).date() + timedelta(days=1)
-    return f"{start:%Y-%m-%d} 00:00:00", f"{end:%Y-%m-%d} 23:59:59"
+    end = (now or datetime.now(timezone.utc)).astimezone(_ET)
+    return f"{start:%Y-%m-%d} 00:00:00", f"{end:%Y-%m-%d %H:%M:%S}"
+
+
+def _meta_key(spec: dict) -> tuple:
+    return (spec["sym"], spec["right"], spec["exp"], spec["strike"])
+
+
+def _meta_matches(spec: dict, meta: Any) -> bool:
+    """An OPT contract matching the requested symbol / right / expiry / strike."""
+    return (
+        isinstance(meta, dict)
+        and meta.get("sec") == "OPT"
+        and meta.get("sym") == spec["sym"]
+        and meta.get("right") == spec["right"]
+        and meta.get("exp") == spec["exp"]
+        and meta.get("strike") is not None
+        and abs(float(meta["strike"]) - spec["strike"]) <= 1e-6
+    )
 
 
 class _MetaCache:
@@ -177,8 +196,8 @@ class _MetaCache:
     def prefetch(self, specs: Iterable[dict]) -> None:
         todo = []
         for spec in specs:
-            key = (spec["sym"], spec["right"], spec["exp"], spec["strike"])
-            if key not in self._cache and key not in {(s["sym"], s["right"], s["exp"], s["strike"]) for s in todo}:
+            key = _meta_key(spec)
+            if key not in self._cache and key not in {_meta_key(s) for s in todo}:
                 todo.append(spec)
         if not todo:
             return
@@ -190,19 +209,10 @@ class _MetaCache:
             except Exception as exc:  # noqa: BLE001 — unresolved, fail closed
                 log.warning("futu observation: contract metadata lookup failed (%s)", exc)
         for spec, meta in zip(todo, results):
-            ok = (
-                isinstance(meta, dict)
-                and meta.get("sec") == "OPT"
-                and meta.get("sym") == spec["sym"]
-                and meta.get("right") == spec["right"]
-                and meta.get("exp") == spec["exp"]
-                and meta.get("strike") is not None
-                and abs(float(meta["strike"]) - spec["strike"]) <= 1e-6
-            )
-            self._cache[(spec["sym"], spec["right"], spec["exp"], spec["strike"])] = meta if ok else None
+            self._cache[_meta_key(spec)] = meta if _meta_matches(spec, meta) else None
 
     def get(self, spec: dict) -> dict | None:
-        return self._cache.get((spec["sym"], spec["right"], spec["exp"], spec["strike"]))
+        return self._cache.get(_meta_key(spec))
 
 
 def _instrument(code: Any) -> dict | None:
@@ -340,6 +350,7 @@ def _order_observation(
         order_type=_text(row.get("order_type")),
         tif=_text(row.get("time_in_force")),
         aux_price=_decimal(row.get("aux_price")),
+        futu_status=status or None,
         fill_metadata={
             "futu_code": _text(row.get("code")),
             "futu_order_id": _text(row.get("order_id")),
@@ -483,6 +494,63 @@ def _audit_open_orders(parsed: dict, scope: AccountScope) -> list[dict]:
     return out
 
 
+def _sweep_unobserved(
+    scope: AccountScope,
+    ctx: Any,
+    trd_env: Any,
+    acc_id: int,
+    seen: set,
+    metas: _MetaCache,
+    mirror: Callable[[orders_store.FutuOrderObservation, datetime], bool],
+) -> bool:
+    """Look up by id every non-terminal stored order the full pass did not see.
+
+    Found → mirrored like any observed order. Absent → its miss counter
+    grows; at `FUTU_MISSING_PASSES` the row becomes UNKNOWN (demand kept,
+    reason FUTU_NOT_OBSERVED). A failed lookup counts nothing and returns
+    False (the pass is incomplete). Called only after a full pass.
+    """
+    ok = True
+    for oid in orders_store.futu_unobserved_order_ids(
+        broker_account=scope.broker_account, account_env=scope.account_env, observed=seen
+    ):
+        read_at = datetime.now(timezone.utc)
+        rows = _read(
+            f"order {oid}",
+            lambda oid=oid: ctx.order_list_query(order_id=oid, trd_env=trd_env, acc_id=acc_id, refresh_cache=True),
+        )
+        if rows is None:
+            ok = False
+            continue
+        us, classified = _split_markets(
+            [r for r in rows if _text(r.get("order_id")) == oid], "order_market", keep_unkeyed=True
+        )
+        if us:
+            metas.prefetch(_option_specs(us))
+            obs = _order_observation(max(us, key=_order_rank), scope, metas, read_at)
+            ok = obs is not None and mirror(obs, read_at) and ok
+            continue
+        if not classified:
+            ok = False
+            continue
+        try:
+            missing = orders_store.mark_futu_order_unobserved(
+                oid, broker_account=scope.broker_account, account_env=scope.account_env
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("futu observation: miss count for order %s failed (%s)", oid, exc, exc_info=True)
+            ok = False
+            continue
+        if missing == orders_store.FUTU_MISSING_PASSES:
+            log.warning(
+                "futu observation: order %s absent from %d full passes — state UNKNOWN (%s)",
+                oid,
+                missing,
+                orders_store.FUTU_NOT_OBSERVED,
+            )
+    return ok
+
+
 def run_pass(
     scope: AccountScope,
     ctx: Any,
@@ -538,7 +606,7 @@ def run_pass(
     orders_read_at = datetime.now(timezone.utc)
     open_rows = _read("open_orders", lambda: ctx.order_list_query(trd_env=trd_env, acc_id=acc_id, refresh_cache=True))
     reads["open_orders"] = open_rows is not None
-    start, end = _history_window(as_of)
+    start, end = _history_window(as_of, datetime.now(timezone.utc))
     history_rows = _read(
         "history_orders",
         lambda: ctx.history_order_list_query(trd_env=trd_env, acc_id=acc_id, start=start, end=end),
@@ -555,23 +623,23 @@ def run_pass(
     by_id, reads["orders_keyed"] = _merge_orders(us_open, us_history)
     parsed = {oid: _order_observation(row, scope, metas, orders_read_at) for oid, row in by_id.items()}
     reads["orders_parsed"] = all(obs is not None for obs in parsed.values())
-    persisted = True
-    for obs in parsed.values():
-        if obs is None:
-            continue
+
+    def mirror(obs: orders_store.FutuOrderObservation, observed_at: datetime) -> bool:
+        if obs.futu_status == "FILL_CANCELLED":
+            log.warning("futu observation: order %s reports FILL_CANCELLED (a fill was reversed)", obs.order_id)
         try:
             out = orders_store.mirror_futu_order(
-                obs, broker_account=scope.broker_account, account_env=scope.account_env, observed_at=orders_read_at
+                obs, broker_account=scope.broker_account, account_env=scope.account_env, observed_at=observed_at
             )
         except Exception as exc:  # noqa: BLE001 — any failure degrades the stamp
             log.warning("futu observation: persist of order %s failed (%s)", obs.order_id, exc, exc_info=True)
-            persisted = False
-            continue
+            return False
         result["orders"] += 1
         result["fills"] += 1 if out.get("fill") else 0
+        ok = True
         if out.get("fill_skipped"):
             log.warning("futu observation: order %s fill not recorded (%s)", obs.order_id, out["fill_skipped"])
-            persisted = False
+            ok = False
         if out.get("identity_mismatch"):
             log.warning(
                 "futu observation: order %s not bound to %s (%s)",
@@ -579,7 +647,16 @@ def run_pass(
                 out.get("submission_id"),
                 out["identity_mismatch"],
             )
-            persisted = False
+            ok = False
+        return ok
+
+    persisted = True
+    for obs in parsed.values():
+        if obs is not None:
+            persisted = mirror(obs, orders_read_at) and persisted
+    if all(reads.get(k) is True for k in ("account", "positions", "open_orders", "history_orders")):
+        seen = {_text(r.get("order_id")) for r in [*(open_rows or []), *(history_rows or [])]}
+        persisted = _sweep_unobserved(scope, ctx, trd_env, acc_id, seen, metas, mirror) and persisted
     reads["persisted"] = persisted
 
     if positions is None or pass_seq is None:
@@ -636,6 +713,13 @@ META_TIMEOUT_S = 20.0
 
 Connector = Callable[[], tuple[Any, Callable[[], None]]]
 
+# IB-qualified option metadata across passes, keyed (sym, right, exp, strike).
+# A contract's metadata does not change, so a known contract (and its con_id)
+# never goes back to IB; only successful, matching lookups are stored.
+_IB_META_CACHE: dict[tuple, dict] = {}
+_IB_META_LOCK = threading.Lock()
+_IB_META_CACHE_MAX = 4096
+
 
 def make_ib_meta_resolver(loop: asyncio.AbstractEventLoop, get_pool: Callable[[], Any]) -> MetaResolver:
     """`run_pass` resolver, called on the observation thread: qualifies option
@@ -644,22 +728,48 @@ def make_ib_meta_resolver(loop: asyncio.AbstractEventLoop, get_pool: Callable[[]
     error → every spec None (unresolved, fail closed)."""
 
     def resolve(specs: list[dict]) -> list[dict | None]:
+        with _IB_META_LOCK:
+            out = [_IB_META_CACHE.get(_meta_key(s)) for s in specs]
+        todo = [s for s, m in zip(specs, out, strict=True) if m is None]
         pool = get_pool()
-        if pool is None or not specs:
-            return [None] * len(specs)
+        if pool is None or not todo:
+            return out
         from xenon.api.services.order_entry import _resolve_leg_meta_with_client
 
-        async def _qualify() -> list[dict | None]:
+        async def _qualify() -> list[dict | None] | None:
+            # Never trigger a reconnect from here: `acquire` reconnects a
+            # dropped role, and the observation loop must not drive IB
+            # connection churn. A disconnected `data` role → unresolved.
+            if not pool.is_connected("data"):
+                return None
             async with pool.acquire("data") as client:
-                return await pool.run_sync("data", _resolve_leg_meta_with_client, client, specs)
+                return await pool.run_sync("data", _resolve_leg_meta_with_client, client, todo)
 
         fut = asyncio.run_coroutine_threadsafe(_qualify(), loop)
         try:
-            return list(fut.result(timeout=META_TIMEOUT_S))
+            got = fut.result(timeout=META_TIMEOUT_S)
         except Exception as exc:  # noqa: BLE001 — fail closed
             fut.cancel()
             log.warning("futu observation: IB contract qualification failed (%s)", exc)
-            return [None] * len(specs)
+            return out
+        if got is None:
+            log.warning("futu observation: IB data role not connected — option metadata unresolved")
+            return out
+        got = list(got)
+        if len(got) != len(todo):
+            return out
+        resolved = iter(got)
+        with _IB_META_LOCK:
+            for i, spec in enumerate(specs):
+                if out[i] is not None:
+                    continue
+                meta = next(resolved)
+                if _meta_matches(spec, meta):  # failures are never cached
+                    if len(_IB_META_CACHE) >= _IB_META_CACHE_MAX:
+                        _IB_META_CACHE.clear()  # ponytail: wholesale reset, LRU if churn ever matters
+                    _IB_META_CACHE[_meta_key(spec)] = meta
+                    out[i] = meta
+        return out
 
     return resolve
 

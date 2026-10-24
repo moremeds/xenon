@@ -24,6 +24,7 @@ from xenon.api.services import order_entry
 from xenon.api.services.flex_token import flex_token_status
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.db.engine import get_sync_engine
+from xenon.db.queries.portfolio import DISPLAY_SNAPSHOT
 from xenon.db.schema import account_snapshots, order_events, order_submissions
 from xenon.execution import gate4
 
@@ -103,7 +104,7 @@ def _snapshotter_health(scope: dict | None = None) -> dict:
     try:
         engine = get_sync_engine()
         with engine.connect() as conn:
-            stmt = select(func.max(account_snapshots.c.snapshot_at))
+            stmt = select(func.max(account_snapshots.c.snapshot_at)).where(DISPLAY_SNAPSHOT)
             if scope is not None:
                 stmt = stmt.where(
                     account_snapshots.c.broker == scope["broker"],
@@ -387,7 +388,7 @@ async def health():
         "ib_pool": server.ib_pool.status() if server.ib_pool else {},
         "orders_owner": owner,
         "uw": server.uw_available,
-        "futu": _compute_futu_health(),
+        "futu": await asyncio.to_thread(_compute_futu_health),
         "trading_mode": getattr(server.app.state, "trading_mode", trading_mode.MODE),
         # /health is auth-exempt — mask the IB account so the public payload
         # does not leak the full identifier. The raw value stays on app.state
@@ -407,8 +408,8 @@ async def admin_operator():
     """Operator console aggregate. Read-only. No per-route Depends — gated by
     the global auth_middleware like every data route (a per-route Depends would
     401 cross-container in Docker since the Next proxy forwards no token). The
-    DB helpers are called inline (not via to_thread) to match /health and to
-    stay on the Phase-2 test connection."""
+    IB-side DB helpers are called inline to match /health and to stay on the
+    Phase-2 test connection; the Futu health read runs off the event loop."""
     from xenon.api import server
 
     gw = await check_ib_gateway()
@@ -427,7 +428,7 @@ async def admin_operator():
         "flex_divergence": _flex_divergence_health(),
         "flex_token": flex_token_status(),
         "realtime_subscribers": await asyncio.to_thread(_realtime_subscribers_health),
-        "futu": _compute_futu_health(),
+        "futu": await asyncio.to_thread(_compute_futu_health),
         "writers": _service_health_rows(),
     }
 

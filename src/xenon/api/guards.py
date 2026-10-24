@@ -238,7 +238,8 @@ def get_broker_scope(request: Request, broker: str | None = None) -> AccountScop
     """Broker-aware scope dep for read routes (orders, blotter, journal, performance).
 
     `?broker=IB` (default) resolves the live IB scope from app.state (env fallback
-    when the Gateway handshake is pending). `?broker=FUTU` resolves from the
+    when the Gateway handshake is pending). `?broker=FUTU` returns the configured
+    Futu trade scope when one is set; without it, it resolves from the
     lazily-connected FutuClient's matched account; if OpenD is unreachable it falls
     back to the last-synced FUTU scope in Postgres so the DB-first read path keeps
     serving cached orders/blotter/journal. Only 503s when OpenD is down AND no Futu
@@ -276,7 +277,15 @@ def get_broker_scope(request: Request, broker: str | None = None) -> AccountScop
     # path (orders_refresh / blotter sync), bounded + off the event loop.
     # Importing here avoids a circular import with server.py / routes.
     from xenon.api.routes import futu as futu_routes
+    from xenon.execution import futu_scope
     from xenon.execution.account_scope import env_from_trd_env
+
+    # A configured trade scope (FUTU_TRADE_ACC_ID + FUTU_TRADE_ENV) is the
+    # authoritative FUTU read scope: no OpenD needed, never another account's
+    # cached rows. The singleton / DB fallback below applies only without it.
+    configured, _ = futu_scope.configured_scope()
+    if configured is not None:
+        return configured
 
     client = futu_routes._get_futu_client()
     if client.is_connected():

@@ -238,7 +238,10 @@ def _portfolio(monkeypatch, request_scope):
 
     offline = type("Offline", (), {"is_connected": lambda self: False})()
     monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: offline)
-    monkeypatch.setattr(guards, "_futu_scope_from_db", lambda: request_scope)
+    # The configured trade scope is the FUTU read scope (R2 F5).
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID", request_scope.broker_account)
+    monkeypatch.setenv("FUTU_TRADE_ENV", "REAL" if request_scope.account_env == "live" else "SIMULATE")
+    monkeypatch.setattr(guards, "_futu_scope_from_db", lambda: None)
     return TestClient(server.app).get("/futu/portfolio").json()
 
 
@@ -422,13 +425,14 @@ def test_f7_refresh_observes_a_cancel_and_a_fill(monkeypatch):
 
 
 def test_f7_mismatched_refresh_runs_no_pass(monkeypatch):
+    """A loop of another scope than the request (configured) scope never runs."""
     connector = Connector()
-    loop = fo.ObservationLoop(SCOPE, connect=connector, resolve_meta=resolver())
     other = AccountScope(broker="FUTU", account_env="live", broker_account=ACC)
+    loop = fo.ObservationLoop(other, connect=connector, resolve_meta=resolver())
 
     body = _refresh(monkeypatch, other, loop).json()
 
-    assert body["scope_reason"] == "scope_mismatch" and connector.connects == 0
+    assert body["scope"]["accountEnv"] == "paper" and connector.connects == 0
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -203,6 +204,8 @@ def _futu_open_order(row: dict[str, Any], scope: AccountScope) -> dict[str, Any]
         # Observed type and trigger price; never inferred from the limit price.
         orderType=_FUTU_ORDER_TYPE.get(order_type, order_type) if order_type else "UNKNOWN",
         auxPrice=_float_or_none((info or {}).get("aux_price")),
+        # Raw Futu status: several statuses map to UNKNOWN, this tells them apart.
+        futuStatus=(info or {}).get("status"),
         tif=str(row.get("tif") or "DAY"),
         **_scope_fields(scope),
     )
@@ -334,4 +337,4 @@ async def orders_list(
     limit: int = Query(200, ge=1, le=1000),
 ) -> dict[str, Any]:
     """Return scoped open order submissions plus recent execution fills (IB or FUTU)."""
-    return orders_payload_for_scope(scope, limit=limit)
+    return await asyncio.to_thread(orders_payload_for_scope, scope, limit=limit)

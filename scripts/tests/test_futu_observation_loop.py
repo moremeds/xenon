@@ -249,10 +249,21 @@ def test_incomplete_pass_runs_no_audit():
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _fresh_meta_cache(monkeypatch):
+    monkeypatch.setattr(fo, "_IB_META_CACHE", {}, raising=False)
+
+
 class _Pool:
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, connected=True):
         self.fail = fail
+        self.connected = connected
         self.roles = []
+        self.calls = 0
+
+    def is_connected(self, role):
+        assert role == "data"
+        return self.connected
 
     def acquire(self, role):
         pool = self
@@ -268,6 +279,7 @@ class _Pool:
         return _Ctx()
 
     async def run_sync(self, role, fn, client, specs):
+        self.calls += 1
         if self.fail:
             raise RuntimeError("data role down")
         assert (role, fn.__name__, client) == ("data", "_resolve_leg_meta_with_client", "ib-client")

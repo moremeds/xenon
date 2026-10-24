@@ -287,7 +287,7 @@ async def futu_sync():
     # Serves only the connected client's own scope.
     if _futu_in_cooldown():
         scope = client_scope(_futu_client)
-        cached = latest_display_snapshot(scope) if scope is not None else None
+        cached = await asyncio.to_thread(latest_display_snapshot, scope) if scope is not None else None
         if cached:
             return {"ok": True, **cached}
 
@@ -304,7 +304,7 @@ async def futu_sync():
         # window piggyback on the same result.
         if _futu_in_cooldown():
             scope = client_scope(_futu_client)
-            cached = latest_display_snapshot(scope) if scope is not None else None
+            cached = await asyncio.to_thread(latest_display_snapshot, scope) if scope is not None else None
             if cached:
                 return {"ok": True, **cached}
 
@@ -358,7 +358,7 @@ async def futu_sync():
 
         # Partial-failure guard: if this snapshot looks worse than the
         # cache, keep the cache and return it with a warning tag.
-        preserved = _maybe_preserve_partial_failure(result, client_scope(client))
+        preserved = await asyncio.to_thread(_maybe_preserve_partial_failure, result, client_scope(client))
         if preserved is not None:
             preserved_warnings = list(preserved.get("warnings") or []) + [
                 "partial_failure_preserved",
@@ -366,7 +366,7 @@ async def futu_sync():
             return {"ok": True, **preserved, "warnings": preserved_warnings}
 
         try:
-            _persist_display_snapshot(client, result)
+            await asyncio.to_thread(_persist_display_snapshot, client, result)
         except Exception as exc:  # noqa: BLE001 — the fetch itself succeeded
             logger.warning("Futu display snapshot not stored: %s", exc)
             result = {**result, "warnings": list(result.get("warnings") or []) + ["display_snapshot_not_stored"]}
@@ -425,8 +425,9 @@ async def futu_portfolio(request: Request):
         scope = get_broker_scope(request, "FUTU")
     except HTTPException:
         return dict(_FUTU_NEVER_SYNCED)
-    cached = latest_display_snapshot(scope)
+    # Off the event loop: a slow Postgres must not stall every API request.
+    cached = await asyncio.to_thread(latest_display_snapshot, scope)
     if cached is None:
-        code = "scope_mismatch" if _any_display_snapshot() else "never_synced"
+        code = "scope_mismatch" if await asyncio.to_thread(_any_display_snapshot) else "never_synced"
         return {**_FUTU_NEVER_SYNCED, "code": code, "scope": _scope_fields(scope)}
     return {"ok": True, **cached, "scope": _scope_fields(scope)}
