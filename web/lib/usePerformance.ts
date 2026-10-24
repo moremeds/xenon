@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import { futuScopeQuery, useFutuAccountEnv } from "./futuAccountEnv";
 import { useSyncHook, type UseSyncReturn } from "./useSyncHook";
 import type { PerformanceData, PerformancePeriod } from "./types";
 
@@ -12,9 +13,13 @@ export function usePerformance(
   broker: "IB" | "FUTU" = "IB",
   period: PerformancePeriod = "YTD",
 ): UseSyncReturn<PerformanceData> {
+  const futuEnv = useFutuAccountEnv();
   const config = useMemo(
     () => ({
-      endpoint: `/api/performance?broker=${encodeURIComponent(broker)}&period=${encodeURIComponent(period)}`,
+      endpoint:
+        broker === "FUTU"
+          ? `/api/performance?broker=FUTU&period=${encodeURIComponent(period)}&account_env=${encodeURIComponent(futuEnv)}`
+          : `/api/performance?broker=${encodeURIComponent(broker)}&period=${encodeURIComponent(period)}`,
       interval: 15 * 60 * 1000,
       hasPost: false,
       extractTimestamp: (data: PerformanceData) =>
@@ -22,7 +27,7 @@ export function usePerformance(
           ? (data.last_sync ?? data.as_of ?? null)
           : (data.last_sync ?? null),
     }),
-    [broker, period],
+    [broker, period, futuEnv],
   );
   return useSyncHook<PerformanceData>(config, active);
 }

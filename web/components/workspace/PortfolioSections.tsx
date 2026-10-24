@@ -22,6 +22,9 @@ export function PortfolioSections({
   futuRead,
   onFutuRetry,
   futuRetrying = false,
+  futuOrderActionsEnabled = false,
+  futuAccountIdTail = null,
+  futuAccountEnv = "paper" as import("@/lib/futuAccountEnv").FutuAccountEnv,
 }: {
   portfolio: PortfolioData | null;
   prices?: Record<string, PriceData>;
@@ -31,6 +34,9 @@ export function PortfolioSections({
   /** Futu tab only: retry action wired to useFutuPortfolio().syncNow(). */
   onFutuRetry?: () => void;
   futuRetrying?: boolean;
+  futuOrderActionsEnabled?: boolean;
+  futuAccountIdTail?: string | null;
+  futuAccountEnv?: import("@/lib/futuAccountEnv").FutuAccountEnv;
 }) {
   const positions = useMemo(
     () => portfolio?.positions ?? EMPTY_POSITIONS,
@@ -148,11 +154,40 @@ export function PortfolioSections({
     // Futu tab: the initial read finished with a definitive non-data
     // outcome — describe the measurement condition instead of spinning
     // LOADING forever (nothing more arrives until the user syncs).
-    const futuEmptyState: "never_synced" | "unavailable" | null =
+    const futuEmptyState:
+      | "never_synced"
+      | "unavailable"
+      | "not_configured"
+      | null =
       activeAccount === "futu" &&
-      (futuRead === "never_synced" || futuRead === "unavailable")
+      (futuRead === "never_synced" ||
+        futuRead === "unavailable" ||
+        futuRead === "not_configured")
         ? futuRead
         : null;
+
+    if (futuEmptyState === "not_configured") {
+      return (
+        <div className="section" data-testid="futu-not-configured-panel">
+          <div className="section-header">
+            <div className="section-title">
+              <Circle size={14} />
+              Portfolio
+            </div>
+            <span className="pill neutral">NOT CONFIGURED</span>
+          </div>
+          <div className="section-body">
+            <p
+              data-testid="futu-empty-state"
+              style={{ margin: 0, color: "var(--text-secondary)" }}
+            >
+              No REAL Futu account configured for this environment.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <>
         {toggleHeader}
@@ -224,6 +259,10 @@ export function PortfolioSections({
           fxRates={portfolio.fx_rates}
           activeAccount={activeAccount}
           lastSync={portfolio.last_sync}
+          futuOrderActionsEnabled={futuOrderActionsEnabled}
+          futuAccountIdTail={futuAccountIdTail}
+          futuAccountEnv={futuAccountEnv}
+          portfolioPositions={portfolio?.positions ?? []}
         />
       </>
     );
@@ -259,7 +298,13 @@ export function PortfolioSections({
               showUnderlying={true}
               prices={prices}
               fxRates={portfolio.fx_rates}
-              readonly={activeAccount === "futu"}
+              readonly={activeAccount === "futu" && !futuOrderActionsEnabled}
+              futuOrderMode={
+                activeAccount === "futu" && futuOrderActionsEnabled
+              }
+              futuAccountEnv={futuAccountEnv}
+              futuAccountIdTail={futuAccountIdTail}
+              portfolioPositions={portfolio?.positions ?? []}
             />
           </div>
         </div>
@@ -294,7 +339,13 @@ export function PortfolioSections({
               showUnderlying={true}
               prices={prices}
               fxRates={portfolio.fx_rates}
-              readonly={activeAccount === "futu"}
+              readonly={activeAccount === "futu" && !futuOrderActionsEnabled}
+              futuOrderMode={
+                activeAccount === "futu" && futuOrderActionsEnabled
+              }
+              futuAccountEnv={futuAccountEnv}
+              futuAccountIdTail={futuAccountIdTail}
+              portfolioPositions={portfolio?.positions ?? []}
             />
           </div>
         </div>
@@ -327,7 +378,13 @@ export function PortfolioSections({
               showExpiry={false}
               prices={prices}
               fxRates={portfolio.fx_rates}
-              readonly={activeAccount === "futu"}
+              readonly={activeAccount === "futu" && !futuOrderActionsEnabled}
+              futuOrderMode={
+                activeAccount === "futu" && futuOrderActionsEnabled
+              }
+              futuAccountEnv={futuAccountEnv}
+              futuAccountIdTail={futuAccountIdTail}
+              portfolioPositions={portfolio?.positions ?? []}
             />
           </div>
         </div>

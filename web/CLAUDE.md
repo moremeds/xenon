@@ -110,7 +110,7 @@ JSON data files: always `"ticker"`. IB contracts: `"symbol"`. Read defensively: 
 
 ## Multi-Broker Account Tabs
 
-`AccountTabBar.tsx` — switches between IB (live trading) and Futu (read-only positions snapshot). Futu is observe-only: never send orders, never treat as a quote source. Adapter: `futuPortfolioAdapter.ts`. Sync hook: `useFutuPortfolio.ts` — **POST polling** (`/futu/sync`), not GET; the GET endpoint returns cached data and was causing stale-snapshot bugs (commit 1be17ea).
+`AccountTabBar.tsx` — switches between IB and Futu. The Futu tab has a SIMULATE / REAL switch (`FutuEnvSwitch.tsx`, `useFutuAccountEnv` in `lib/futuAccountEnv.ts`); every Futu proxy call carries `?broker=FUTU&account_env=paper|live` (`forwardRequestQuery`). Futu order actions (single-leg LIMIT place, cancel, modify by `brokerOrderId`) render only when `/api/health` → `futu.trading[env]` is true (`lib/useFutuTrading.ts`); otherwise rows stay read-only. Never offer combo, replace or wizard for Futu, never treat Futu as a browser quote source. Contract: `docs/architecture/futu-orders.md`. Adapter: `futuPortfolioAdapter.ts`. Sync hook: `useFutuPortfolio.ts` — **POST polling** (`/futu/sync`), not GET; the GET endpoint returns cached data and was causing stale-snapshot bugs (commit 1be17ea).
 
 **Futu combo parity (#36):** Matched long+short pairs on the same ticker fuse into visual combo rows so the Futu tab renders with the same structure as IB. Fusion is presentation-only — the underlying positions remain separate read-only rows. Ticker navigation works from Futu rows even though they're read-only (commit 9eaf1e6c).
 

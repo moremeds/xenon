@@ -74,6 +74,18 @@ function renderFutuPortfolio(props: Record<string, unknown> = {}) {
 }
 
 describe("Futu portfolio empty state (initial read resolved, no data)", () => {
+  it("not_configured renders one panel, no retry, no alert-item marker", () => {
+    renderFutuPortfolio({ futuRead: "not_configured", onFutuRetry: vi.fn() });
+
+    expect(screen.getByTestId("futu-not-configured-panel")).toBeTruthy();
+    expect(screen.queryByTestId("portfolio-view-toggle")).toBeNull();
+    expect(screen.queryByTestId("futu-retry")).toBeNull();
+    const msg = screen.getByTestId("futu-empty-state").textContent ?? "";
+    expect(msg).toBe("No REAL Futu account configured for this environment.");
+    expect(msg.startsWith("›")).toBe(false);
+    expect(screen.getByText("NOT CONFIGURED", { exact: true })).toBeTruthy();
+  });
+
   it("404/never_synced renders the not-yet-synced condition + retry", () => {
     renderFutuPortfolio({ futuRead: "never_synced", onFutuRetry: vi.fn() });
 

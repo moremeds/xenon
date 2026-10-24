@@ -35,6 +35,10 @@ type Props = {
   fxRates?: Record<string, number>;
   activeAccount: "ib" | "futu";
   lastSync: string;
+  futuOrderActionsEnabled?: boolean;
+  futuAccountIdTail?: string | null;
+  futuAccountEnv?: import("@/lib/futuAccountEnv").FutuAccountEnv;
+  portfolioPositions?: import("@/lib/types").PortfolioPosition[];
 };
 
 function fmtSigned(
@@ -63,6 +67,10 @@ export default function PortfolioByStructure({
   fxRates,
   activeAccount,
   lastSync,
+  futuOrderActionsEnabled = false,
+  futuAccountIdTail = null,
+  futuAccountEnv = "paper",
+  portfolioPositions = [],
 }: Props) {
   // Live usd_per_unit for converting per-structure aggregate MV/P&L to USD and
   // for the cross-ticker USD sort inside buildTickerGroups.
@@ -100,7 +108,7 @@ export default function PortfolioByStructure({
     setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const readonly = activeAccount === "futu";
+  const readonly = activeAccount === "futu" && !futuOrderActionsEnabled;
 
   if (groups.length === 0) {
     return (
@@ -229,6 +237,12 @@ export default function PortfolioByStructure({
                   prices={prices}
                   fxRates={fxRates}
                   readonly={readonly}
+                  futuOrderMode={
+                    activeAccount === "futu" && futuOrderActionsEnabled
+                  }
+                  futuAccountEnv={futuAccountEnv}
+                  futuAccountIdTail={futuAccountIdTail}
+                  portfolioPositions={portfolioPositions}
                   hideHeader={takeHeaderSlot()}
                   hideFxBadge
                 />
@@ -338,6 +352,13 @@ export default function PortfolioByStructure({
                                   prices={prices}
                                   fxRates={fxRates}
                                   readonly={readonly}
+                                  futuOrderMode={
+                                    activeAccount === "futu" &&
+                                    futuOrderActionsEnabled
+                                  }
+                                  futuAccountEnv={futuAccountEnv}
+                                  futuAccountIdTail={futuAccountIdTail}
+                                  portfolioPositions={portfolioPositions}
                                   hideHeader={takeHeaderSlot()}
                                   hideFxBadge
                                 />

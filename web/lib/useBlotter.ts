@@ -1,5 +1,7 @@
 "use client";
 
+import { useMemo } from "react";
+import { futuScopeQuery, useFutuAccountEnv } from "./futuAccountEnv";
 import type { BlotterData } from "./types";
 import { useSyncHook } from "./useSyncHook";
 
@@ -15,11 +17,18 @@ export function useBlotter(
   active = false,
   broker: "IB" | "FUTU" = "IB",
 ): UseBlotterReturn {
-  // Endpoint carries the broker — useSyncHook keys its module cache on the
-  // endpoint string, so IB and FUTU blotters stay isolated across tab switches.
+  const futuEnv = useFutuAccountEnv();
+  const endpoint = useMemo(
+    () =>
+      broker === "FUTU"
+        ? `/api/blotter${futuScopeQuery(futuEnv)}`
+        : "/api/blotter",
+    [broker, futuEnv],
+  );
+  // Endpoint carries broker + Futu account_env — useSyncHook keys cache on it.
   const result = useSyncHook<BlotterData>(
     {
-      endpoint: broker === "FUTU" ? "/api/blotter?broker=FUTU" : "/api/blotter",
+      endpoint,
       extractTimestamp: (data) => data.as_of || null,
       showBackgroundError: true,
     },

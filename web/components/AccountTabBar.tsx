@@ -1,6 +1,9 @@
 "use client";
 
+import type { ReactNode } from "react";
 import type { BrokerAccount } from "@/lib/accountContext";
+import type { FutuAccountEnv } from "@/lib/futuAccountEnv";
+import { FutuAccountEnvBadge } from "@/components/FutuEnvSwitch";
 import {
   FUTU_STATUS_CLASS,
   FUTU_STATUS_LABEL,
@@ -27,6 +30,7 @@ type Props = {
   onChange: (next: BrokerAccount) => void;
   ib: AccountTabState;
   futu: AccountTabState;
+  futuEnv?: FutuAccountEnv;
 };
 
 /**
@@ -37,7 +41,13 @@ type Props = {
  * Per plan: layout + information is identical between tabs. The only
  * difference is which portfolio feeds the screens below.
  */
-export default function AccountTabBar({ active, onChange, ib, futu }: Props) {
+export default function AccountTabBar({
+  active,
+  onChange,
+  ib,
+  futu,
+  futuEnv = "paper",
+}: Props) {
   return (
     <div className="account-tab-bar">
       <AccountTab
@@ -50,6 +60,7 @@ export default function AccountTabBar({ active, onChange, ib, futu }: Props) {
         broker="futu"
         state={futu}
         active={active === "futu"}
+        envBadge={<FutuAccountEnvBadge env={futuEnv} />}
         onClick={() => onChange("futu")}
       />
     </div>
@@ -60,11 +71,13 @@ function AccountTab({
   broker,
   state,
   active,
+  envBadge,
   onClick,
 }: {
   broker: BrokerAccount;
   state: AccountTabState;
   active: boolean;
+  envBadge?: ReactNode;
   onClick: () => void;
 }) {
   const statusLabel = FUTU_STATUS_LABEL[state.status];
@@ -79,8 +92,13 @@ function AccountTab({
       aria-label={`Switch to ${state.label} account`}
     >
       <div className="account-tab-header">
-        <span className="account-tab-label">ACCOUNT · {state.label}</span>
-        <span className={`account-tab-status ${statusClass}`}>● {statusLabel}</span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+          <span className="account-tab-label">ACCOUNT · {state.label}</span>
+          {envBadge}
+        </span>
+        <span className={`account-tab-status ${statusClass}`}>
+          ● {statusLabel}
+        </span>
       </div>
       <div className="account-tab-id">
         {state.accountId ? truncateId(state.accountId) : "—"}
@@ -90,7 +108,9 @@ function AccountTab({
         {formatSyncAge(state.lastSync)} · {state.positionCount} pos
       </div>
       {state.netLiquidation != null && (
-        <div className="account-tab-metric">net liq {formatCurrency(state.netLiquidation)}</div>
+        <div className="account-tab-metric">
+          net liq {formatCurrency(state.netLiquidation)}
+        </div>
       )}
     </button>
   );

@@ -6,12 +6,14 @@ import { passThroughXenonError } from "@/lib/passThroughXenonError";
 import { getRequestId } from "@/lib/apiContracts";
 import type { ModifyCancelTarget, ReplaceComboOrder } from "@/lib/orderModify";
 import type { OrdersData } from "@/lib/order/types";
+import { forwardRequestQuery } from "@/lib/forwardRequestQuery";
 
 export const runtime = "nodejs";
 
 type ModifyBody = {
   orderId?: number;
   permId?: number;
+  brokerOrderId?: string;
   newPrice?: number;
   newQuantity?: number;
   outsideRth?: boolean;
@@ -47,9 +49,9 @@ function isModifyConfirmed(
   return priceConfirmed && quantityConfirmed;
 }
 
-async function fetchOrders(): Promise<OrdersData | null> {
+async function fetchOrders(scopeQs: string): Promise<OrdersData | null> {
   try {
-    return await xenonFetch<OrdersData>("/orders", {
+    return await xenonFetch<OrdersData>(`/orders${scopeQs}`, {
       method: "GET",
       timeout: 10_000,
     });
@@ -59,19 +61,21 @@ async function fetchOrders(): Promise<OrdersData | null> {
 }
 
 export async function POST(request: Request): Promise<Response> {
+  const scopeQs = forwardRequestQuery(request);
   const requestId = getRequestId();
   try {
     const body = (await request.json()) as ModifyBody;
     const orderId = body.orderId ?? 0;
     const permId = body.permId ?? 0;
+    const brokerOrderId = body.brokerOrderId?.trim() ?? "";
     const newPrice = body.newPrice;
     const newQuantity = body.newQuantity;
     const replaceOrder = body.replaceOrder;
 
-    if (orderId === 0 && permId === 0) {
+    if (orderId === 0 && permId === 0 && !brokerOrderId) {
       return NextResponse.json(
         {
-          error: "Must provide orderId or permId",
+          error: "Must provide orderId, permId, or brokerOrderId",
           reason_code: "ORDER_IDENTIFIER_REQUIRED",
         },
         { status: 400 },
@@ -124,7 +128,7 @@ export async function POST(request: Request): Promise<Response> {
       // uncertain 502 — the original may be cancelled and the successor live.
       try {
         const result = await xenonFetch<Record<string, unknown>>(
-          "/orders/replace",
+          `/orders/replace${scopeQs}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -181,27 +185,36 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    const result = await xenonFetch<Record<string, unknown>>("/orders/modify", {
+    const modifyPayload = brokerOrderId
+      ? {
+          brokerOrderId,
+          newPrice,
+          newQuantity,
+          modifySequence: body.modifySequence,
+        }
+      : {
+          orderId,
+          permId,
+          newPrice,
+          newQuantity,
+          outsideRth: body.outsideRth,
+          modifySequence: body.modifySequence,
+        };
+
+    const result = await xenonFetch<Record<string, unknown>>(`/orders/modify${scopeQs}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        orderId,
-        permId,
-        newPrice,
-        newQuantity,
-        outsideRth: body.outsideRth,
-        modifySequence: body.modifySequence,
-      }),
+      body: JSON.stringify(modifyPayload),
       timeout: 20_000,
     });
 
     // Refresh orders after modify
     try {
-      await xenonFetch("/orders/refresh", { method: "POST", timeout: 10_000 });
+      await xenonFetch(`/orders/refresh${scopeQs}`, { method: "POST", timeout: 10_000 });
     } catch {
       // Non-fatal
     }
-    const orders = await fetchOrders();
+    const orders = await fetchOrders(scopeQs);
 
     if (!orders) {
       return NextResponse.json(
@@ -210,14 +223,10 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
+    const futuScope = scopeQs.includes("broker=FUTU");
     if (
-      !isModifyConfirmed(
-        orders,
-        orderId,
-        permId,
-        newPrice,
-        newQuantity,
-      )
+      !futuScope &&
+      !isModifyConfirmed(orders, orderId, permId, newPrice, newQuantity)
     ) {
       return NextResponse.json(
         {
@@ -232,6 +241,9 @@ export async function POST(request: Request): Promise<Response> {
       status: "ok",
       message: result.message,
       orders,
+      ...(typeof result.confirmed === "boolean"
+        ? { confirmed: result.confirmed }
+        : {}),
     });
   } catch (error) {
     return passThroughXenonError(error, requestId);

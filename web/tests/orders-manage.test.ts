@@ -174,7 +174,7 @@ describe("IB clientId collision prevention", () => {
     );
     const content = await readFile(filePath, "utf8");
     expect(content.includes("xenonFetch")).toBeTruthy();
-    expect(content.includes('"/orders/cancel"')).toBeTruthy();
+    expect(content.includes("/orders/cancel")).toBeTruthy();
   });
 
   it("modify route passes clientId via typed wrapper", async () => {
@@ -184,7 +184,7 @@ describe("IB clientId collision prevention", () => {
     );
     const content = await readFile(filePath, "utf8");
     expect(content.includes("xenonFetch")).toBeTruthy();
-    expect(content.includes('"/orders/modify"')).toBeTruthy();
+    expect(content.includes("/orders/modify")).toBeTruthy();
   });
 });
 
@@ -207,7 +207,9 @@ describe("Cross-client modify fix (Error 103)", () => {
     // PR-10: the order owner (pool base+4) never reconnects as the original
     // clientId; a foreign order is refused (ORDER_NOT_OWNED).
     expect(scriptContent).toMatch(/def modify_order_on_client\(/);
-    expect(scriptContent).toContain("_refuse_foreign_owner(client, trade.order.clientId)");
+    expect(scriptContent).toContain(
+      "_refuse_foreign_owner(client, trade.order.clientId)",
+    );
     expect(scriptContent).not.toContain("client.disconnect()");
   });
 

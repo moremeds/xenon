@@ -12,6 +12,7 @@ import {
   normalizeOptionRight,
 } from "@/lib/placeOrderBodySchema";
 import { buildFastApiPlaceOrderPayload } from "@/lib/order/placeOrderContract";
+import { forwardRequestQuery } from "@/lib/forwardRequestQuery";
 
 export const runtime = "nodejs";
 const ORDER_PLACE_TIMEOUT_MS = 60_000;
@@ -47,6 +48,7 @@ type PlaceBody = {
 };
 
 export async function POST(request: Request): Promise<Response> {
+  const scopeQs = forwardRequestQuery(request);
   const requestId = getRequestId();
   // Set right before the FastAPI call: any failure after it may have placed
   // the order at IB (OP-1).
@@ -195,7 +197,7 @@ export async function POST(request: Request): Promise<Response> {
 
     dispatched = true;
     const orderResult = await xenonFetch<Record<string, unknown>>(
-      "/orders/place",
+      `/orders/place${scopeQs}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -212,7 +214,7 @@ export async function POST(request: Request): Promise<Response> {
     let refreshedOrders: Record<string, unknown> | null = null;
     try {
       refreshedOrders = await xenonFetch<Record<string, unknown>>(
-        "/orders/refresh",
+        `/orders/refresh${scopeQs}`,
         { method: "POST", timeout: 10_000 },
       );
     } catch {

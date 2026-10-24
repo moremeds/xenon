@@ -2,6 +2,33 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { PortfolioPosition } from "@/lib/types";
+import type { FutuAccountEnv } from "@/lib/futuAccountEnv";
+import { futuScopeQuery } from "@/lib/futuAccountEnv";
+import {
+  checkNakedShortRisk,
+  type NakedShortPortfolio,
+  type OrderPayload,
+} from "@/lib/nakedShortGuard";
+
+function toNakedShortPortfolio(
+  positions: PortfolioPosition[],
+): NakedShortPortfolio {
+  return {
+    positions: positions.map((p) => ({
+      ticker: p.ticker,
+      structure_type: p.structure_type,
+      contracts: p.contracts,
+      direction: p.direction,
+      expiry: p.expiry,
+      legs: p.legs.map((l) => ({
+        direction: l.direction,
+        type: l.type,
+        contracts: l.contracts,
+        strike: l.strike,
+      })),
+    })),
+  };
+}
 import type { PriceData } from "@/lib/pricesProtocol";
 import Modal from "./Modal";
 import { ModifyOrderQuoteTelemetry } from "./QuoteTelemetry";
@@ -22,6 +49,11 @@ type Props = {
   prices: Record<string, PriceData>;
   onClose: () => void;
   onSubmitted?: (orderId: string) => void;
+  futuTicket?: {
+    env: FutuAccountEnv;
+    accountTail: string | null;
+    portfolioPositions: PortfolioPosition[];
+  };
 };
 
 function unifiedLegsFromPosition(pos: PortfolioPosition): UnifiedOrderLeg[] {
@@ -43,6 +75,7 @@ export default function PositionOrderModal({
   prices,
   onClose,
   onSubmitted,
+  futuTicket,
 }: Props) {
   const [intent, setIntent] = useState<Intent>("close");
 
@@ -53,6 +86,7 @@ export default function PositionOrderModal({
 
   const fullQty = Math.abs(position.contracts);
   const isCombo = draft.payload.type === "combo";
+  const futuBlockedCombo = Boolean(futuTicket && isCombo);
 
   const [qtyText, setQtyText] = useState<string>(String(fullQty));
   const [priceText, setPriceText] = useState<string>(
@@ -61,9 +95,7 @@ export default function PositionOrderModal({
       : "",
   );
   const [outsideRth, setOutsideRth] = useState(false);
-  const [tif, setTif] = useState<"DAY" | "GTC">(
-    draft.payload.tif ?? "DAY",
-  );
+  const [tif, setTif] = useState<"DAY" | "GTC">(draft.payload.tif ?? "DAY");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -102,7 +134,14 @@ export default function PositionOrderModal({
   };
 
   const handleSubmit = async () => {
-    if (submitting || !isValidQty || !isValidPrice) return;
+    if (
+      submitting ||
+      !isValidQty ||
+      !isValidPrice ||
+      futuBlockedCombo ||
+      nakedShortWarning
+    )
+      return;
     setSubmitting(true);
     setError(null);
     try {
@@ -117,7 +156,11 @@ export default function PositionOrderModal({
         tif,
         ...(outsideRth && !isCombo ? { outsideRth: true } : {}),
       };
-      const placed = await submitPlaceOrder(attemptId, body);
+      const placed = await submitPlaceOrder(
+        attemptId,
+        body,
+        futuTicket ? { scopeQuery: futuScopeQuery(futuTicket.env) } : undefined,
+      );
       if (placed.kind !== "ok") {
         setError(placed.message);
         return;
@@ -175,6 +218,20 @@ export default function PositionOrderModal({
   ]);
 
   const partial = intent === "close" && isValidQty && parsedQty < fullQty;
+  const nakedShortWarning = useMemo(() => {
+    if (!futuTicket) return null;
+    if (draft.payload.action !== "SELL") return null;
+    const qty = !isNaN(parsedQty) && parsedQty > 0 ? parsedQty : 1;
+    const payload = {
+      ...draft.payload,
+      quantity: qty,
+      limitPrice: Number.isFinite(parsedPrice) ? parsedPrice : 1,
+      tif,
+    };
+    const guardPortfolio = toNakedShortPortfolio(futuTicket.portfolioPositions);
+    const result = checkNakedShortRisk(payload as OrderPayload, guardPortfolio);
+    return result.allowed ? null : (result.reason ?? null);
+  }, [futuTicket, draft.payload, parsedQty, parsedPrice, tif]);
 
   const unifiedLegs = useMemo(
     () => unifiedLegsFromPosition(position),
@@ -185,7 +242,13 @@ export default function PositionOrderModal({
     <Modal
       open={true}
       onClose={onClose}
-      title={`Order — ${position.ticker} ${position.structure}`}
+      title={`Order — ${position.ticker} ${position.structure}${
+        futuTicket
+          ? ` · ${futuTicket.env === "paper" ? "SIMULATE" : "REAL"}${
+              futuTicket.accountTail ? ` · …${futuTicket.accountTail}` : ""
+            }`
+          : ""
+      }`}
       className={
         isCombo
           ? "modify-order-modal modify-order-modal-combo"
@@ -453,7 +516,9 @@ export default function PositionOrderModal({
           <button
             className="btn-primary"
             onClick={handleSubmit}
-            disabled={submitting || !isValidQty || !isValidPrice || attemptId.uncertain}
+            disabled={
+              submitting || !isValidQty || !isValidPrice || attemptId.uncertain
+            }
             aria-label={submitLabel}
           >
             {submitLabel}

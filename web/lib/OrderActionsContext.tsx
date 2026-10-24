@@ -18,6 +18,30 @@ import {
   REPLACEMENT_UNCERTAIN_COPY,
 } from "@/lib/order/submitPlace";
 import { randomAttemptId } from "@/components/ticker-detail/useClientAttemptId";
+import { type FutuAccountEnv, useFutuAccountEnv } from "@/lib/futuAccountEnv";
+import {
+  findOpenOrderInSnapshot,
+  FUTU_MODIFY_SENT_UNCONFIRMED_COPY,
+  futuCancelApiPath,
+  futuModifyApiPath,
+  futuOrdersApiPath,
+  isFutuOpenOrder,
+  openOrderActionKey,
+  orderStillOpen,
+} from "@/lib/futuOpenOrder";
+
+function futuModifyTermsMatch(
+  liveOrder: OpenOrder | undefined,
+  request: ModifyRequestWithOutsideRth,
+): boolean {
+  if (!liveOrder) return false;
+  const priceConfirmed =
+    request.newPrice == null || liveOrder.limitPrice === request.newPrice;
+  const quantityConfirmed =
+    request.newQuantity == null ||
+    liveOrder.totalQuantity === request.newQuantity;
+  return priceConfirmed && quantityConfirmed;
+}
 
 /** Result surfaced to callers of requestCancel/requestModify so the row can
  *  render a FAILED pill (F6.2). `status` is the HTTP status from the Next.js
@@ -54,9 +78,11 @@ type Notification = {
 };
 
 type OrderActionsContextValue = {
-  pendingCancels: Map<number, OpenOrder>;
-  pendingModifies: Map<number, PendingModify>;
+  pendingCancels: Map<string, OpenOrder>;
+  pendingModifies: Map<string, PendingModify>;
   cancelledOrders: CancelledOrder[];
+  isPendingCancel: (order: OpenOrder) => boolean;
+  isPendingModify: (order: OpenOrder) => boolean;
   requestCancel: (order: OpenOrder) => Promise<ActionResult>;
   requestModify: (
     order: OpenOrder,
@@ -76,28 +102,56 @@ const OrderActionsContext = createContext<OrderActionsContextValue | null>(
 const POLL_INTERVAL_MS = 5_000;
 const POLL_MAX_COUNT = 24; // ~2 min
 
+function resolveFutuEnv(
+  order: OpenOrder,
+  fallback: FutuAccountEnv,
+): FutuAccountEnv {
+  if (order.accountEnv === "paper" || order.accountEnv === "live") {
+    return order.accountEnv;
+  }
+  return fallback;
+}
+
 export function OrderActionsProvider({ children }: { children: ReactNode }) {
-  const [pendingCancels, setPendingCancels] = useState<Map<number, OpenOrder>>(
+  const futuAccountEnv = useFutuAccountEnv();
+  const [pendingCancels, setPendingCancels] = useState<Map<string, OpenOrder>>(
     new Map(),
   );
   const [pendingModifies, setPendingModifies] = useState<
-    Map<number, PendingModify>
+    Map<string, PendingModify>
   >(new Map());
   const [cancelledOrders, setCancelledOrders] = useState<CancelledOrder[]>([]);
 
-  const pollTimersRef = useRef<Map<number, ReturnType<typeof setInterval>>>(
+  const pollTimersRef = useRef<Map<string, ReturnType<typeof setInterval>>>(
     new Map(),
   );
-  const pollCountsRef = useRef<Map<number, number>>(new Map());
+  const pollCountsRef = useRef<Map<string, number>>(new Map());
   const notificationsRef = useRef<Notification[]>([]);
   const ordersUpdaterRef = useRef<((data: OrdersData) => void) | null>(null);
-  const pendingModifiesRef = useRef<Map<number, PendingModify>>(new Map());
-  const modifySeqCountsRef = useRef<Map<number, number>>(new Map());
+  const pendingModifiesRef = useRef<Map<string, PendingModify>>(new Map());
+  const modifySeqCountsRef = useRef<Map<string, number>>(new Map());
+  const futuEnvRef = useRef(futuAccountEnv);
+  futuEnvRef.current = futuAccountEnv;
 
-  // Keep ref in sync with state for use inside interval callbacks
   useEffect(() => {
     pendingModifiesRef.current = pendingModifies;
   }, [pendingModifies]);
+
+  const isPendingCancel = useCallback(
+    (order: OpenOrder) => pendingCancels.has(openOrderActionKey(order)),
+    [pendingCancels],
+  );
+
+  const isPendingModify = useCallback(
+    (order: OpenOrder) => pendingModifies.has(openOrderActionKey(order)),
+    [pendingModifies],
+  );
+
+  const ordersRefreshUrl = useCallback((order: OpenOrder) => {
+    if (!isFutuOpenOrder(order)) return "/api/orders";
+    const env = resolveFutuEnv(order, futuEnvRef.current);
+    return futuOrdersApiPath(env);
+  }, []);
 
   const pushNotification = useCallback((n: Notification) => {
     notificationsRef.current.push(n);
@@ -113,7 +167,7 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
     const patched: OrdersData = {
       ...data,
       open_orders: data.open_orders.map((o) => {
-        const pm = currentModifies.get(o.permId);
+        const pm = currentModifies.get(openOrderActionKey(o));
         if (!pm) return o;
         return {
           ...o,
@@ -125,46 +179,50 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
     ordersUpdaterRef.current?.(patched);
   }, []);
 
+  const refreshOrders = useCallback(
+    async (order: OpenOrder) => {
+      const res = await fetch(ordersRefreshUrl(order), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) return null;
+      return (await res.json()) as OrdersData;
+    },
+    [ordersRefreshUrl],
+  );
+
   /* ── Cancel polling ─────────────────────────────────── */
 
   const startCancelPoll = useCallback(
     (order: OpenOrder) => {
-      const permId = order.permId;
-      pollCountsRef.current.set(permId, 0);
+      const actionKey = openOrderActionKey(order);
+      pollCountsRef.current.set(actionKey, 0);
 
       const tick = async () => {
-        const count = (pollCountsRef.current.get(permId) ?? 0) + 1;
-        pollCountsRef.current.set(permId, count);
+        const count = (pollCountsRef.current.get(actionKey) ?? 0) + 1;
+        pollCountsRef.current.set(actionKey, count);
 
         try {
-          const res = await fetch("/api/orders", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-          });
-          if (!res.ok) {
+          const data = await refreshOrders(order);
+          if (!data) {
             scheduleNext();
             return;
           }
-          const data = (await res.json()) as OrdersData;
 
-          const stillOpen = data.open_orders.some(
-            (o) =>
-              o.permId === permId ||
-              (o.orderId === order.orderId && order.orderId !== 0),
-          );
+          const stillOpen = orderStillOpen(data, order);
 
           if (!stillOpen) {
-            pollTimersRef.current.delete(permId);
-            pollCountsRef.current.delete(permId);
+            pollTimersRef.current.delete(actionKey);
+            pollCountsRef.current.delete(actionKey);
 
             setPendingCancels((prev) => {
               const next = new Map(prev);
-              next.delete(permId);
+              next.delete(actionKey);
               return next;
             });
             setCancelledOrders((prev) => [
               {
-                permId,
+                permId: order.permId,
                 symbol: order.symbol,
                 action: order.action,
                 orderType: order.orderType,
@@ -181,11 +239,11 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
               message: `${order.symbol} order cancelled`,
             });
           } else if (count >= POLL_MAX_COUNT) {
-            pollTimersRef.current.delete(permId);
-            pollCountsRef.current.delete(permId);
+            pollTimersRef.current.delete(actionKey);
+            pollCountsRef.current.delete(actionKey);
             setPendingCancels((prev) => {
               const next = new Map(prev);
-              next.delete(permId);
+              next.delete(actionKey);
               return next;
             });
             pushOrdersData(data);
@@ -205,34 +263,33 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
 
       const scheduleNext = () => {
         const timer = setTimeout(tick, POLL_INTERVAL_MS);
-        pollTimersRef.current.set(permId, timer);
+        pollTimersRef.current.set(actionKey, timer);
       };
 
       scheduleNext();
     },
-    [pushNotification, pushOrdersData],
+    [pushNotification, pushOrdersData, refreshOrders],
   );
 
   const requestCancel = useCallback(
     async (order: OpenOrder): Promise<ActionResult> => {
+      const actionKey = openOrderActionKey(order);
+      const futu = isFutuOpenOrder(order);
+      const env = resolveFutuEnv(order, futuAccountEnv);
+      const cancelUrl = futu ? futuCancelApiPath(env) : "/api/orders/cancel";
+      const cancelBody =
+        futu && order.brokerOrderId
+          ? { brokerOrderId: order.brokerOrderId }
+          : { orderId: order.orderId, permId: order.permId };
       try {
-        const res = await fetch("/api/orders/cancel", {
+        const res = await fetch(cancelUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            orderId: order.orderId,
-            permId: order.permId,
-          }),
+          body: JSON.stringify(cancelBody),
         });
         const json = await res.json().catch(() => ({}));
         if (!res.ok) {
-          // F6.2: on 503/409 the server refused authoritatively — DO NOT
-          // optimistically mark the order cancelled. Surface reason-code copy
-          // and let the caller render a FAILED pill; the button re-enables.
           const reasonCode = readReasonCode(json);
-          // No reason_code → still surface human-readable upstream detail:
-          // FastAPI HTTPException bodies carry it as a string or as
-          // detail.message — passThroughXenonError forwards either verbatim.
           const message = reasonCode
             ? getReasonToast(reasonCode).copy
             : json?.error ||
@@ -243,9 +300,9 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
           pushNotification({ type: "error", message });
           return { ok: false, status: res.status, reasonCode, message };
         }
-        setPendingCancels((prev) => new Map(prev).set(order.permId, order));
+        setPendingCancels((prev) => new Map(prev).set(actionKey, order));
         startCancelPoll(order);
-        if (json.orders) pushOrdersData(json.orders);
+        if (json.orders) pushOrdersData(json.orders as OrdersData);
         return { ok: true };
       } catch {
         const message = "Cancel request failed";
@@ -253,55 +310,51 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
         return { ok: false, status: 0, reasonCode: null, message };
       }
     },
-    [pushNotification, startCancelPoll, pushOrdersData],
+    [pushNotification, startCancelPoll, pushOrdersData, futuAccountEnv],
   );
 
   /* ── Modify polling ─────────────────────────────────── */
 
   const startModifyPoll = useCallback(
     (order: OpenOrder, request: ModifyRequestWithOutsideRth) => {
-      const permId = order.permId;
-      pollCountsRef.current.set(permId, 0);
+      const actionKey = openOrderActionKey(order);
+      pollCountsRef.current.set(actionKey, 0);
 
       const tick = async () => {
-        const count = (pollCountsRef.current.get(permId) ?? 0) + 1;
-        pollCountsRef.current.set(permId, count);
+        const count = (pollCountsRef.current.get(actionKey) ?? 0) + 1;
+        pollCountsRef.current.set(actionKey, count);
 
         try {
-          const res = await fetch("/api/orders", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-          });
-          if (!res.ok) {
+          const data = await refreshOrders(order);
+          if (!data) {
             scheduleNext();
             return;
           }
-          const data = (await res.json()) as OrdersData;
 
-          const ibOrder = data.open_orders.find((o) => o.permId === permId);
-
-          const priceConfirmed =
-            request.newPrice == null ||
-            (ibOrder?.limitPrice != null &&
-              Math.abs(ibOrder.limitPrice - request.newPrice) < 0.001);
-          const quantityConfirmed =
-            request.newQuantity == null ||
-            ibOrder?.totalQuantity === request.newQuantity;
-          const confirmed = Boolean(
-            ibOrder && priceConfirmed && quantityConfirmed,
-          );
+          const liveOrder = findOpenOrderInSnapshot(data, order);
+          const futu = isFutuOpenOrder(order);
+          const confirmed = futu
+            ? futuModifyTermsMatch(liveOrder, request)
+            : Boolean(
+                liveOrder &&
+                (request.newPrice == null ||
+                  (liveOrder.limitPrice != null &&
+                    Math.abs(liveOrder.limitPrice - request.newPrice) <
+                      0.001)) &&
+                (request.newQuantity == null ||
+                  liveOrder.totalQuantity === request.newQuantity),
+              );
 
           if (confirmed) {
-            pollTimersRef.current.delete(permId);
-            pollCountsRef.current.delete(permId);
+            pollTimersRef.current.delete(actionKey);
+            pollCountsRef.current.delete(actionKey);
 
             setPendingModifies((prev) => {
               const next = new Map(prev);
-              next.delete(permId);
+              next.delete(actionKey);
               return next;
             });
 
-            // Push the real data (no overlay needed — IB already shows new price)
             ordersUpdaterRef.current?.(data);
             const messageParts: string[] = [];
             if (request.newPrice != null) {
@@ -318,24 +371,24 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
                   : `${order.symbol} order confirmed`,
             });
           } else if (count >= POLL_MAX_COUNT) {
-            pollTimersRef.current.delete(permId);
-            pollCountsRef.current.delete(permId);
+            pollTimersRef.current.delete(actionKey);
+            pollCountsRef.current.delete(actionKey);
 
             setPendingModifies((prev) => {
               const next = new Map(prev);
-              next.delete(permId);
+              next.delete(actionKey);
               return next;
             });
 
-            // Push fresh IB data without overlay — reverts to the real (old) price
             ordersUpdaterRef.current?.(data);
-            pushNotification({
-              type: "error",
-              message: `${order.symbol} modify not confirmed by IB`,
-              duration: 0,
-            });
+            if (!isFutuOpenOrder(order)) {
+              pushNotification({
+                type: "error",
+                message: `${order.symbol} modify not confirmed by IB`,
+                duration: 0,
+              });
+            }
           } else {
-            // Still pending — push data with optimistic overlay
             pushOrdersData(data);
             scheduleNext();
           }
@@ -346,18 +399,14 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
 
       const scheduleNext = () => {
         const timer = setTimeout(tick, POLL_INTERVAL_MS);
-        pollTimersRef.current.set(permId, timer);
+        pollTimersRef.current.set(actionKey, timer);
       };
 
       scheduleNext();
     },
-    [pushNotification, pushOrdersData],
+    [pushNotification, pushOrdersData, refreshOrders],
   );
 
-  // Combo replacement = cancel original + place successor (PR-07, OP-1).
-  // One client_attempt_id per logical replacement, keyed to the target
-  // order: kept while that replacement is in flight or uncertain, dropped
-  // after a resolved result, minted fresh for a new target.
   const replaceAttemptsRef = useRef(
     new Map<number, { id: string; uncertain: boolean }>(),
   );
@@ -377,7 +426,10 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
           uncertain: true,
         });
         setLockedReplacements((prev) => new Set(prev).add(key));
-        pushNotification({ type: "error", message: REPLACEMENT_UNCERTAIN_COPY });
+        pushNotification({
+          type: "error",
+          message: REPLACEMENT_UNCERTAIN_COPY,
+        });
         return {
           ok: false,
           status: 0,
@@ -391,8 +443,9 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
       replaceAttemptsRef.current.set(key, { id: attemptId, uncertain: false });
 
       const { outsideRth, ...requestBody } = request;
-      const nextSeq = (modifySeqCountsRef.current.get(order.permId) ?? 0) + 1;
-      modifySeqCountsRef.current.set(order.permId, nextSeq);
+      const seqKey = openOrderActionKey(order);
+      const nextSeq = (modifySeqCountsRef.current.get(seqKey) ?? 0) + 1;
+      modifySeqCountsRef.current.set(seqKey, nextSeq);
       let res: Response;
       try {
         res = await fetch("/api/orders/modify", {
@@ -402,34 +455,44 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
             orderId: order.orderId,
             permId: order.permId,
             ...requestBody,
-            replaceOrder: { ...request.replaceOrder, client_attempt_id: attemptId },
+            replaceOrder: {
+              ...request.replaceOrder,
+              client_attempt_id: attemptId,
+            },
             outsideRth,
             modifySequence: nextSeq,
           }),
         });
       } catch {
-        return uncertain(); // dispatched or not, we cannot tell
+        return uncertain();
       }
       let json: Record<string, unknown> | null = null;
       try {
         const parsed: unknown = await res.json();
-        json = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+        json =
+          parsed && typeof parsed === "object"
+            ? (parsed as Record<string, unknown>)
+            : null;
       } catch {
         json = null;
       }
-      // The replace response carries no orders: refresh the panel once.
-      void fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" } })
+      void fetch("/api/orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      })
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => data && ordersUpdaterRef.current?.(data as OrdersData))
         .catch(() => undefined);
       if (res.ok && json) {
         replaceAttemptsRef.current.delete(key);
-        pushNotification({ type: "success", message: `${order.symbol} order replaced` });
+        pushNotification({
+          type: "success",
+          message: `${order.symbol} order replaced`,
+        });
         return { ok: true };
       }
-      // An unreadable 200, an uncertain reason_code or an unexplained 5xx:
-      // the replacement may be live at IB.
-      if (res.ok || isUncertainPlaceResponse(res.status, json)) return uncertain();
+      if (res.ok || isUncertainPlaceResponse(res.status, json))
+        return uncertain();
       replaceAttemptsRef.current.delete(key);
       const reasonCode = readReasonCode(json);
       const message =
@@ -446,28 +509,51 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
       order: OpenOrder,
       request: ModifyRequestWithOutsideRth,
     ): Promise<ActionResult> => {
+      if (isFutuOpenOrder(order) && request.replaceOrder) {
+        const message = "Combo replace is not supported on Futu.";
+        pushNotification({ type: "error", message });
+        return {
+          ok: false,
+          status: 403,
+          reasonCode: "READ_ONLY_BROKER",
+          message,
+        };
+      }
       if (request.replaceOrder) return requestReplace(order, request);
+      const actionKey = openOrderActionKey(order);
+      const futu = isFutuOpenOrder(order);
+      const env = resolveFutuEnv(order, futuAccountEnv);
+      const modifyUrl = futu ? futuModifyApiPath(env) : "/api/orders/modify";
       try {
         const { outsideRth, ...requestBody } = request;
-        const nextSeq = (modifySeqCountsRef.current.get(order.permId) ?? 0) + 1;
-        modifySeqCountsRef.current.set(order.permId, nextSeq);
-        const res = await fetch("/api/orders/modify", {
+        const baseSeq =
+          order.modifySequence ??
+          modifySeqCountsRef.current.get(actionKey) ??
+          0;
+        const nextSeq = baseSeq + 1;
+        modifySeqCountsRef.current.set(actionKey, nextSeq);
+        const modifyBody =
+          futu && order.brokerOrderId
+            ? {
+                brokerOrderId: order.brokerOrderId,
+                ...requestBody,
+                modifySequence: nextSeq,
+              }
+            : {
+                orderId: order.orderId,
+                permId: order.permId,
+                ...requestBody,
+                outsideRth,
+                modifySequence: nextSeq,
+              };
+        const res = await fetch(modifyUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            orderId: order.orderId,
-            permId: order.permId,
-            ...requestBody,
-            outsideRth,
-            modifySequence: nextSeq,
-          }),
+          body: JSON.stringify(modifyBody),
         });
         const json = await res.json().catch(() => ({}));
         if (!res.ok) {
           const reasonCode = readReasonCode(json);
-          // On MODIFY_STALE the server echoes the current sequence under
-          // detail.applied — sync our local counter so the next attempt is
-          // (applied + 1) instead of fighting the server.
           if (reasonCode === "MODIFY_STALE") {
             const detail = (json as { detail?: unknown })?.detail;
             const applied =
@@ -475,7 +561,7 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
                 ? (detail as Record<string, unknown>).applied
                 : undefined;
             if (typeof applied === "number") {
-              modifySeqCountsRef.current.set(order.permId, applied);
+              modifySeqCountsRef.current.set(actionKey, applied);
             }
           }
           const message = reasonCode
@@ -488,12 +574,10 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
           pushNotification({ type: "error", message });
           return { ok: false, status: res.status, reasonCode, message };
         }
-        // Server may echo the applied sequence on success; if so, anchor
-        // the local counter to it so subsequent attempts stay monotonic.
         const appliedSeq = (json as { applied_sequence?: unknown })
           ?.applied_sequence;
         if (typeof appliedSeq === "number") {
-          modifySeqCountsRef.current.set(order.permId, appliedSeq);
+          modifySeqCountsRef.current.set(actionKey, appliedSeq);
         }
         if (request.newPrice != null || request.newQuantity != null) {
           const pm: PendingModify = {
@@ -501,14 +585,48 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
             newPrice: request.newPrice,
             newQuantity: request.newQuantity,
           };
-          setPendingModifies((prev) => new Map(prev).set(order.permId, pm));
+          setPendingModifies((prev) => new Map(prev).set(actionKey, pm));
         }
 
         if (json.orders) {
-          pushOrdersData(json.orders);
+          pushOrdersData(json.orders as OrdersData);
         }
 
-        if (request.newPrice != null || request.newQuantity != null) {
+        const hasFieldChange =
+          request.newPrice != null || request.newQuantity != null;
+
+        if (futu && hasFieldChange) {
+          const serverConfirmed = (json as { confirmed?: unknown }).confirmed;
+          if (serverConfirmed === true) {
+            setPendingModifies((prev) => {
+              const next = new Map(prev);
+              next.delete(actionKey);
+              return next;
+            });
+            const messageParts: string[] = [];
+            if (request.newPrice != null) {
+              messageParts.push(`price $${request.newPrice.toFixed(2)}`);
+            }
+            if (request.newQuantity != null) {
+              messageParts.push(`qty ${request.newQuantity}`);
+            }
+            pushNotification({
+              type: "success",
+              message:
+                messageParts.length > 0
+                  ? `${order.symbol} order confirmed (${messageParts.join(", ")})`
+                  : `${order.symbol} order confirmed`,
+            });
+          } else if (serverConfirmed === false) {
+            pushNotification({
+              type: "warning",
+              message: FUTU_MODIFY_SENT_UNCONFIRMED_COPY,
+            });
+            startModifyPoll(order, request);
+          } else {
+            startModifyPoll(order, request);
+          }
+        } else if (hasFieldChange) {
           startModifyPoll(order, request);
         } else {
           pushNotification({
@@ -523,10 +641,14 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
         return { ok: false, status: 0, reasonCode: null, message };
       }
     },
-    [pushNotification, startModifyPoll, pushOrdersData, requestReplace],
+    [
+      pushNotification,
+      startModifyPoll,
+      pushOrdersData,
+      requestReplace,
+      futuAccountEnv,
+    ],
   );
-
-  /* ── Shared infrastructure ──────────────────────────── */
 
   const drainNotifications = useCallback((): Notification[] => {
     if (notificationsRef.current.length === 0) return [];
@@ -542,10 +664,8 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  // Cleanup all poll timers on unmount (read map at teardown so late pollers are cleared)
   useEffect(() => {
     return () => {
-      // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional ref read at unmount
       for (const timer of pollTimersRef.current.values()) {
         clearTimeout(timer);
       }
@@ -558,6 +678,8 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
         pendingCancels,
         pendingModifies,
         cancelledOrders,
+        isPendingCancel,
+        isPendingModify,
         requestCancel,
         requestModify,
         drainNotifications,

@@ -1,19 +1,13 @@
 import { NextResponse } from "next/server";
 import { xenonFetch } from "@/lib/xenonApi";
+import { forwardRequestQuery } from "@/lib/forwardRequestQuery";
 
 export const runtime = "nodejs";
 
-function brokerQuery(req?: Request): string {
-  // `req` (or req.url) is absent when the route handler is unit-tested directly;
-  // production Next.js always supplies a Request. Default to the IB scope.
-  if (!req?.url) return "";
-  const broker = new URL(req.url).searchParams.get("broker");
-  return broker ? `?broker=${encodeURIComponent(broker)}` : "";
-}
-
 export async function GET(req?: Request): Promise<Response> {
+  const qs = forwardRequestQuery(req);
   try {
-    const data = await xenonFetch(`/blotter${brokerQuery(req)}`, {
+    const data = await xenonFetch(`/blotter${qs}`, {
       method: "GET",
       timeout: 10_000,
     });
@@ -26,8 +20,9 @@ export async function GET(req?: Request): Promise<Response> {
 }
 
 export async function POST(req?: Request): Promise<Response> {
+  const qs = forwardRequestQuery(req);
   try {
-    const data = await xenonFetch(`/blotter${brokerQuery(req)}`, {
+    const data = await xenonFetch(`/blotter${qs}`, {
       method: "POST",
       timeout: 130_000,
     });

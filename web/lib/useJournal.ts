@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState, useCallback } from "react";
+import { futuScopeQuery, useFutuAccountEnv } from "./futuAccountEnv";
 import { useSyncHook } from "./useSyncHook";
 import { errorFromResponseBody } from "./order/responseError";
 import type { TradeLogData } from "./types";
@@ -25,12 +26,16 @@ export function useJournal(
   active = true,
   broker: "IB" | "FUTU" = "IB",
 ): UseJournalReturn {
+  const futuEnv = useFutuAccountEnv();
   const stableConfig = useMemo(
     () => ({
       ...config,
-      endpoint: broker === "FUTU" ? "/api/journal?broker=FUTU" : "/api/journal",
+      endpoint:
+        broker === "FUTU"
+          ? `/api/journal${futuScopeQuery(futuEnv)}`
+          : "/api/journal",
     }),
-    [broker],
+    [broker, futuEnv],
   );
   const result = useSyncHook<TradeLogData>(stableConfig, active);
   const [syncing, setSyncing] = useState(false);

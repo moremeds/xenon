@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, Zap } from "lucide-react";
 import type { PortfolioLeg, PortfolioPosition } from "@/lib/types";
+import type { FutuAccountEnv } from "@/lib/futuAccountEnv";
 import type { PriceData } from "@/lib/pricesProtocol";
 import InstrumentDetailModal from "./InstrumentDetailModal";
 import PositionOrderModal from "./PositionOrderModal";
@@ -346,6 +347,7 @@ function PositionRow({
   onLegClick,
   onOrderClick,
   readonly = false,
+  futuSingleLegOnly = false,
 }: {
   pos: PortfolioPosition;
   showExpiry?: boolean;
@@ -356,6 +358,7 @@ function PositionRow({
   onLegClick?: (leg: PortfolioLeg, pos: PortfolioPosition) => void;
   onOrderClick?: (pos: PortfolioPosition) => void;
   readonly?: boolean;
+  futuSingleLegOnly?: boolean;
 }) {
   const [legsExpanded, setLegsExpanded] = useState(false);
   const hasMultipleLegs = pos.legs.length > 1;
@@ -499,7 +502,7 @@ function PositionRow({
                 positionId={pos.id}
                 disabled={readonly}
               />
-              {!readonly && onOrderClick && (
+              {!readonly && onOrderClick && !(futuSingleLegOnly && hasMultipleLegs) && (
                 <button
                   type="button"
                   className="position-order-btn"
@@ -529,7 +532,7 @@ function PositionRow({
                 positionId={pos.id}
                 disabled={readonly}
               />
-              {!readonly && onOrderClick && (
+              {!readonly && onOrderClick && !(futuSingleLegOnly && hasMultipleLegs) && (
                 <button
                   type="button"
                   className="position-order-btn"
@@ -671,6 +674,10 @@ export default function PositionTable({
   hideHeader = false,
   hideFxBadge = false,
   onOrderPlaced,
+  futuOrderMode = false,
+  futuAccountEnv = "paper" as FutuAccountEnv,
+  futuAccountIdTail = null,
+  portfolioPositions = [] as PortfolioPosition[],
 }: {
   positions: PortfolioPosition[];
   showExpiry?: boolean;
@@ -701,6 +708,10 @@ export default function PositionTable({
    */
   hideFxBadge?: boolean;
   onOrderPlaced?: (orderId: string) => void;
+  futuOrderMode?: boolean;
+  futuAccountEnv?: FutuAccountEnv;
+  futuAccountIdTail?: string | null;
+  portfolioPositions?: PortfolioPosition[];
 }) {
   // Distinct currencies in this table → live usd_per_unit (forex ticks over the
   // payload fallback). USD-only portfolios resolve to { USD: 1 } and every
@@ -732,6 +743,11 @@ export default function PositionTable({
   // Order modal state
   const [activeOrderPosition, setActiveOrderPosition] =
     useState<PortfolioPosition | null>(null);
+
+  useEffect(() => {
+    setActiveOrderPosition(null);
+    setActiveInstrument(null);
+  }, [futuAccountEnv]);
 
   const handleLegClick = useCallback(
     (leg: PortfolioLeg, pos: PortfolioPosition) => {
@@ -895,6 +911,7 @@ export default function PositionTable({
                 readonly ? undefined : (p) => setActiveOrderPosition(p)
               }
               readonly={readonly}
+              futuSingleLegOnly={futuOrderMode}
             />
           ))}
         </tbody>
@@ -913,6 +930,15 @@ export default function PositionTable({
         <PositionOrderModal
           position={activeOrderPosition}
           prices={prices}
+          futuTicket={
+            futuOrderMode
+              ? {
+                  env: futuAccountEnv,
+                  accountTail: futuAccountIdTail,
+                  portfolioPositions,
+                }
+              : undefined
+          }
           onClose={() => setActiveOrderPosition(null)}
           onSubmitted={(orderId) => {
             setActiveOrderPosition(null);

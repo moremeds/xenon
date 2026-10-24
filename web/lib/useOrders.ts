@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { futuScopeQuery, useFutuAccountEnv } from "./futuAccountEnv";
 import { errorFromResponseBody } from "./order/responseError";
 import type { OrdersData } from "./types";
 
@@ -27,17 +28,19 @@ export function useOrders(
   const [lastSync, setLastSync] = useState<string | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const didInitialSync = useRef(false);
-  const q = broker === "FUTU" ? "?broker=FUTU" : "";
+  const futuEnv = useFutuAccountEnv();
+  const q = useMemo(
+    () => (broker === "FUTU" ? futuScopeQuery(futuEnv) : ""),
+    [broker, futuEnv],
+  );
 
-  // Track the latest requested broker so a stale in-flight response — from the
-  // previous broker, or a slow POST sync that resolves after the user switched
-  // account tabs — can't overwrite the current broker's orders. Assigned on
-  // every render so it always reflects the broker the user is looking at now.
-  const brokerRef = useRef(broker);
-  brokerRef.current = broker;
+  // Track the latest requested broker + Futu env so a stale in-flight response
+  // can't overwrite the current scope after a tab or SIMULATE/REAL switch.
+  const scopeRef = useRef(broker === "FUTU" ? `FUTU:${futuEnv}` : "IB");
+  scopeRef.current = broker === "FUTU" ? `FUTU:${futuEnv}` : "IB";
 
   const triggerSync = useCallback(async () => {
-    const reqBroker = broker;
+    const reqScope = scopeRef.current;
     setSyncing(true);
     try {
       const res = await fetch(`/api/orders${q}`, {
@@ -49,17 +52,17 @@ export function useOrders(
         throw new Error(errorFromResponseBody(body, "Sync failed"));
       }
       const json = (await res.json()) as OrdersData;
-      if (brokerRef.current !== reqBroker) return; // switched tabs mid-flight
+      if (scopeRef.current !== reqScope) return;
       setData(json);
       setLastSync(json.last_sync || null);
       setError(null);
     } catch (err) {
-      if (brokerRef.current !== reqBroker) return; // don't surface a stale broker's error
+      if (scopeRef.current !== reqScope) return;
       setError(err instanceof Error ? err.message : "Sync failed");
     } finally {
       setSyncing(false);
     }
-  }, [q, broker]);
+  }, [q]);
 
   const syncNow = useCallback(() => {
     void triggerSync();
@@ -76,13 +79,13 @@ export function useOrders(
     // the new broker's cached read is in flight.
     setData(null);
     setError(null);
-    const reqBroker = broker;
+    const reqScope = scopeRef.current;
     const init = async () => {
       try {
         const res = await fetch(`/api/orders${q}`);
         if (!res.ok) throw new Error("Failed to fetch orders");
         const json = (await res.json()) as OrdersData;
-        if (brokerRef.current !== reqBroker) return; // switched tabs mid-flight
+        if (scopeRef.current !== reqScope) return;
         setData(json);
         setLastSync(json.last_sync || null);
         setError(null);
@@ -94,7 +97,7 @@ export function useOrders(
           void triggerSync();
         }
       } catch (err) {
-        if (brokerRef.current !== reqBroker) return; // stale switch — ignore
+        if (scopeRef.current !== reqScope) return;
         setError(err instanceof Error ? err.message : "Unknown error");
         setLoading(false);
       }
@@ -102,7 +105,7 @@ export function useOrders(
 
     void init();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [broker]);
+  }, [broker, futuEnv]);
 
   // When orders page becomes active, trigger IB sync if we haven't yet
   useEffect(() => {

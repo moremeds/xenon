@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { futuScopeQuery, useFutuAccountEnv } from "./futuAccountEnv";
 import type { PortfolioData } from "@/lib/types";
 import {
   futuToPortfolioData,
@@ -13,6 +14,14 @@ const BASE_INTERVAL_MS = 30_000;
 const MAX_INTERVAL_MS = 300_000; // 5 min cap on backoff
 const STALE_CACHE_MS = 60_000; // cached snapshot older than this: sync right away
 const STALE_FIRST_SYNC_DELAY_MS = 500;
+
+function isFutuScopeNotConfigured(body: unknown): boolean {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    (body as { scope_reason?: string }).scope_reason === "not_configured"
+  );
+}
 
 /** True when a cached snapshot is old enough that waiting a full poll interval would show stale data. */
 function isStaleSnapshot(fetchedAt: string | null | undefined): boolean {
@@ -30,12 +39,14 @@ function isStaleSnapshot(fetchedAt: string | null | undefined): boolean {
  * - `never_synced` — FastAPI has no snapshot (404, or the never_synced
  *                    200 envelope): an account condition, not an error
  * - `unavailable`  — FastAPI/Next failed to return a snapshot (502/other)
+ * - `not_configured` — scope has no Futu account (empty lists + scope_reason)
  */
 export type FutuInitialRead =
   | "pending"
   | "loaded"
   | "never_synced"
-  | "unavailable";
+  | "unavailable"
+  | "not_configured";
 
 /**
  * Hook: fetch the Futu portfolio from `/api/futu/portfolio` and adapt
@@ -52,6 +63,11 @@ export type FutuInitialRead =
  * - Tab visibility: resets backoff and forces a sync when user returns.
  */
 export function useFutuPortfolio(enabled: boolean) {
+  const accountEnv = useFutuAccountEnv();
+  const scopeQs = futuScopeQuery(accountEnv);
+  const scopeRef = useRef(scopeQs);
+  scopeRef.current = scopeQs;
+
   const [data, setData] = useState<PortfolioData | null>(null);
   const [envelope, setEnvelope] = useState<FutuPortfolioEnvelope | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -71,10 +87,13 @@ export function useFutuPortfolio(enabled: boolean) {
   // True only while mounted AND enabled. Read by scheduleNext so an in-flight
   // POST that settles after disable/unmount cannot rearm the loop.
   const activeRef = useRef(false);
+  const prevAccountEnvRef = useRef<typeof accountEnv | null>(null);
   const doSyncRef = useRef<() => Promise<void>>(async () => {});
 
   const applyResponse = useCallback((body: FutuPortfolioResponse) => {
-    latestFetchedAtRef.current = isFutuNeverSynced(body) ? null : body.fetched_at;
+    latestFetchedAtRef.current = isFutuNeverSynced(body)
+      ? null
+      : body.fetched_at;
     if (isFutuNeverSynced(body)) {
       setEnvelope(null);
       setData(null);
@@ -94,8 +113,12 @@ export function useFutuPortfolio(enabled: boolean) {
 
   const loadFromCache = useCallback(async () => {
     try {
-      const res = await fetch("/api/futu/portfolio", { cache: "no-store" });
+      const reqQs = scopeRef.current;
+      const res = await fetch(`/api/futu/portfolio${reqQs}`, {
+        cache: "no-store",
+      });
       if (res.status === 404) {
+        if (scopeRef.current !== reqQs) return;
         // FastAPI has no snapshot — never synced is a measurement
         // condition, not an error. Mirror the never_synced body path.
         setEnvelope(null);
@@ -109,8 +132,18 @@ export function useFutuPortfolio(enabled: boolean) {
       if (!res.ok) {
         throw new Error(`GET /api/futu/portfolio: ${res.status}`);
       }
-      const body: FutuPortfolioResponse = await res.json();
-      applyResponse(body);
+      const body: unknown = await res.json();
+      if (scopeRef.current !== reqQs) return;
+      if (isFutuScopeNotConfigured(body)) {
+        setEnvelope(null);
+        setData(null);
+        setLastSync(null);
+        setNeverSynced(false);
+        setInitialRead("not_configured");
+        setError(null);
+        return;
+      }
+      applyResponse(body as FutuPortfolioResponse);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setInitialRead("unavailable");
@@ -119,23 +152,21 @@ export function useFutuPortfolio(enabled: boolean) {
     }
   }, [applyResponse]);
 
-  const scheduleNext = useCallback(
-    (delay: number) => {
-      if (!activeRef.current) return;
-      if (intervalRef.current) clearTimeout(intervalRef.current);
-      intervalRef.current = setTimeout(() => {
-        void doSyncRef.current();
-      }, delay);
-    },
-    [],
-  );
+  const scheduleNext = useCallback((delay: number) => {
+    if (!activeRef.current) return;
+    if (intervalRef.current) clearTimeout(intervalRef.current);
+    intervalRef.current = setTimeout(() => {
+      void doSyncRef.current();
+    }, delay);
+  }, []);
 
   const doSync = useCallback(async () => {
     if (syncingRef.current) return;
     syncingRef.current = true;
     setSyncing(true);
     try {
-      const res = await fetch("/api/futu/portfolio", {
+      const reqQs = scopeRef.current;
+      const res = await fetch(`/api/futu/portfolio${reqQs}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         cache: "no-store",
@@ -147,8 +178,20 @@ export function useFutuPortfolio(enabled: boolean) {
             `POST /api/futu/portfolio: ${res.status}`,
         );
       }
-      const body: FutuPortfolioResponse = await res.json();
-      applyResponse(body);
+      const body: unknown = await res.json();
+      if (scopeRef.current !== reqQs) return;
+      if (isFutuScopeNotConfigured(body)) {
+        setEnvelope(null);
+        setData(null);
+        setLastSync(null);
+        setNeverSynced(false);
+        setInitialRead("not_configured");
+        setError(null);
+        backoffRef.current = BASE_INTERVAL_MS;
+        scheduleNext(BASE_INTERVAL_MS);
+        return;
+      }
+      applyResponse(body as FutuPortfolioResponse);
       backoffRef.current = BASE_INTERVAL_MS;
       scheduleNext(BASE_INTERVAL_MS);
     } catch (err) {
@@ -167,6 +210,28 @@ export function useFutuPortfolio(enabled: boolean) {
     backoffRef.current = BASE_INTERVAL_MS;
     void doSync();
   }, [doSync]);
+
+  // SIMULATE/REAL switch: drop the other env's snapshot immediately and reload.
+  useEffect(() => {
+    if (prevAccountEnvRef.current === null) {
+      prevAccountEnvRef.current = accountEnv;
+      return;
+    }
+    if (prevAccountEnvRef.current === accountEnv) return;
+    prevAccountEnvRef.current = accountEnv;
+    setData(null);
+    setEnvelope(null);
+    setNeverSynced(false);
+    setInitialRead("pending");
+    setInitialReadDone(false);
+    setError(null);
+    latestFetchedAtRef.current = null;
+    if (intervalRef.current) {
+      clearTimeout(intervalRef.current);
+      intervalRef.current = null;
+    }
+    void loadFromCache();
+  }, [accountEnv, loadFromCache]);
 
   // Lifecycle gate, declared before the effects that schedule. Cleanup runs on
   // disable and unmount and drops any pending timer, whether or not the

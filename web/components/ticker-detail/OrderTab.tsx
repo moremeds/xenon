@@ -34,6 +34,7 @@ import { useWizardLauncher } from "@/lib/useWizardLauncher";
 import { useWizardSession } from "@/lib/useWizardSession";
 import { errorFromResponseBody } from "@/lib/order/responseError";
 import { submitPlaceOrder } from "@/lib/order/submitPlace";
+import { openOrderActionKey } from "@/lib/futuOpenOrder";
 
 type OrderTabProps = {
   ticker: string;
@@ -125,8 +126,9 @@ function ExistingOrderRow({
     message: string;
   } | null>(null);
 
-  const isPendingCancel = pendingCancels.has(order.permId);
-  const isPendingModify = pendingModifies.has(order.permId);
+  const actionKey = openOrderActionKey(order);
+  const isPendingCancel = pendingCancels.has(actionKey);
+  const isPendingModify = pendingModifies.has(actionKey);
   const isPending = isPendingCancel || isPendingModify;
 
   const priceData = resolveOrderPriceData(order, prices);
@@ -628,7 +630,12 @@ function NewOrderForm({
             <button
               className={`btn-primary ${action === "SELL" ? "btn-danger" : ""}`}
               onClick={handlePlace}
-              disabled={!isValid || loading || !!nakedShortWarning || attemptId.uncertain}
+              disabled={
+                !isValid ||
+                loading ||
+                !!nakedShortWarning ||
+                attemptId.uncertain
+              }
             >
               {loading ? "Placing..." : "Confirm Order"}
             </button>
@@ -637,7 +644,9 @@ function NewOrderForm({
           <button
             className="btn-primary"
             onClick={handlePlace}
-            disabled={!isValid || loading || !!nakedShortWarning || attemptId.uncertain}
+            disabled={
+              !isValid || loading || !!nakedShortWarning || attemptId.uncertain
+            }
             style={{ width: "100%" }}
           >
             Place Order
@@ -1295,7 +1304,12 @@ function ComboOrderForm({
             <button
               className={`btn-primary ${action === "SELL" ? "btn-danger" : ""}`}
               onClick={handlePlace}
-              disabled={!isValid || loading || !!nakedShortWarning || attemptId.uncertain}
+              disabled={
+                !isValid ||
+                loading ||
+                !!nakedShortWarning ||
+                attemptId.uncertain
+              }
             >
               {loading ? "Placing..." : "Confirm Order"}
             </button>
@@ -1304,7 +1318,9 @@ function ComboOrderForm({
           <button
             className="btn-primary"
             onClick={handlePlace}
-            disabled={!isValid || loading || !!nakedShortWarning || attemptId.uncertain}
+            disabled={
+              !isValid || loading || !!nakedShortWarning || attemptId.uncertain
+            }
             style={{ width: "100%" }}
           >
             Place Combo Order
