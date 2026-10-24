@@ -13,9 +13,11 @@ started work stays owned and settles on the worker exactly once, also after
 the caller timed out; with the possible-send mark set, an exception or a
 non-ok reply is ``unconfirmed``, never not sent.
 
+One worker and one context serve both environments (§11 item 5): each job
+names its request scope, and the core sends that scope's acc_id and TrdEnv.
 Before each core the worker does its own readiness check: a fresh
 ``get_acc_list()`` round trip (trade/open_trade_context.py:65) and
-``futu_scope.verify_live`` for the configured scope. Not ready → refused,
+``futu_scope.verify_live`` for the job's scope. Not ready → refused,
 nothing sent. The context opens lazily on the worker thread, and a failed
 check or a core exception closes it (the next job reopens it).
 """
@@ -54,7 +56,8 @@ NOT_READY = "FUTU_NOT_READY"
 MAX_LIVE = 8
 
 Core = Callable[[Any, Callable[[], None]], dict]
-Connector = Callable[[], tuple[Any, Callable[[], None]]]
+# Opens the worker's trade context; given the scope of the job that needs it.
+Connector = Callable[[AccountScope], tuple[Any, Callable[[], None]]]
 
 
 def _refused(message: str, reason_code: str) -> dict:
@@ -62,8 +65,7 @@ def _refused(message: str, reason_code: str) -> dict:
 
 
 class FutuOrderWorker:
-    def __init__(self, scope: AccountScope, *, connect: Connector, max_live: int = MAX_LIVE) -> None:
-        self.scope = scope
+    def __init__(self, *, connect: Connector, max_live: int = MAX_LIVE) -> None:
         self._connect = connect
         self._max_live = max_live
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="xenon-futu-orders")
@@ -80,15 +82,23 @@ class FutuOrderWorker:
             return _refused("Futu order worker is busy", WORKER_BUSY)
         return None
 
-    async def run(self, core: Core, *, timeout: float, settle: Optional[Callable[[dict], None]] = None) -> dict:
-        """Run ``core(ctx, mark_sent)`` on the worker; same contract as ``OrderOwner.run``."""
+    async def run(
+        self,
+        core: Core,
+        *,
+        scope: AccountScope,
+        timeout: float,
+        settle: Optional[Callable[[dict], None]] = None,
+    ) -> dict:
+        """Run ``core(ctx, mark_sent)`` for the request ``scope`` on the
+        worker; same contract as ``OrderOwner.run``."""
         refusal = self.admission()
         if refusal is not None:
             _settle(settle, refusal)
             return refusal
         inv = Invocation()
         try:
-            fut = asyncio.wrap_future(self._executor.submit(self._job, inv, core, settle))
+            fut = asyncio.wrap_future(self._executor.submit(self._job, inv, scope, core, settle))
         except RuntimeError:  # executor shut down
             refusal = _refused("Futu order worker is stopped", WORKER_STOPPED)
             _settle(settle, refusal)
@@ -99,21 +109,21 @@ class FutuOrderWorker:
 
     # -- worker thread -------------------------------------------------------
 
-    def _job(self, inv: Invocation, core: Core, settle) -> Optional[dict]:
+    def _job(self, inv: Invocation, scope: AccountScope, core: Core, settle) -> Optional[dict]:
         if not inv.start():
             return None  # abandoned: the request side settles
         try:
-            reply = self._execute(inv, core)
+            reply = self._execute(inv, scope, core)
         except BaseException:  # pragma: no cover — _execute never raises
             reply = _unconfirmed("Futu order action crashed") if inv.sent else _not_sent("Futu order action crashed")
         return finish_job(inv, reply, settle)
 
-    def _execute(self, inv: Invocation, core: Core) -> dict:
+    def _execute(self, inv: Invocation, scope: AccountScope, core: Core) -> dict:
         if self._stopping:
             return _refused("Futu order worker is stopped", WORKER_STOPPED)
         if self._ctx is None:
             try:
-                self._ctx, self._close = self._connect()
+                self._ctx, self._close = self._connect(scope)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("futu orders: OpenD connect failed (%s)", type(exc).__name__)
                 return _refused("Futu OpenD is unreachable", OPEND_UNREACHABLE)
@@ -125,7 +135,7 @@ class FutuOrderWorker:
             logger.warning("futu orders: readiness check failed (%s)", rows if ret is None else "get_acc_list not OK")
             self._retire_ctx()
             return _refused("Futu account check did not answer", NOT_READY)
-        ok, reason = futu_scope.verify_live(self.scope, rows)
+        ok, reason = futu_scope.verify_live(scope, rows)
         if not ok:
             return _refused(f"Futu account check failed ({reason})", reason or NOT_READY)
         try:
@@ -165,21 +175,22 @@ class FutuOrderWorker:
                 logger.warning("futu orders: a job is still running at stop; the context closes after it")
 
 
-def start_futu_order_worker(
-    *, connector: Optional[Callable[[AccountScope], Connector]] = None
-) -> Optional[FutuOrderWorker]:
-    """The worker for the configured Futu scope, or None under
-    ``XENON_READ_ONLY=1``, without a valid scope, or with the capability off
-    (``XENON_FUTU_TRADING`` not 1). Opens nothing until the first job."""
+def start_futu_order_worker(*, connector: Optional[Connector] = None) -> Optional[FutuOrderWorker]:
+    """The worker, or None under ``XENON_READ_ONLY=1`` or when no env is both
+    in ``XENON_FUTU_TRADING`` and configured (§11). Opens nothing until the
+    first job."""
     if os.environ.get("XENON_READ_ONLY") == "1":
         logger.info("futu order worker skipped: XENON_READ_ONLY=1")
         return None
-    ok, _, cause = broker_capabilities.evaluate("FUTU", "place_single")
-    if not ok:
-        logger.info("futu order worker skipped: %s", cause)
+    envs = [env for env in futu_scope.ACCOUNT_ENVS if broker_capabilities.evaluate("FUTU", "place_single", env)[0]]
+    if not envs:
+        logger.info("futu order worker skipped: no Futu env is both enabled and configured")
         return None
-    scope, _ = futu_scope.configured_scope()
     if connector is None:
-        from xenon.api.services.futu_observation import futu_client_connector as connector
-    logger.info("futu order worker ready (%s)", scope.account_env)
-    return FutuOrderWorker(scope, connect=connector(scope))
+        from xenon.api.services.futu_observation import futu_client_connector
+
+        def connector(scope: AccountScope) -> tuple[Any, Callable[[], None]]:
+            return futu_client_connector(scope)()
+
+    logger.info("futu order worker ready (%s)", ", ".join(envs))
+    return FutuOrderWorker(connect=connector)

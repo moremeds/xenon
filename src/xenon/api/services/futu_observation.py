@@ -29,9 +29,13 @@ renewed. Fractional holdings and option legs without
 IB-qualified metadata are not defaulted: Gate 4 fails their symbol closed.
 This module never sends anything to Futu.
 
-The lifespan runs one pass every 60 s (`start_observation_loop` /
-`ObservationLoop`) on its own worker thread; a published `complete:true`
-pass also runs the shadow naked-short audit (it never cancels).
+The lifespan runs `ObservationLoops` (`start_observation_loops`): one
+`ObservationLoop` per exact scope, each with its own worker thread, trade
+context, schedule (one pass every 60 s) and retirement generation, so a hung
+pass of one scope never blocks another (§11 A1). The scope set is every
+configured scope plus every stored FUTU scope with unresolved rows, re-read
+from Postgres each cycle (§11 A2). A published `complete:true` pass also runs
+the shadow naked-short audit (it never cancels).
 """
 
 from __future__ import annotations
@@ -972,20 +976,97 @@ class ObservationLoop:
                 log.warning("futu observation: pass still running at stop; it closes its context when it ends")
 
 
-def start_observation_loop(
+class ObservationLoops:
+    """The observation set (§11 A1/A2): one `ObservationLoop` per exact scope.
+
+    Every `interval_s` it re-reads the wanted scopes: the configured scopes
+    (paper first) plus every stored FUTU scope that still has unresolved
+    `order_submissions` rows (`orders_store.futu_unresolved_scopes`), so an
+    order of a replaced or removed account keeps being reconciled under its
+    own scope, also after a restart. A loop starts for each new scope; a loop
+    whose scope is neither configured nor stored-unresolved stops. Every loop
+    only reads (no unlock, no order). A failed discovery keeps the last known
+    stored set, so a database blip never drops a scope.
+    """
+
+    def __init__(
+        self,
+        *,
+        make_loop: Callable[[AccountScope], ObservationLoop],
+        discover: Callable[[], list[tuple[str, str]]] | None = None,
+        interval_s: float = OBSERVATION_INTERVAL_S,
+    ) -> None:
+        self._make_loop = make_loop
+        self._discover = discover or orders_store.futu_unresolved_scopes
+        self._interval_s = interval_s
+        self.loops: dict[AccountScope, ObservationLoop] = {}
+        self._stored: set[AccountScope] = set()
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    def loop_for(self, scope: AccountScope) -> ObservationLoop | None:
+        return self.loops.get(scope)
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._main(), name="futu-observation-scopes")
+
+    async def _main(self) -> None:
+        while not self._stop.is_set():
+            await self.reconcile()
+            try:
+                await asyncio.wait_for(self._stop.wait(), self._interval_s)
+            except TimeoutError:
+                pass
+
+    async def reconcile(self) -> None:
+        configured = list(futu_scope.configured_scopes().values())
+        try:
+            rows = await asyncio.to_thread(self._discover)
+            self._stored = {AccountScope(broker="FUTU", account_env=env, broker_account=acc) for env, acc in rows}
+        except Exception as exc:  # noqa: BLE001 — keep the last known set
+            log.warning("futu observation: stored scope discovery failed (%s); keeping the last set", exc)
+        extra = sorted(self._stored - set(configured), key=lambda sc: (sc.account_env, sc.broker_account))
+        wanted = configured + extra
+        for scope in wanted:
+            if scope not in self.loops and not self._stop.is_set():
+                loop = self._make_loop(scope)
+                loop.start()
+                self.loops[scope] = loop
+                log.info(
+                    "futu observation loop started (%s, %s)",
+                    scope.account_env,
+                    "configured" if scope in configured else "stored scope with unresolved orders",
+                )
+        for scope in [sc for sc in self.loops if sc not in wanted]:
+            await self.loops.pop(scope).stop()
+            log.info("futu observation loop stopped (%s): no unresolved orders, not configured", scope.account_env)
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except BaseException:  # noqa: BLE001 — CancelledError or a late error
+                pass
+        loops, self.loops = list(self.loops.values()), {}
+        await asyncio.gather(*(loop.stop() for loop in loops), return_exceptions=True)
+
+
+def start_observation_loops(
     *, resolve_meta: MetaResolver | None = None, connector: Callable[[AccountScope], Connector] = futu_client_connector
-) -> ObservationLoop | None:
-    """Start the loop for the configured Futu trade scope (`FUTU_TRADE_ACC_ID`
-    + `FUTU_TRADE_ENV`). Not gated on `XENON_FUTU_TRADING`. Returns None (no
-    loop) under `XENON_READ_ONLY=1` or without a configured scope."""
+) -> ObservationLoops | None:
+    """Start the observation set. Not gated on `XENON_FUTU_TRADING`. Returns
+    None (nothing runs) under `XENON_READ_ONLY=1`."""
     if os.environ.get("XENON_READ_ONLY") == "1":
-        log.info("futu observation loop skipped: XENON_READ_ONLY=1")
+        log.info("futu observation skipped: XENON_READ_ONLY=1")
         return None
-    scope, reason = futu_scope.configured_scope()
-    if scope is None:
-        log.info("futu observation loop skipped: no configured Futu scope (%s)", reason)
-        return None
-    loop = ObservationLoop(scope, connect=connector(scope), resolve_meta=resolve_meta)
-    loop.start()
-    log.info("futu observation loop started (%s, every %.0fs)", scope.account_env, OBSERVATION_INTERVAL_S)
-    return loop
+    loops = ObservationLoops(
+        make_loop=lambda scope: ObservationLoop(scope, connect=connector(scope), resolve_meta=resolve_meta)
+    )
+    loops.start()
+    return loops

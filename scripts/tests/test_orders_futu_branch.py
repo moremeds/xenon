@@ -44,8 +44,7 @@ FILLED_ID = "8812345678901234999"
 
 @pytest.fixture(autouse=True)
 def _configured(monkeypatch):
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", ACC)
-    monkeypatch.setenv("FUTU_TRADE_ENV", "SIMULATE")
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_SIMULATE", ACC)
 
 
 def _observe():
@@ -140,12 +139,12 @@ async def test_futu_history_tables_are_not_the_read_path():
 
 def test_no_configured_scope_returns_empty_with_reason(monkeypatch):
     _observe()
-    monkeypatch.delenv("FUTU_TRADE_ACC_ID")
+    monkeypatch.delenv("FUTU_TRADE_ACC_ID_SIMULATE")
 
     body = orders_payload_for_scope(SCOPE)
 
     assert body["open_orders"] == [] and body["executed_orders"] == []
-    assert body["scope"] is None and body["scope_reason"] == "FUTU_TRADE_ACC_ID_MISSING"
+    assert body["scope"] is None and body["scope_reason"] == "not_configured" and body["scope_env"] == "paper"
 
 
 def test_get_orders_route_serves_ledger_while_opend_offline(monkeypatch):
@@ -158,7 +157,7 @@ def test_get_orders_route_serves_ledger_while_opend_offline(monkeypatch):
 
     _observe()
     offline = type("Offline", (), {"is_connected": lambda self: False})()
-    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: offline)
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda *_a: offline)
     monkeypatch.setattr(guards, "_futu_scope_from_db", lambda: SCOPE)
 
     resp = TestClient(server.app).get("/orders", params={"broker": "FUTU"})
@@ -177,22 +176,28 @@ def test_get_orders_route_serves_ledger_while_opend_offline(monkeypatch):
         OTHER,  # another account
     ],
 )
-def test_request_scope_other_than_configured_gets_no_rows(request_scope):
+def test_request_scope_other_than_configured_gets_no_rows(monkeypatch, request_scope):
     """Paper and live never blend: the configured scope's orders are served
     only under exactly that scope."""
     _observe()
 
-    body = orders_payload_for_scope(request_scope)
+    body = orders_payload_for_scope(request_scope)  # REAL has no account
 
     assert body["open_orders"] == [] and body["executed_orders"] == []
     assert body["open_count"] == 0 and body["executed_count"] == 0
+    assert (body["scope"], body["scope_reason"], body["scope_env"]) == (None, "not_configured", "live")
+
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_REAL", "123123123")  # REAL configured, another account
+    body = orders_payload_for_scope(request_scope)
+
+    assert body["open_orders"] == [] and body["executed_orders"] == []
     assert body["scope"] is None and body["scope_reason"] == "scope_mismatch"
     assert body["request_scope"] == {
         "broker": "FUTU",
         "accountEnv": request_scope.account_env,
         "brokerAccount": request_scope.broker_account,
     }
-    assert body["configured_scope"] == {"broker": "FUTU", "accountEnv": "paper", "brokerAccount": ACC}
+    assert body["configured_scope"] == {"broker": "FUTU", "accountEnv": "live", "brokerAccount": "123123123"}
 
 
 def _route_client(monkeypatch, db_scope):
@@ -202,7 +207,7 @@ def _route_client(monkeypatch, db_scope):
     from xenon.api.routes import futu as futu_routes
 
     offline = type("Offline", (), {"is_connected": lambda self: False})()
-    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: offline)
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda *_a: offline)
     monkeypatch.setattr(guards, "_futu_scope_from_db", lambda: db_scope)
     return TestClient(server.app)
 

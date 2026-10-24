@@ -39,8 +39,10 @@ class Connector:
         self.error = error
         self.connects = 0
         self.closes = 0
+        self.scopes = []
 
-    def __call__(self):
+    def __call__(self, scope):
+        self.scopes.append(scope)
         self.connects += 1
         if self.error is not None:
             raise self.error
@@ -52,7 +54,7 @@ class Connector:
 
 def _worker(connector=None, **kw):
     connector = connector or Connector()
-    return fw.FutuOrderWorker(SCOPE, connect=connector, **kw), connector
+    return fw.FutuOrderWorker(connect=connector, **kw), connector
 
 
 class Core:
@@ -95,7 +97,7 @@ async def _until(pred, timeout=2.0):
 async def test_core_runs_on_the_worker_ctx_after_a_fresh_account_check():
     w, conn = _worker()
     core, settled = Core(), []
-    reply = await w.run(core, timeout=2, settle=settled.append)
+    reply = await w.run(core, timeout=2, settle=settled.append, scope=SCOPE)
     assert reply == {"status": "ok"} and settled == [reply]
     assert core.calls == [conn.ctx] and conn.ctx.acc_checks == 1
     await w.stop()
@@ -104,10 +106,10 @@ async def test_core_runs_on_the_worker_ctx_after_a_fresh_account_check():
 async def test_queue_timeout_never_sends_and_settles_once():
     w, _ = _worker()
     blocker, queued, settled = Core(hold=True), Core(), []
-    first = asyncio.create_task(w.run(blocker, timeout=5))
+    first = asyncio.create_task(w.run(blocker, timeout=5, scope=SCOPE))
     await _entered(blocker)
 
-    reply = await w.run(queued, timeout=0.05, settle=settled.append)
+    reply = await w.run(queued, timeout=0.05, settle=settled.append, scope=SCOPE)
 
     assert reply["amend_outcome"] == "not_sent" and settled == [reply]
     blocker.release.set()
@@ -129,11 +131,11 @@ async def test_queue_timeout_never_sends_and_settles_once():
 async def test_after_the_mark_a_failure_is_unconfirmed_never_not_sent(core, outcome):
     w, conn = _worker()
     settled = []
-    reply = await w.run(core, timeout=2, settle=settled.append)
+    reply = await w.run(core, timeout=2, settle=settled.append, scope=SCOPE)
     assert reply["amend_outcome"] == outcome and settled == [reply]
     if core.error is not None:
         assert conn.closes == 1  # the ctx is retired; the next job reopens it
-        assert (await w.run(Core(), timeout=2))["status"] == "ok" and conn.connects == 2
+        assert (await w.run(Core(), timeout=2, scope=SCOPE))["status"] == "ok" and conn.connects == 2
     await w.stop()
 
 
@@ -141,7 +143,7 @@ async def test_late_ack_after_caller_timeout_settles_on_the_worker_once():
     w, _ = _worker()
     core, settled = Core(hold=True, reply={"status": "ok", "order_id": "8801"}), []
 
-    reply = await w.run(core, timeout=0.05, settle=settled.append)
+    reply = await w.run(core, timeout=0.05, settle=settled.append, scope=SCOPE)
 
     assert reply["amend_outcome"] == "unconfirmed" and settled == []  # started: the worker owns it
     core.release.set()
@@ -153,9 +155,9 @@ async def test_late_ack_after_caller_timeout_settles_on_the_worker_once():
 async def test_caller_cancel_while_queued_never_sends():
     w, _ = _worker()
     blocker, queued, settled = Core(hold=True), Core(), []
-    first = asyncio.create_task(w.run(blocker, timeout=5))
+    first = asyncio.create_task(w.run(blocker, timeout=5, scope=SCOPE))
     await _entered(blocker)
-    task = asyncio.create_task(w.run(queued, timeout=5, settle=settled.append))
+    task = asyncio.create_task(w.run(queued, timeout=5, settle=settled.append, scope=SCOPE))
     await asyncio.sleep(0.02)
 
     task.cancel()
@@ -173,7 +175,7 @@ async def test_caller_cancel_while_queued_never_sends():
 async def test_caller_cancel_after_start_keeps_the_job_owned():
     w, _ = _worker()
     core, settled = Core(hold=True), []
-    task = asyncio.create_task(w.run(core, timeout=5, settle=settled.append))
+    task = asyncio.create_task(w.run(core, timeout=5, settle=settled.append, scope=SCOPE))
     await _entered(core)
 
     task.cancel()
@@ -190,14 +192,14 @@ async def test_caller_cancel_after_start_keeps_the_job_owned():
 async def test_shutdown_abandons_queued_work_and_closes_the_ctx_after_the_running_job():
     w, conn = _worker()
     running, queued, settled = Core(hold=True), Core(), []
-    first = asyncio.create_task(w.run(running, timeout=5, settle=settled.append))
+    first = asyncio.create_task(w.run(running, timeout=5, settle=settled.append, scope=SCOPE))
     await _entered(running)
-    second = asyncio.create_task(w.run(queued, timeout=5, settle=settled.append))
+    second = asyncio.create_task(w.run(queued, timeout=5, settle=settled.append, scope=SCOPE))
     await asyncio.sleep(0.02)
 
     await w.stop(wait_s=0.05)  # the running job is hung: stop does not wait for it
 
-    assert (await w.run(Core(), timeout=1))["reason_code"] == fw.WORKER_STOPPED
+    assert (await w.run(Core(), timeout=1, scope=SCOPE))["reason_code"] == fw.WORKER_STOPPED
     assert conn.closes == 0
     running.release.set()
     assert (await first)["status"] == "ok"
@@ -210,7 +212,7 @@ async def test_shutdown_abandons_queued_work_and_closes_the_ctx_after_the_runnin
 async def test_hung_futu_call_does_not_block_an_ib_order():
     w, _ = _worker()
     hung = Core(hold=True)
-    futu = asyncio.create_task(w.run(hung, timeout=5))
+    futu = asyncio.create_task(w.run(hung, timeout=5, scope=SCOPE))
     await _entered(hung)
 
     pool = FakePool()
@@ -233,11 +235,11 @@ async def test_hung_futu_call_does_not_block_an_ib_order():
 async def test_busy_worker_refuses_at_admission():
     w, _ = _worker(max_live=1)
     hung = Core(hold=True)
-    first = asyncio.create_task(w.run(hung, timeout=5))
+    first = asyncio.create_task(w.run(hung, timeout=5, scope=SCOPE))
     await _entered(hung)
     extra, settled = Core(), []
 
-    reply = await w.run(extra, timeout=1, settle=settled.append)
+    reply = await w.run(extra, timeout=1, settle=settled.append, scope=SCOPE)
 
     assert reply["reason_code"] == fw.WORKER_BUSY and reply["amend_outcome"] == "not_sent" and settled == [reply]
     hung.release.set()
@@ -266,7 +268,7 @@ async def test_busy_worker_refuses_at_admission():
 async def test_not_ready_refuses_before_the_core(connector, code, closes):
     w, _ = _worker(connector)
     core, settled = Core(), []
-    reply = await w.run(core, timeout=2, settle=settled.append)
+    reply = await w.run(core, timeout=2, settle=settled.append, scope=SCOPE)
     assert reply["reason_code"] == code and reply["amend_outcome"] == "not_sent" and settled == [reply]
     assert core.calls == [] and connector.closes == closes
     await w.stop()
@@ -278,26 +280,34 @@ async def test_not_ready_refuses_before_the_core(connector, code, closes):
 @pytest.fixture
 def futu_env(monkeypatch):
     monkeypatch.delenv("XENON_READ_ONLY", raising=False)
-    monkeypatch.setenv("XENON_FUTU_TRADING", "1")
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", ACC)
-    monkeypatch.setenv("FUTU_TRADE_ENV", "SIMULATE")
+    monkeypatch.setenv("XENON_FUTU_TRADING", "simulate")
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_SIMULATE", ACC)
     return monkeypatch
 
 
 @pytest.mark.parametrize(
-    "change", [("setenv", "XENON_READ_ONLY", "1"), ("delenv", "XENON_FUTU_TRADING"), ("delenv", "FUTU_TRADE_ACC_ID")]
+    "change",
+    [
+        ("setenv", "XENON_READ_ONLY", "1"),
+        ("delenv", "XENON_FUTU_TRADING"),
+        ("setenv", "XENON_FUTU_TRADING", "1"),  # old value = off
+        ("setenv", "XENON_FUTU_TRADING", "real"),  # REAL enabled but not configured
+        ("delenv", "FUTU_TRADE_ACC_ID_SIMULATE"),
+    ],
 )
+
 async def test_start_is_skipped_without_capability_or_under_read_only(futu_env, change):
     made = []
     getattr(futu_env, change[0])(*change[1:])
-    assert fw.start_futu_order_worker(connector=lambda scope: made.append(scope)) is None
+    assert fw.start_futu_order_worker(connector=made.append) is None
     assert made == []
 
 
 async def test_start_builds_a_lazy_worker_for_the_configured_scope(futu_env):
     conn = Connector()
-    w = fw.start_futu_order_worker(connector=lambda scope: conn)
-    assert isinstance(w, fw.FutuOrderWorker) and w.scope == SCOPE and conn.connects == 0
+    w = fw.start_futu_order_worker(connector=conn)
+    assert isinstance(w, fw.FutuOrderWorker) and conn.connects == 0
+    assert (await w.run(Core(), scope=SCOPE, timeout=2))["status"] == "ok" and conn.scopes == [SCOPE]
     await w.stop()
 
 
@@ -309,12 +319,12 @@ def lifespan_worker(boot, monkeypatch):  # noqa: F811 — pytest fixture injecti
     from xenon.api import server as server_mod
 
     monkeypatch.setattr(server_mod, "_maybe_start_futu_observation_loop", lambda app: None)
-    monkeypatch.setattr(server_mod.app.state, "futu_observation_loop", None, raising=False)
+    monkeypatch.setattr(server_mod.app.state, "futu_observation_loops", None, raising=False)
     made = []
     real = fw.start_futu_order_worker
 
     def start(**kw):
-        w = real(connector=lambda scope: Connector(), **kw)
+        w = real(connector=Connector(), **kw)
         made.append(w)
         return w
 

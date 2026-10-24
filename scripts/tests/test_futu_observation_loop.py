@@ -36,8 +36,7 @@ pytestmark = pytest.mark.committed_db
 
 @pytest.fixture(autouse=True)
 def _configured(monkeypatch):
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", ACC)
-    monkeypatch.setenv("FUTU_TRADE_ENV", "SIMULATE")
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_SIMULATE", ACC)
     monkeypatch.delenv("XENON_FUTU_TRADING", raising=False)
 
 
@@ -82,16 +81,29 @@ async def test_read_only_skips_the_loop(monkeypatch):
     monkeypatch.setenv("XENON_READ_ONLY", "1")
     made = []
 
-    loop = fo.start_observation_loop(connector=lambda scope: made.append(scope))
+    loops = fo.start_observation_loops(connector=lambda scope: made.append(scope))
 
-    assert loop is None and made == []
+    assert loops is None and made == []
+
+
+async def _loop_of(loops, scope=SCOPE):
+    for _ in range(100):
+        if loops.loop_for(scope) is not None:
+            return loops.loop_for(scope)
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"no loop for {scope}")
 
 
 @pytest.mark.asyncio
-async def test_no_configured_scope_skips_the_loop(monkeypatch):
-    monkeypatch.delenv("FUTU_TRADE_ACC_ID")
+async def test_no_configured_scope_runs_no_loop(monkeypatch):
+    monkeypatch.delenv("FUTU_TRADE_ACC_ID_SIMULATE")
+    made = []
 
-    assert fo.start_observation_loop(connector=lambda scope: Connector()) is None
+    loops = fo.start_observation_loops(connector=lambda scope: made.append(scope) or Connector())
+    await asyncio.sleep(0.1)
+
+    assert loops is not None and loops.running and loops.loops == {} and made == []
+    await loops.stop()
 
 
 @pytest.mark.asyncio
@@ -100,15 +112,16 @@ async def test_loop_starts_without_trading_capability_and_stops_cleanly(monkeypa
     connector = Connector()
     seen = []
 
-    loop = fo.start_observation_loop(resolve_meta=resolver(), connector=lambda scope: seen.append(scope) or connector)
-    assert loop is not None and loop.running and seen == [SCOPE]
+    loops = fo.start_observation_loops(resolve_meta=resolver(), connector=lambda scope: seen.append(scope) or connector)
+    loop = await _loop_of(loops)
+    assert loop.running and seen == [SCOPE]
     for _ in range(100):
         if loop.last_result is not None:
             break
         await asyncio.sleep(0.02)
     assert loop.last_result["complete"] is True
 
-    await asyncio.wait_for(loop.stop(), 2)
+    await asyncio.wait_for(loops.stop(), 2)
 
     assert not loop.running
     await asyncio.sleep(0.05)  # the close runs on a daemon thread
@@ -359,15 +372,16 @@ def boot(monkeypatch):
     monkeypatch.setattr(server_mod, "_get_managed_account_for_health", lambda: account)
 
     connector = Connector()
-    real_start = fo.start_observation_loop
+    real_start = fo.start_observation_loops
     monkeypatch.setattr(
-        fo, "start_observation_loop", lambda **kw: real_start(connector=lambda scope: connector, **kw)
+        fo, "start_observation_loops", lambda **kw: real_start(connector=lambda scope: connector, **kw)
     )
 
     async def _run():
         seen = {}
         async with server_mod.lifespan(server_mod.app):
-            seen["loop"] = server_mod.app.state.futu_observation_loop
+            loops = server_mod.app.state.futu_observation_loops
+            seen["loop"] = await _loop_of(loops) if loops is not None else None
             if seen["loop"] is not None:
                 for _ in range(100):
                     if seen["loop"].last_result is not None:

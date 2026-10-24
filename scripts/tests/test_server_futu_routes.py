@@ -45,13 +45,14 @@ def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
     monkeypatch.delenv("XENON_READ_ONLY", raising=False)
-    monkeypatch.delenv("FUTU_TRADE_ACC_ID", raising=False)
+    monkeypatch.delenv("FUTU_TRADE_ACC_ID_SIMULATE", raising=False)
+    monkeypatch.delenv("FUTU_TRADE_ACC_ID_REAL", raising=False)
     # Request scope with OpenD offline: the last-synced FUTU scope (LIVE).
     from xenon.api import guards
 
     monkeypatch.setattr(guards, "_futu_scope_from_db", lambda: LIVE)
     # Reset module-global sync state between tests.
-    monkeypatch.setattr(futu_routes, "_futu_last_sync_monotonic", None)
+    monkeypatch.setattr(futu_routes, "_futu_last_sync", {})
     monkeypatch.setattr(futu_routes, "_futu_client", None)
     monkeypatch.setattr(futu_routes, "_futu_lock", None)
     return tmp_path
@@ -202,8 +203,7 @@ def test_health_includes_futu_block_with_never_synced(client: TestClient, isolat
 def test_health_futu_block_surfaces_last_sync_from_postgres(
     client: TestClient, isolated_data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", ACC)
-    monkeypatch.setenv("FUTU_TRADE_ENV", "REAL")
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_REAL", ACC)
     (isolated_data_dir / "futu_portfolio.json").write_text('{"fetched_at": "2020-01-01T00:00:00.000Z"}')
     _store({"fetched_at": "2026-04-07T12:00:00.000Z", "positions": [], "count": 0, "account_summary": None})
 
@@ -215,8 +215,7 @@ def test_health_futu_block_surfaces_last_sync_from_postgres(
 def test_health_futu_block_reports_configured_scope_observation(
     client: TestClient, isolated_data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", ACC)
-    monkeypatch.setenv("FUTU_TRADE_ENV", "SIMULATE")
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_SIMULATE", ACC)
     _store(
         {"positions": [], "observation": {"as_of": "2026-04-07T12:01:00+00:00", "complete": True, "account": ACC}},
         env="paper",
@@ -256,8 +255,8 @@ def test_futu_sync_cooldown_sentinel_first_call_proceeds(
     even if a snapshot exists. Codex #3: 0.0 init would misfire here."""
     _store({"fetched_at": "2020-01-01T00:00:00.000Z", "count": 0, "positions": []})
     mock_client = _connected_client(FRESH)
-    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: mock_client)
-    monkeypatch.setattr(futu_routes, "_futu_last_sync_monotonic", None)
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda *_a: mock_client)
+    monkeypatch.setattr(futu_routes, "_futu_last_sync", {})
 
     resp = client.post("/futu/sync")
     assert resp.status_code == 200
@@ -271,7 +270,7 @@ def test_futu_sync_cooldown_sentinel_first_call_proceeds(
 def test_futu_sync_stores_display_snapshot_in_postgres_not_json(
     client: TestClient, isolated_data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: _connected_client(FRESH))
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda *_a: _connected_client(FRESH))
 
     assert client.post("/futu/sync").status_code == 200
 
@@ -289,7 +288,7 @@ def test_futu_sync_under_read_only_stores_nothing(
     client: TestClient, isolated_data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("XENON_READ_ONLY", "1")
-    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: _connected_client(FRESH))
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda *_a: _connected_client(FRESH))
 
     resp = client.post("/futu/sync")
 
@@ -325,7 +324,7 @@ def test_maybe_preserve_partial_failure_blocks_degraded_overwrite(
     assert preserved["count"] == 27
 
     # Through the route: the degraded result is not stored.
-    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: _connected_client(degraded))
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda *_a: _connected_client(degraded))
     body = client.post("/futu/sync").json()
     assert body["count"] == 27 and "partial_failure_preserved" in body["warnings"]
     assert [r.payload["count"] for r in _display_rows()] == [27]

@@ -40,9 +40,12 @@ logger = logging.getLogger("xenon.api")
 def _compute_futu_health() -> dict[str, Any]:
     """Derive the Futu health block from the singleton + Postgres.
 
-    Never probes OpenD (tribunal T11). One scope feeds every field: the
-    configured trade scope (`FUTU_TRADE_ACC_ID` + `FUTU_TRADE_ENV`), else the
-    connected client's matched account. `last_sync_at` is that scope's newest
+    Never probes OpenD (tribunal T11). The top-level fields describe the
+    default read scope: the configured account of the default env (paper when
+    SIMULATE is configured, else live), else the connected legacy client's
+    matched account. `scopes` lists the same fields for every observed scope
+    (configured SIMULATE / REAL plus stored scopes with unresolved orders,
+    §11), with `account_env` and `configured`. `last_sync_at` is a scope's newest
     display snapshot (`/futu/sync`), `observation` its newest observation
     pass, `held_rows` its rows held by FUTU_FILL_UNPRICED / FUTU_FILL_CONFLICT /
     FUTU_NOT_OBSERVED; never another account's row. A DB failure leaves the
@@ -50,15 +53,39 @@ def _compute_futu_health() -> dict[str, Any]:
     The account number is not reported (`/health` is unauthenticated).
     """
     from xenon.api import server
-    from xenon.execution import futu_scope, orders_store
+    from xenon.execution import futu_scope
+
+    loops = getattr(server.app.state, "futu_observation_loops", None)
+    configured = futu_scope.configured_scopes()
+    scope = configured.get(futu_scope.default_read_env()) or futu_routes.client_scope(futu_routes._futu_client)
+    clients = futu_routes.display_clients()
+    observed = list(loops.loops) if loops is not None else []
+    return {
+        "configured": True,  # v1 assumption; cloud branch flips to False
+        "connected": any(c.is_connected() for c in clients),
+        **_futu_scope_health(scope, loops),
+        "observation_loop": loops is not None and loops.running,
+        "scope_env": scope.account_env if scope is not None else None,
+        # Per observed scope; the account number is not reported.
+        "scopes": [
+            {
+                "account_env": sc.account_env,
+                "configured": configured.get(sc.account_env) == sc,
+                **_futu_scope_health(sc, loops),
+            }
+            for sc in observed
+        ],
+    }
+
+
+def _futu_scope_health(scope, loops) -> dict[str, Any]:
+    """Health fields of one Futu scope from Postgres; a DB failure leaves them None."""
+    from xenon.execution import orders_store
 
     last_sync_at: Optional[str] = None
     last_sync_age_s: Optional[float] = None
     observation: Optional[dict[str, Any]] = None
     held_rows: Optional[dict[str, Any]] = None
-    scope, _reason = futu_scope.configured_scope()
-    if scope is None:
-        scope = futu_routes.client_scope(futu_routes._futu_client)
     try:
         if scope is not None:
             display = futu_routes.latest_display_snapshot(scope)
@@ -83,19 +110,15 @@ def _compute_futu_health() -> dict[str, Any]:
             held_rows = orders_store.futu_held_rows(broker_account=scope.broker_account, account_env=scope.account_env)
     except Exception as exc:  # noqa: BLE001 — health must render without the DB
         logger.debug("futu health: snapshot read failed: %s", exc)
-
-    loop = getattr(server.app.state, "futu_observation_loop", None)
+    loop = loops.loop_for(scope) if loops is not None and scope is not None else None
     return {
-        "configured": True,  # v1 assumption; cloud branch flips to False
-        "connected": futu_routes._futu_client is not None and futu_routes._futu_client.is_connected(),
         "last_sync_at": last_sync_at,
         "last_sync_age_s": last_sync_age_s,
-        "observation_loop": loop is not None and loop.running,
         "observation": observation,
+        "scope_observation_loop": loop is not None and loop.running,
         # Rows that keep the scope incomplete or hold demand, by reason code.
         # Futu order ids only: submission ids embed the account number.
         "held_rows": held_rows,
-        "scope_env": scope.account_env if scope is not None else None,
     }
 
 

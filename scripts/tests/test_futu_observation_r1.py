@@ -42,8 +42,7 @@ pytestmark = pytest.mark.committed_db
 
 @pytest.fixture(autouse=True)
 def _configured(monkeypatch):
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", ACC)
-    monkeypatch.setenv("FUTU_TRADE_ENV", "SIMULATE")
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_SIMULATE", ACC)
 
 
 def _run(ctx, metas=None):
@@ -237,12 +236,13 @@ def _portfolio(monkeypatch, request_scope):
     from xenon.api.routes import futu as futu_routes
 
     offline = type("Offline", (), {"is_connected": lambda self: False})()
-    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: offline)
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda *_a: offline)
     # The configured trade scope is the FUTU read scope (R2 F5).
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", request_scope.broker_account)
-    monkeypatch.setenv("FUTU_TRADE_ENV", "REAL" if request_scope.account_env == "live" else "SIMULATE")
+    from xenon.execution import futu_scope
+
+    monkeypatch.setenv(futu_scope.ACC_ID_ENV[request_scope.account_env], request_scope.broker_account)
     monkeypatch.setattr(guards, "_futu_scope_from_db", lambda: None)
-    return TestClient(server.app).get("/futu/portfolio").json()
+    return TestClient(server.app).get(f"/futu/portfolio?account_env={request_scope.account_env}").json()
 
 
 def test_f4_portfolio_serves_only_the_request_account(monkeypatch):
@@ -288,8 +288,8 @@ def test_f4_health_uses_one_scope(monkeypatch):
 
     from xenon.api import server
 
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", "111000111")
-    monkeypatch.setenv("FUTU_TRADE_ENV", "REAL")
+    monkeypatch.delenv("FUTU_TRADE_ACC_ID_SIMULATE")  # REAL only: the default read env is live
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_REAL", "111000111")
     _store_display(A_LIVE, 1)
     _store_display(B_LIVE, 2)
 
@@ -392,13 +392,16 @@ def _refresh(monkeypatch, request_scope, loop):
         raise AssertionError("refresh must not run the history sync")
 
     offline = type("Offline", (), {"is_connected": lambda self: False})()
-    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: offline)
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda *_a: offline)
     monkeypatch.setattr(guards, "_futu_scope_from_db", lambda: request_scope)
     monkeypatch.setattr(portfolio_routes, "_futu_refresh_db_first", _no_history)
     monkeypatch.setattr(server, "_is_test_mode", lambda: False)
-    monkeypatch.setattr(server.app.state, "futu_observation_loop", loop, raising=False)
+    loops = type("Loops", (), {"loop_for": lambda self, sc: loop if loop is not None and sc == loop.scope else None})()
+    monkeypatch.setattr(server.app.state, "futu_observation_loops", loops, raising=False)
     # No `with`: the lifespan must not run (test mode is off for this request).
-    return TestClient(server.app).post("/orders/refresh", params={"broker": "FUTU"})
+    return TestClient(server.app).post(
+        "/orders/refresh", params={"broker": "FUTU", "account_env": request_scope.account_env}
+    )
 
 
 def test_f7_refresh_observes_a_cancel_and_a_fill(monkeypatch):
@@ -430,7 +433,7 @@ def test_f7_mismatched_refresh_runs_no_pass(monkeypatch):
     other = AccountScope(broker="FUTU", account_env="live", broker_account=ACC)
     loop = fo.ObservationLoop(other, connect=connector, resolve_meta=resolver())
 
-    body = _refresh(monkeypatch, other, loop).json()
+    body = _refresh(monkeypatch, SCOPE, loop).json()  # paper request; only a live loop exists
 
     assert body["scope"]["accountEnv"] == "paper" and connector.connects == 0
 

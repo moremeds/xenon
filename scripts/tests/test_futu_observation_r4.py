@@ -47,8 +47,7 @@ EXP = SPY_META["exp"]
 
 @pytest.fixture(autouse=True)
 def _configured(monkeypatch):
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", ACC)
-    monkeypatch.setenv("FUTU_TRADE_ENV", "SIMULATE")
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_SIMULATE", ACC)
     monkeypatch.setattr(fo, "_IB_META_CACHE", {}, raising=False)
     monkeypatch.setattr(fo, "_FULL_PASSES", {}, raising=False)
 
@@ -83,13 +82,17 @@ class _Client:
         return dict(self.result)
 
 
+_REQ = type("Req", (), {"query_params": {}})()  # default read env: paper (SIMULATE configured)
+
+
 @pytest.fixture()
 def _sync_state(monkeypatch):
     from xenon.api import server
     from xenon.api.routes import futu as futu_routes
 
-    monkeypatch.setattr(futu_routes, "_futu_last_sync_monotonic", None)
+    monkeypatch.setattr(futu_routes, "_futu_last_sync", {})
     monkeypatch.setattr(futu_routes, "_futu_client", None)
+    monkeypatch.setattr(futu_routes, "_futu_clients", {})
     monkeypatch.setattr(futu_routes, "_futu_lock", None)
     monkeypatch.setattr(futu_routes, "_futu_sync_future", None)
     monkeypatch.delattr(server.app.state, "db_engine", raising=False)
@@ -132,10 +135,10 @@ async def test_cooldown_sync_never_serves_another_scope(_sync_state, monkeypatch
     futu_routes = _sync_state
     _store_display(SCOPE, 1)
     _store_display(client_scope, 2)
-    monkeypatch.setattr(futu_routes, "_futu_client", _Client(client_scope))
-    monkeypatch.setattr(futu_routes, "_futu_last_sync_monotonic", time.monotonic())
+    monkeypatch.setattr(futu_routes, "_futu_clients", {"paper": _Client(client_scope)})
+    monkeypatch.setattr(futu_routes, "_futu_last_sync", {"paper": time.monotonic()})
 
-    body = await futu_routes.futu_sync()
+    body = await futu_routes.futu_sync(_REQ)
 
     assert body["ok"] is False and body["code"] == "scope_mismatch" and body["count"] == 0
     assert body["scope"] == {"broker": "FUTU", "accountEnv": "paper", "brokerAccount": ACC}
@@ -145,9 +148,9 @@ async def test_cooldown_sync_never_serves_another_scope(_sync_state, monkeypatch
 @pytest.mark.parametrize("client_scope", [OTHER_LIVE, SAME_ACC_LIVE], ids=["other_account", "paper_vs_live"])
 async def test_fresh_sync_of_another_scope_is_neither_served_nor_stored(_sync_state, monkeypatch, client_scope):
     futu_routes = _sync_state
-    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: _Client(client_scope))
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda *_a: _Client(client_scope))
 
-    body = await futu_routes.futu_sync()
+    body = await futu_routes.futu_sync(_REQ)
 
     assert body["code"] == "scope_mismatch" and body["count"] == 0
     assert _display_counts(client_scope) == [] and _display_counts(SCOPE) == []
@@ -156,9 +159,9 @@ async def test_fresh_sync_of_another_scope_is_neither_served_nor_stored(_sync_st
 @pytest.mark.asyncio
 async def test_fresh_sync_of_the_selected_scope_is_served_and_stored(_sync_state, monkeypatch):
     futu_routes = _sync_state
-    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: _Client(SCOPE))
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda *_a: _Client(SCOPE))
 
-    body = await futu_routes.futu_sync()
+    body = await futu_routes.futu_sync(_REQ)
 
     assert body["ok"] is True and body["count"] == 5
     assert _display_counts(SCOPE) == [5]
@@ -175,7 +178,7 @@ def test_display_client_uses_the_configured_scope(_sync_state, monkeypatch):
 
 def test_display_client_without_scope_keeps_futu_trd_env(_sync_state, monkeypatch):
     futu_routes = _sync_state
-    monkeypatch.delenv("FUTU_TRADE_ACC_ID")
+    monkeypatch.delenv("FUTU_TRADE_ACC_ID_SIMULATE")
     monkeypatch.setenv("FUTU_TRD_ENV", "REAL")
 
     client = futu_routes._get_futu_client()

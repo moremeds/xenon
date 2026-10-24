@@ -24,14 +24,16 @@ ACC = "281756479345015383"
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    for name in ("XENON_READ_ONLY", "XENON_FUTU_TRADING", "FUTU_TRADE_ACC_ID", "FUTU_TRADE_ENV"):
+    for name in ("XENON_READ_ONLY", "XENON_FUTU_TRADING", "FUTU_TRADE_ACC_ID_SIMULATE", "FUTU_TRADE_ACC_ID_REAL"):
         monkeypatch.delenv(name, raising=False)
+    # No stored scope with unresolved rows (the veto has its own tests in
+    # scripts/tests/test_futu_scope_switch.py).
+    monkeypatch.setattr(guards, "futu_scope_change_pending", lambda env: [])
 
 
 def _enable_futu(monkeypatch):
-    monkeypatch.setenv("XENON_FUTU_TRADING", "1")
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", ACC)
-    monkeypatch.setenv("FUTU_TRADE_ENV", "SIMULATE")
+    monkeypatch.setenv("XENON_FUTU_TRADING", "simulate")
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_SIMULATE", ACC)
 
 
 def _body(resp):
@@ -59,7 +61,8 @@ def test_futu_default_denied_with_top_level_reason_code(op):
 @pytest.mark.parametrize("op", ["place_single", "cancel", "modify"])
 def test_futu_enabled_gated_ops_pass(monkeypatch, op):
     _enable_futu(monkeypatch)
-    assert guards.broker_capability_denial("FUTU", op, "x") is None
+    assert guards.broker_capability_denial("FUTU", op, "x", "paper") is None
+    assert guards.broker_capability_denial("FUTU", op, "x", "live") is not None  # REAL not enabled
 
 
 @pytest.mark.parametrize("op", ["replace", "combo", "wizard", None])
@@ -117,7 +120,7 @@ def test_ensure_ib_unchanged():
 def test_ensure_futu_always_refused_in_x3a(monkeypatch, kind, enabled):
     if enabled:
         _enable_futu(monkeypatch)
-    resp = guards.ensure_order_allowed(kind, _state("FUTU", mode_verified=False))
+    resp = guards.ensure_order_allowed(kind, _state("FUTU", mode_verified=False), account_env="paper")
     assert resp.status_code == 403
     body = _body(resp)
     assert body["reason_code"] == "READ_ONLY_BROKER"
@@ -127,7 +130,16 @@ def test_ensure_futu_always_refused_in_x3a(monkeypatch, kind, enabled):
 def test_ensure_futu_explicit_op_overrides_kind(monkeypatch):
     _enable_futu(monkeypatch)
     resp = guards.ensure_order_allowed("order placement", _state("FUTU"), op="combo")
-    assert "combo" in _body(resp)["detail"]
+    assert "combo" in _body(resp)["detail"]  # never-supported op: 403 even without account_env
+
+
+@pytest.mark.parametrize("kind", ["order placement", "order cancellation", "order modification"])
+@pytest.mark.parametrize("env", [None, "", "PAPER", "simulate", "x"])
+def test_ensure_futu_mutation_needs_account_env(monkeypatch, kind, env):
+    _enable_futu(monkeypatch)
+    resp = guards.ensure_order_allowed(kind, _state("FUTU"), account_env=env)
+    assert resp.status_code == 400
+    assert _body(resp)["reason_code"] == "FUTU_SCOPE_REQUIRED"
 
 
 def test_ensure_unknown_broker_refused():

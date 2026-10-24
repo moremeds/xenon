@@ -1844,6 +1844,25 @@ def futu_unobserved_order_ids(
         return sorted(oid for oid in ids if oid not in observed)
 
 
+def futu_unresolved_scopes() -> list[tuple[str, str]]:
+    """`(account_env, broker_account)` of every stored FUTU scope that still
+    has a non-terminal or UNKNOWN `order_submissions` row, with or without a
+    broker order id (§11 A2: those scopes stay in observation even after the
+    configured account changed or was removed). Sorted; read-only."""
+    with get_sync_engine().connect() as conn:
+        rows = conn.execute(
+            select(order_submissions.c.account_env, order_submissions.c.broker_account)
+            .where(
+                order_submissions.c.broker == "FUTU",
+                order_submissions.c.account_env.in_(("paper", "live")),
+                order_submissions.c.state.in_(NON_TERMINAL_STATES),
+            )
+            .distinct()
+            .order_by(order_submissions.c.account_env, order_submissions.c.broker_account)
+        ).all()
+    return [(r[0], r[1]) for r in rows]
+
+
 def futu_held_rows(*, broker_account: str, account_env: str, limit: int = 20) -> dict:
     """Non-terminal Futu rows in scope held by a FUTU_HELD_REASONS code:
     {reason: {"count", "order_ids"}} (oldest first, at most `limit` ids)."""
