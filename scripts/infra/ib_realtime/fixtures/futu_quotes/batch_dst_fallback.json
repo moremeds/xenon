@@ -1,0 +1,30 @@
+{
+  "type": "batch",
+  "updates": {
+    "HYG": {
+      "symbol": "HYG",
+      "last": 80.1,
+      "lastIsCalculated": false,
+      "bid": null,
+      "ask": null,
+      "bidSize": null,
+      "askSize": null,
+      "volume": null,
+      "high": null,
+      "low": null,
+      "open": null,
+      "close": null,
+      "week52High": null,
+      "week52Low": null,
+      "avgVolume": null,
+      "delta": null,
+      "gamma": null,
+      "theta": null,
+      "vega": null,
+      "impliedVol": null,
+      "undPrice": null,
+      "timestamp": "2026-11-02T14:30:01Z",
+      "source": "futu"
+    }
+  }
+}
