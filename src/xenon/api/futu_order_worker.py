@@ -75,6 +75,11 @@ class FutuOrderWorker:
         self._live: set[Invocation] = set()
         self._stopping = False
 
+    @property
+    def stopped(self) -> bool:
+        """True after `stop()`: every new job is refused."""
+        return self._stopping
+
     def admission(self) -> Optional[dict]:
         if self._stopping:
             return _refused("Futu order worker is stopped", WORKER_STOPPED)

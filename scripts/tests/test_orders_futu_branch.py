@@ -297,7 +297,11 @@ class FakeOrderCtx(FakeTradeCtx):
         self.mutations.append(("modify_order", kw))
         row = self.book[kw["order_id"]]
         if kw["modify_order_op"] == "CANCEL":
-            row["order_status"] = {"cancelled": "CANCELLED_ALL", "pending": "SUBMITTED"}[self.cancel_mode]
+            row["order_status"] = {"cancelled": "CANCELLED_ALL", "pending": "SUBMITTED", "filled": "FILLED_ALL"}[
+                self.cancel_mode
+            ]
+            if self.cancel_mode == "filled":  # filled before the cancel arrived
+                row["dealt_qty"], row["dealt_avg_price"] = row["qty"], row["price"]
         elif self.modify_mode == "apply":
             row["qty"], row["price"] = float(kw["qty"]), kw["price"]
         return 0, _frame(["trd_env", "order_id"], [{"trd_env": kw["trd_env"], "order_id": kw["order_id"]}])
@@ -541,6 +545,7 @@ def test_futu_modify_without_fresh_evidence_keeps_the_larger_reservation(futu):
     assert row.quantity == 2 and row.legs["pending_amend_qty"] == 5  # Gate 4 reserves max(2, 5)
     resp = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newQuantity": 4, "modifySequence": 2})
     assert resp.status_code == 409 and resp.json()["reason_code"] == "MODIFY_PENDING"
+    assert resp.json()["detail"]["applied_sequence"] == 2  # the sequence already advanced
     stale = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newPrice": 500.1, "modifySequence": 1})
     assert stale.status_code == 409 and stale.json()["reason_code"] == "MODIFY_STALE"
     assert len([m for m in futu.ctx.mutations if m[0] == "modify_order"]) == 1
@@ -595,3 +600,149 @@ def test_health_trading_false_under_scope_change_veto(futu, monkeypatch):
     assert fo.run_pass(other, ctx, resolve_meta=resolver(), audit=False)["complete"]
 
     assert _trading() == {"paper": False, "live": True}  # unresolved row of another paper account
+
+
+# -- X3c Task 3b: review fixes (Astra F1/F2, Fable P2/P3) ---------------------
+
+
+def _modifies(futu):
+    return [kw for name, kw in futu.ctx.mutations if name == "modify_order"]
+
+
+def test_futu_price_only_modify_sends_the_broker_quantity(futu):
+    sid, oid = _placed(futu)
+    futu.ctx.book[oid]["qty"] = 1.0  # the user cut the order in the Futu app
+
+    resp = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newPrice": 500.1, "modifySequence": 1})
+
+    assert resp.status_code == 200, resp.text
+    [kw] = _modifies(futu)
+    assert (kw["qty"], kw["price"]) == (1, 500.1)  # not the stored quantity 2
+
+
+def test_futu_price_only_modify_never_sends_an_unreserved_quantity(futu):
+    sid, oid = _placed(futu)
+    futu.ctx.book[oid]["qty"] = 5.0  # raised in the Futu app; Gate 4 reserves 2
+
+    resp = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newPrice": 500.1, "modifySequence": 1})
+
+    assert resp.status_code == 409 and resp.json()["reason_code"] == "FUTU_MODIFY_QTY_UNRESERVED"
+    assert _modifies(futu) == []
+    assert _row(sid).legs.get("pending_amend_id") is None  # proven unsent: amend released
+
+
+def test_futu_quantity_only_modify_sends_the_broker_price(futu):
+    sid, oid = _placed(futu)
+    futu.ctx.book[oid]["price"] = 499.5  # changed in the Futu app (or an unconfirmed earlier amend)
+
+    resp = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newQuantity": 3, "modifySequence": 1})
+
+    assert resp.status_code == 200 and resp.json()["confirmed"] is True, resp.text
+    [kw] = _modifies(futu)
+    assert (kw["qty"], kw["price"]) == (3, 499.5)  # not the stored 500.2
+    assert float(_row(sid).limit_price) == 499.5
+
+
+def test_futu_modify_sends_nothing_when_the_order_read_fails(futu):
+    sid, oid = _placed(futu)
+    futu.ctx.fail["open_orders"] = (-1, "read failed")
+
+    resp = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newPrice": 500.1, "modifySequence": 1})
+
+    assert resp.status_code == 503 and resp.json()["reason_code"] == "FUTU_ORDER_UNVERIFIED"
+    assert _modifies(futu) == []
+    assert _row(sid).legs.get("pending_amend_id") is None
+
+
+def test_futu_sub_dollar_one_tick_mismatch_stays_unconfirmed(futu):
+    sid, oid = _placed(futu, cid="futu-subdollar")
+    futu.ctx.book[oid]["price"] = 0.1  # a sub-dollar stock: tick 0.0001 (made-up price)
+    futu.ctx.modify_mode = "ignore"  # RET_OK, Futu still reports 0.1000
+
+    resp = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newPrice": 0.1009, "modifySequence": 1})
+
+    assert resp.status_code == 200 and resp.json()["confirmed"] is False, resp.text
+    assert resp.json()["confirmedPrice"] is None
+
+
+def _age_amend(sid):
+    """Move the open amend's send_by and deadline into the past (the send
+    window closed long ago)."""
+    from datetime import timedelta
+
+    past = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+    legs = dict(_row(sid).legs)
+    legs["pending_amend_send_by"] = legs["pending_amend_deadline"] = past
+    with get_sync_engine().begin() as conn:
+        conn.execute(update(order_submissions).where(order_submissions.c.submission_id == sid).values(legs=legs))
+
+
+def test_futu_pending_amend_clears_only_on_a_fresh_pass_with_the_new_quantity(futu):
+    sid, oid = _placed(futu)
+    futu.ctx.modify_mode = "ignore"
+    resp = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newQuantity": 5, "modifySequence": 1})
+    assert resp.json()["confirmed"] is False
+    _age_amend(sid)
+
+    fo.run_pass(SCOPE, futu.ctx, resolve_meta=resolver(), audit=False)  # Futu still shows 2: no expiry
+
+    row = _row(sid)
+    assert row.quantity == 2 and row.legs["pending_amend_qty"] == 5
+    blocked = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newPrice": 500.1, "modifySequence": 2})
+    assert blocked.status_code == 409 and blocked.json()["reason_code"] == "MODIFY_PENDING"
+
+    futu.ctx.book[oid]["qty"] = 5.0  # Futu applied the amend late
+    fo.run_pass(SCOPE, futu.ctx, resolve_meta=resolver(), audit=False)
+
+    row = _row(sid)
+    assert row.quantity == 5 and row.legs.get("pending_amend_qty") is None and row.legs.get("pending_amend_id") is None
+    resp = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newPrice": 500.1, "modifySequence": 3})
+    assert resp.status_code == 200, resp.text
+
+
+def test_futu_pending_amend_needs_a_read_after_send_by(futu):
+    sid, oid = _placed(futu)
+    futu.ctx.modify_mode = "ignore"
+    _post(futu, "/orders/modify", {"brokerOrderId": oid, "newQuantity": 5, "modifySequence": 1})
+    futu.ctx.book[oid]["qty"] = 5.0
+
+    fo.run_pass(SCOPE, futu.ctx, resolve_meta=resolver(), audit=False)  # send window still open
+
+    assert _row(sid).legs["pending_amend_qty"] == 5
+
+
+def test_futu_accepted_place_without_a_fresh_read_keeps_the_order_id(futu):
+    futu.ctx.fail["open_orders"] = (-1, "read failed")
+
+    resp = _post(futu, "/orders/place", _stock(cid="futu-unread"))
+
+    assert resp.status_code == 502 and resp.json()["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
+    oid = next(iter(futu.ctx.book))
+    assert resp.json()["brokerOrderId"] == oid
+    row = _row(resp.json()["submission_id"])
+    assert row.state == "UNKNOWN" and row.broker_order_id == oid
+    del futu.ctx.fail["open_orders"]
+    cancel = _post(futu, "/orders/cancel", {"brokerOrderId": oid})  # manageable before the remark bind
+    assert cancel.status_code == 200 and cancel.json()["confirmed"] is True
+
+
+def test_futu_cancel_of_a_filled_order_is_not_reported_cancelled(futu):
+    sid, oid = _placed(futu)
+    futu.ctx.cancel_mode = "filled"
+
+    resp = _post(futu, "/orders/cancel", {"brokerOrderId": oid})
+
+    body = resp.json()
+    assert resp.status_code == 200 and body["state"] == "FILLED" and body["confirmed"] is False
+    assert "FILLED" in body["message"] and "confirmed" not in body["message"]
+
+
+def test_health_trading_false_without_a_running_worker(futu, monkeypatch):
+    import asyncio
+
+    from xenon.api import server
+
+    asyncio.run(futu.worker.stop())
+    assert _trading() == {"paper": False, "live": False}
+    monkeypatch.setattr(server.app.state, "futu_order_worker", None, raising=False)
+    assert _trading() == {"paper": False, "live": False}

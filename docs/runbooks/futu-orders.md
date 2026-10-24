@@ -36,7 +36,8 @@ The api reads these from `/opt/xenon/.env` on the macmini (`env_file` of the
    "trading": {"paper": true, "live": false}
    ```
 
-   A value is true only when: not `XENON_READ_ONLY=1`; the env is in
+   A value is true only when: not `XENON_READ_ONLY=1`; the Futu order worker
+   runs; the env is in
    `XENON_FUTU_TRADING`; the env has a configured account; no
    `FUTU_SCOPE_CHANGE_PENDING` veto applies; and for live, `FUTU_TRADE_PWD_MD5` is
    32 hex characters (format check only, no unlock call). The web order ticket
@@ -96,10 +97,29 @@ incomplete, so Gate 4 fails closed for that scope.
 
 A quantity modify that Futu did not confirm keeps `pending_amend_qty`; Gate 4
 reserves the larger quantity, and every later modify gets 409 `MODIFY_PENDING`.
-The Futu observation does not expire this amend (the IB mirror does; the Futu
-mirror does not). Cancel still works.
+Cancel still works.
+
+The observation pass clears the amend by itself on positive evidence only: a
+fresh pass whose read began after the amend's send window closed
+(`pending_amend_send_by`) and that shows exactly the pending quantity. The row
+quantity then becomes that quantity. There is no time-based expiry for Futu: a
+pass that shows the old or another quantity, a timeout or a missing order keeps
+the amend and the larger reservation.
+
+When the pass does not clear it (Futu shows other terms):
 
 1. In the Futu app, read the order's real quantity and price.
 2. Either cancel the order, or clear the amend by hand: set `quantity` /
    `limit_price` to the values the app shows and set the `pending_amend_*` keys in
    `legs` to null.
+
+## 6. Modify sends the broker's current terms
+
+Futu `modify_order` sends quantity and price together. Before the send, the
+worker reads the order fresh in the request scope; a field the request omits
+takes Futu's current value (a change made in the Futu app is kept). Nothing is
+sent when that read fails or does not show the order (503
+`FUTU_ORDER_UNVERIFIED`), when Futu reports the order terminal (409
+`FUTU_ORDER_NOT_WORKING`), or when a price-only modify would send a quantity
+above the one Gate 4 reserves (409 `FUTU_MODIFY_QTY_UNRESERVED`; let the next
+observation pass record the larger quantity, then retry).

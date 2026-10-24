@@ -186,6 +186,17 @@ def checked_price(spec: FutuOrderSpec, price: Any) -> Decimal:
     return p
 
 
+def tick_price(spec: FutuOrderSpec, price: Any) -> Decimal | None:
+    """`price` rounded to the spec's minimum increment (half-even), None when
+    it is not a positive finite number. Turns a broker float echo into its
+    grid value; two different valid ticks stay different (modify
+    confirmation compares these, never an absolute tolerance)."""
+    p = _decimal(price)
+    if p is None or p <= 0:
+        return None
+    return p.quantize(_price_increment(spec, p))
+
+
 def _checked_spec(spec: FutuOrderSpec) -> tuple[str, Decimal]:
     if spec.order_type != "LMT":
         raise FutuOrderRefused(UNSUPPORTED_ORDER_TYPE, f"Futu orders are limit only (got {spec.order_type!r})")

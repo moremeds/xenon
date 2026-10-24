@@ -8,6 +8,7 @@ read at call time.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -2095,8 +2096,8 @@ def _futu_guard(kind: str, broker: str, op: str | None, account_env: str | None)
 
 def futu_trading_status() -> dict[str, bool]:
     """/health `futu.trading`: per env, would a Futu place pass the guard?
-    True only when not read-only, the env is in XENON_FUTU_TRADING and has a
-    configured account (`broker_capabilities.evaluate`), no
+    True only when not read-only, the Futu order worker runs, the env is in
+    XENON_FUTU_TRADING and has a configured account (`broker_capabilities.evaluate`), no
     FUTU_SCOPE_CHANGE_PENDING veto applies, and for live FUTU_TRADE_PWD_MD5
     is well-formed (format only, no unlock call). No account numbers."""
     from xenon.api import guards
@@ -2104,7 +2105,13 @@ def futu_trading_status() -> dict[str, bool]:
 
     out: dict[str, bool] = {}
     for env in futu_scope.ACCOUNT_ENVS:
-        ok = not guards.is_read_only() and broker_capabilities.evaluate("FUTU", "place_single", env)[0]
+        worker = _futu_worker()
+        ok = (
+            not guards.is_read_only()
+            and worker is not None
+            and not worker.stopped
+            and broker_capabilities.evaluate("FUTU", "place_single", env)[0]
+        )
         try:
             ok = ok and not guards.futu_scope_change_pending(env)
             if ok and env == "live":
@@ -2379,7 +2386,20 @@ def _futu_finish_place(submission_id: str, scope, reply: dict) -> Any:
     )
     if out is None or out.get("submission_id") != submission_id:
         logger.warning("futu place: order %s accepted, not bound to %s yet", order_id, submission_id)
-        return _place_outcome_unknown(submission_id, {}, from_states=_PLACE_FINAL_FROM)
+        bound = 0
+        if not reply.get("row"):
+            # No fresh read: keep Futu's own accepted id so the order is
+            # manageable before the remark bind (conditional write).
+            try:
+                bound = orders_store.bind_futu_order_id(
+                    submission_id, order_id, broker_account=scope.broker_account, account_env=scope.account_env
+                )
+            except Exception:  # noqa: BLE001 — the row stays UNKNOWN; observation binds by remark
+                logger.warning("futu place: storing order id %s failed", order_id, exc_info=True)
+        unknown = _place_outcome_unknown(submission_id, {}, from_states=_PLACE_FINAL_FROM)
+        if not bound:
+            return unknown
+        return JSONResponse(status_code=502, content={**_json_body(unknown), "brokerOrderId": order_id})
     return {
         "status": "ok",
         "broker": "FUTU",
@@ -2495,16 +2515,14 @@ async def _futu_cancel(body: dict, broker: str, account_env: str | None):
         # The demand stays until fresh evidence shows the order terminal.
         _futu_mirror(scope, reply.get("row"), reply.get("read_at"))
         state = _futu_row_state(submission_id)
-        confirmed = state in futu_orders.TERMINAL_STATES
-        return {
-            "status": "ok",
-            "brokerOrderId": order_id,
-            "state": state,
-            "confirmed": confirmed,
-            "message": "Cancel confirmed by Futu"
-            if confirmed
-            else "Cancel sent; Futu has not reported the order cancelled yet",
-        }
+        confirmed = state == "CANCELLED"
+        if confirmed:
+            message = "Cancel confirmed by Futu"
+        elif state in futu_orders.TERMINAL_STATES:
+            message = f"Futu reports the order {state}; it was not cancelled"
+        else:
+            message = "Cancel sent; Futu has not reported the order cancelled yet"
+        return {"status": "ok", "brokerOrderId": order_id, "state": state, "confirmed": confirmed, "message": message}
 
     return await _futu_run(core, finish, scope, "cancel")
 
@@ -2552,6 +2570,25 @@ class _SendWindowClosed(Exception):
     pass
 
 
+FUTU_ORDER_UNVERIFIED = "FUTU_ORDER_UNVERIFIED"
+FUTU_ORDER_NOT_WORKING = "FUTU_ORDER_NOT_WORKING"
+FUTU_MODIFY_QTY_UNRESERVED = "FUTU_MODIFY_QTY_UNRESERVED"
+
+
+def _futu_unsent(message: str, reason_code: str, http_status: int, exc: Exception | None = None) -> dict:
+    """A refusal on the worker before any send (nothing was sent)."""
+    if exc is not None:
+        logger.warning("futu modify: %s (%s)", message, exc)
+    return {
+        "status": "error",
+        "message": message,
+        "classification": "futu_refused",
+        "amend_outcome": "not_sent",
+        "reason_code": reason_code,
+        "http_status": http_status,
+    }
+
+
 async def _futu_modify(body: dict, broker: str, account_env: str | None):
     from xenon.execution import futu_orders
 
@@ -2576,27 +2613,31 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
             raise ValueError("newPrice or newQuantity is required")
         if new_quantity is not None and (isinstance(new_quantity, bool) or int(new_quantity) != new_quantity):
             raise ValueError("newQuantity must be a whole number")
-        quantity = int(new_quantity) if new_quantity is not None else int(row["quantity"])
-        price = Decimal(str(new_price)) if new_price is not None else Decimal(str(row["limit_price"]))
+        if new_quantity is not None and int(new_quantity) < 1:
+            raise ValueError("newQuantity must be at least 1")
         expiry = row.get("expiry")
-        spec = futu_orders.FutuOrderSpec(
+        # Identity from the row; quantity / price are set on the worker from
+        # the request, else from a fresh read of the order (never the row).
+        base_spec = futu_orders.FutuOrderSpec(
             sec_type=row["security_type"],
             symbol=row["ticker"],
             action=row["action"],
-            quantity=quantity,
-            limit_price=price,
+            quantity=1,
+            limit_price=Decimal(1),
             tif=row.get("tif") or "DAY",
             expiry=expiry.strftime("%Y%m%d") if expiry is not None else None,
             right=row.get("right"),
             strike=Decimal(str(row["strike"])) if row.get("strike") is not None else None,
         )
-        futu_orders.checked_price(spec, price)
-        if quantity < 1:
-            raise ValueError("newQuantity must be at least 1")
+        req_price = futu_orders.checked_price(base_spec, Decimal(str(new_price))) if new_price is not None else None
     except futu_orders.FutuOrderRefused as exc:
         return order_error(exc.http_status, exc.reason_code, {"message": str(exc), "http_status": exc.http_status})
     except (ValueError, TypeError, InvalidOperation) as exc:
         return order_error(400, ReasonCode.INVALID_ORDER_BODY.value, {"message": str(exc), "http_status": 400})
+    # What Gate 4 reserves for this row without a quantity amend.
+    reserved_qty = max(
+        int(row["quantity"]), int(orders_store.normalize_legs_payload(row["legs"]).get("observed_qty") or 0)
+    )
 
     applied, current = _futu_apply_sequence(submission_id, sequence)
     if not applied:
@@ -2619,7 +2660,8 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
                 ReasonCode.MODIFY_PENDING.value,
                 {
                     "message": "An earlier change to this order is not confirmed by Futu yet. Cancel the order, "
-                    "or resolve the change first (see the Futu runbook).",
+                    "or wait until Futu reports the new quantity (see the Futu runbook).",
+                    "applied_sequence": sequence,
                     "http_status": 409,
                 },
             )
@@ -2627,7 +2669,11 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
         return order_error(
             400,
             v.reason_code.value if v.reason_code else ReasonCode.GATE4_UNRESOLVED.value,
-            {"message": v.reason_detail or "Modify blocked by coverage gate", "http_status": 400},
+            {
+                "message": v.reason_detail or "Modify blocked by coverage gate",
+                "applied_sequence": sequence,
+                "http_status": 400,
+            },
         )
     amend_id, send_by = opened.amend_id, opened.send_by
 
@@ -2638,10 +2684,34 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
                 raise _SendWindowClosed()
             mark_sent()
 
+        # Fresh read of this order before the send: Futu modify sends both
+        # quantity and price, so an omitted field takes the broker's current
+        # value (the user may have changed it in the Futu app). No usable
+        # read → nothing is sent.
+        try:
+            cur = futu_orders.query_order(
+                ctx, order_id=order_id, account_env=scope.account_env, acc_id=scope.broker_account
+            )
+        except futu_orders.FutuReadFailed as exc:
+            return _futu_unsent("Futu order read failed; nothing was sent", FUTU_ORDER_UNVERIFIED, 503, exc)
+        cur_price = futu_orders.tick_price(base_spec, cur.price) if cur is not None else None
+        if cur is None or cur.qty is None or cur.qty != cur.qty.to_integral_value() or cur_price is None:
+            return _futu_unsent("Futu did not report this order; nothing was sent", FUTU_ORDER_UNVERIFIED, 503)
+        if cur.state in futu_orders.TERMINAL_STATES:
+            return _futu_unsent(f"Futu reports the order {cur.state}; nothing was sent", FUTU_ORDER_NOT_WORKING, 409)
+        quantity = qty_amend if qty_amend is not None else int(cur.qty)
+        price = req_price if req_price is not None else cur_price
+        if qty_amend is None and quantity > reserved_qty:
+            # A price-only modify must not send a quantity Gate 4 does not reserve.
+            return _futu_unsent(
+                f"Futu reports quantity {quantity}, above the reserved {reserved_qty}; nothing was sent",
+                FUTU_MODIFY_QTY_UNRESERVED,
+                409,
+            )
         try:
             res = futu_orders.modify(
                 ctx,
-                spec,
+                dataclasses.replace(base_spec, quantity=quantity, limit_price=price),
                 order_id=order_id,
                 account_env=scope.account_env,
                 acc_id=scope.broker_account,
@@ -2667,6 +2737,8 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
             "read_at": read_at,
             "qty": ev.qty if ev is not None else None,
             "price": ev.price if ev is not None else None,
+            "sent_qty": quantity,
+            "sent_price": price,
         }
 
     def finish(reply: dict) -> Any:
@@ -2690,18 +2762,18 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
                 scope_d,
             )
             return _futu_manage_error(reply, "modify", applied_sequence=sequence)
-        got_qty, got_price = reply.get("qty"), reply.get("price")
+        got_qty, sent_qty, sent_price = reply.get("qty"), reply["sent_qty"], reply["sent_price"]
+        # Same tick on the price grid (a sub-dollar stock tick is 0.0001), never a tolerance.
         confirmed = (
             got_qty is not None
-            and got_price is not None
-            and got_qty == quantity
-            and abs(got_price - price) < Decimal("0.001")
+            and got_qty == sent_qty
+            and futu_orders.tick_price(base_spec, reply.get("price")) == sent_price
         )
         # Settle only on fresh evidence of the new terms; otherwise the
         # amend stays uncertain (a quantity amend keeps max(old, new)).
         if confirmed:
             gate4.settle_modify(
-                submission_id, amend_id, "confirmed", scope_d, new_qty=quantity, new_limit_price=got_price
+                submission_id, amend_id, "confirmed", scope_d, new_qty=sent_qty, new_limit_price=sent_price
             )
         else:
             gate4.settle_modify(submission_id, amend_id, "uncertain", scope_d)
@@ -2710,8 +2782,8 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
             "status": "ok",
             "brokerOrderId": order_id,
             "confirmed": confirmed,
-            "confirmedQuantity": int(got_qty) if confirmed else None,
-            "confirmedPrice": str(got_price) if confirmed else None,
+            "confirmedQuantity": int(sent_qty) if confirmed else None,
+            "confirmedPrice": str(sent_price) if confirmed else None,
             "applied_sequence": sequence,
             "message": "Modify confirmed by Futu"
             if confirmed

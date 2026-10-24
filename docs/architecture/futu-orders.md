@@ -20,7 +20,7 @@ account number; the server resolves it from its config.
 ## Is trading on? `GET /health`
 
 `futu.trading = {"paper": bool, "live": bool}`. True only when the server is not
-read-only, the env is enabled (`XENON_FUTU_TRADING`), the env has an account,
+read-only, the Futu order worker runs, the env is enabled (`XENON_FUTU_TRADING`), the env has an account,
 no account-change veto applies, and for live the unlock secret is well-formed.
 Show order actions for an env only when its value is true. A wrong password
 still reads true; the first REAL order then fails with `FUTU_UNLOCK_FAILED`.
@@ -50,7 +50,9 @@ down → 503 `QUOTE_UNAVAILABLE`, nothing sent) → Futu worker.
 
 Uncertain outcome: the same body as IB `PLACE_OUTCOME_UNKNOWN` (`reason_code`
 `PLACE_OUTCOME_UNKNOWN`, `submission_id`). The order may be live at Futu. The
-client locks the form and never resubmits; the observation pass binds it.
+client locks the form and never resubmits; the observation pass binds it. When
+Futu accepted the order but the confirming read failed, the body also carries
+`brokerOrderId`: the row is UNKNOWN but already cancellable / modifiable.
 
 ## Cancel — `POST /orders/cancel?broker=FUTU&account_env=…`
 
@@ -59,19 +61,25 @@ order in the request scope, else 404 `ORDER_NOT_FOUND` (400
 `ORDER_IDENTIFIER_REQUIRED` when missing).
 
 200: `{"status": "ok", "brokerOrderId", "state", "confirmed": bool, "message"}`.
-`confirmed: false` means sent, not yet reported cancelled; the row stays working
-until the observation pass sees it terminal.
+`confirmed: true` only when Futu reports the order CANCELLED. `confirmed: false`
+with a terminal `state` (FILLED, REJECTED) means the order ended otherwise and was
+not cancelled; with a working state it means sent, not yet reported cancelled (the
+row stays working until the observation pass sees it terminal).
 
 ## Modify — `POST /orders/modify?broker=FUTU&account_env=…`
 
 Body: `{"brokerOrderId", "modifySequence", "newPrice"?, "newQuantity"?}` (one of
 the two at least). `modifySequence` comes from the open-order row and must grow
-(409 `MODIFY_STALE`).
+(409 `MODIFY_STALE`). An omitted field keeps Futu's current value: the server
+reads the order fresh before the send and sends nothing when it cannot.
 
 200: `{"status": "ok", "brokerOrderId", "confirmed": bool, "confirmedQuantity",
-"confirmedPrice", "applied_sequence", "message"}`. `confirmed: false` = sent, new
+"confirmedPrice", "applied_sequence", "message"}`. `confirmed: true` only when a fresh
+read shows the sent quantity and the same price tick. `confirmed: false` = sent, new
 terms not reported yet. After an unconfirmed quantity change every later modify
-gets 409 `MODIFY_PENDING` until an operator resolves it; cancel still works.
+gets 409 `MODIFY_PENDING` (with `applied_sequence`) until an observation pass
+after the send window shows the new quantity, or an operator resolves it; cancel
+still works.
 
 ## Working orders — `GET /orders?broker=FUTU&account_env=…`
 
@@ -94,6 +102,9 @@ gets 409 `MODIFY_PENDING` until an operator resolves it; cancel still works.
 | `FUTU_OPEND_UNREACHABLE` / `FUTU_NOT_READY` | OpenD down, nothing sent | retry later |
 | `FUTU_WORKER_BUSY` / `FUTU_WORKER_STOPPED` | worker full / not running, nothing sent | retry later |
 | `FUTU_SEND_WINDOW_CLOSED` | modify deadline passed, nothing sent | retry |
+| `FUTU_ORDER_UNVERIFIED` | modify: the fresh order read failed or did not show the order, nothing sent | retry later |
+| `FUTU_ORDER_NOT_WORKING` | modify: Futu reports the order terminal, nothing sent | refresh orders |
+| `FUTU_MODIFY_QTY_UNRESERVED` | price-only modify: Futu quantity above the reserved one, nothing sent | refresh orders, retry |
 | `FUTU_UNLOCK_SECRET_MISSING` / `_INVALID` / `FUTU_UNLOCK_FAILED` | REAL unlock failed, nothing sent | operator |
 | `FUTU_PRICE_PRECISION` | price off the tick grid (never moved) | fix price |
 | `FUTU_ORDER_TYPE_UNSUPPORTED` / `FUTU_INVALID_ORDER` / `FUTU_REMARK_TOO_LONG` | body Futu cannot take | fix input |

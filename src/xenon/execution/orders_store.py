@@ -1485,7 +1485,9 @@ def _futu_identity_mismatch(row, obs: FutuOrderObservation) -> str | None:
     return None
 
 
-def _futu_state_values(row, obs: FutuOrderObservation, *, fresh: bool, own: bool) -> dict:
+def _futu_state_values(
+    row, obs: FutuOrderObservation, *, fresh: bool, own: bool, observed_at: datetime | None = None
+) -> dict:
     """Column updates a Futu observation may apply to an existing row.
 
     Only a fresh observation (its read began after the row's last local
@@ -1493,6 +1495,13 @@ def _futu_state_values(row, obs: FutuOrderObservation, *, fresh: bool, own: bool
     external row's quantity; a stale one applies conservative changes only.
     A Xenon row keeps its own quantity and legs; a larger broker quantity is
     kept as `observed_qty` (Gate 4 reserves the max).
+
+    Open amend on a Xenon row: only positive evidence settles it. A fresh read
+    that began after the amend's `pending_amend_send_by` and shows exactly
+    `pending_amend_qty` confirms it (`_reconcile_pending` "confirmed": the
+    quantity becomes the observed one, the amend clears). There is no
+    deadline expiry for Futu: old or other terms keep the amend and its
+    larger reservation.
     """
     values: dict = {}
     state = row.state or ""
@@ -1510,7 +1519,15 @@ def _futu_state_values(row, obs: FutuOrderObservation, *, fresh: bool, own: bool
         new_legs.pop("futu_missing", None)
         if obs.futu_code and not legs.get("futu_code"):
             new_legs["futu_code"] = obs.futu_code
-        if obs.quantity != int(row.quantity or 0) and obs.quantity != legs.get("observed_qty"):
+        quantity = int(row.quantity or 0)
+        send_by = _as_aware(legs.get("pending_amend_send_by"))
+        obs_at = _as_aware(observed_at)
+        if send_by is not None and obs_at is not None and obs_at > send_by:
+            settled, outcome = _reconcile_pending(new_legs, obs.quantity, observed_at=obs_at, fresh=fresh)
+            if outcome == "confirmed":  # never "expired": no Futu deadline rule
+                new_legs, quantity = settled, obs.quantity
+                values["quantity"] = quantity
+        if obs.quantity != quantity and obs.quantity != legs.get("observed_qty"):
             new_legs["observed_qty"] = obs.quantity
         if info is not None:
             new_legs["futu_order"] = info
@@ -1712,7 +1729,7 @@ def mirror_futu_order(
         else:
             own = not row.submission_id.startswith(FUTU_SUBMISSION_PREFIX)
             values = _futu_state_values(
-                row, obs, fresh=is_fresh_observation(observed_at, row.updated_at), own=own
+                row, obs, fresh=is_fresh_observation(observed_at, row.updated_at), own=own, observed_at=observed_at
             )
             if out["fill_skipped"] and row.reason_code != _fill_reason(out["fill_skipped"]):
                 values["reason_code"] = _fill_reason(out["fill_skipped"])
@@ -1882,6 +1899,34 @@ def futu_held_rows(*, broker_account: str, account_env: str, limit: int = 20) ->
         if len(out[reason]["order_ids"]) < limit:
             out[reason]["order_ids"].append(oid)
     return out
+
+
+def bind_futu_order_id(submission_id: str, order_id: str, *, broker_account: str, account_env: str) -> int:
+    """Store the Futu order id of an own place that Futu accepted (its own
+    reply) when no fresh read could bind the row yet. Conditional: only a
+    PENDING / UNKNOWN row of the scope without a broker order id, and only
+    when no other row of the scope carries that id. State is not changed;
+    the observation pass then finds the row by id. Returns the rowcount."""
+    ensure_writable()
+    with get_sync_engine().begin() as conn:
+        _lock_gate4_scope(conn, "FUTU", account_env, broker_account)
+        taken = conn.execute(
+            select(order_submissions.c.submission_id).where(
+                *_futu_scope_conds(account_env, broker_account), order_submissions.c.broker_order_id == order_id
+            )
+        ).first()
+        if taken is not None:
+            return 0
+        return conn.execute(
+            update(order_submissions)
+            .where(
+                *_futu_scope_conds(account_env, broker_account),
+                order_submissions.c.submission_id == submission_id,
+                order_submissions.c.broker_order_id.is_(None),
+                order_submissions.c.state.in_(("PENDING", "UNKNOWN")),
+            )
+            .values(broker_order_id=order_id, updated_at=monotone_updated_at(datetime.now(timezone.utc)))
+        ).rowcount
 
 
 def mark_futu_order_unobserved(order_id: str, *, broker_account: str, account_env: str) -> int:
