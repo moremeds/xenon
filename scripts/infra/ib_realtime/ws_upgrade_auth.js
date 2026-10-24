@@ -64,7 +64,8 @@ function serviceKeyMatches(presented, expected) {
  * @param {{ fetchImpl?: typeof fetch, validateUrl?: string,
  *           origins?: Set<string>, queryApiKey?: string,
  *           internalToken?: string }} [deps]
- * @returns {Promise<{ok:true} | {ok:false, status:number, reason:string}>}
+ * @returns {Promise<{ok:true, auth:"api-key"|"ticket"} |
+ *                   {ok:false, status:number, reason:string}>}
  */
 export async function authorizeUpgrade(req, deps = {}) {
   const fetchImpl = deps.fetchImpl ?? fetch;
@@ -90,7 +91,7 @@ export async function authorizeUpgrade(req, deps = {}) {
     if (!serviceKeyMatches(apiKeyHeader, queryApiKey)) {
       return { ok: false, status: 401, reason: "bad_api_key" };
     }
-    return { ok: true };
+    return { ok: true, auth: "api-key" };
   }
 
   let ticket = null;
@@ -128,5 +129,5 @@ export async function authorizeUpgrade(req, deps = {}) {
   if (!res.ok) {
     return { ok: false, status: 401, reason: "ticket_rejected" };
   }
-  return { ok: true };
+  return { ok: true, auth: "ticket" };
 }

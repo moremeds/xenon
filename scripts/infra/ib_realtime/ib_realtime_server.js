@@ -55,6 +55,10 @@ import { pickEvictable, pickAdmittable } from "./line_budget.js";
 import { LRUCache } from "../../lib/lru-cache.js";
 import { RateLimiter } from "../../lib/rate-limiter.js";
 import { createSubscriberRegistry } from "./subscriber_registry.js";
+import { createLiveness } from "./liveness.js";
+import { createFutuRouting, FUTU_HOLD_DOWN_MS } from "./futu_routing.js";
+import { createFutuQuotesClient } from "./futu_quotes_client.js";
+import { recordMdType, resetMdType } from "./md_type.js";
 import { authorizeUpgrade } from "./ws_upgrade_auth.js";
 import { resolveRelayClientIds } from "./client_id_zone.js";
 
@@ -72,10 +76,6 @@ function resolveIbPort() {
 const DEFAULT_IB_PORT = resolveIbPort();
 const RECONNECT_MS = 5000;
 const SNAPSHOT_TIMEOUT_MS = 5000;
-
-/* ─── Keep-Alive Ping/Pong ─────────────────────────────────────────────── */
-const PING_INTERVAL_MS = 30_000;
-const PONG_TIMEOUT_MS = 65_000; // 30s * 2 + 5s grace
 
 function parseArgs(argv) {
   const args = {
@@ -472,6 +472,7 @@ httpServer.on("upgrade", async (req, socket, head) => {
   }
 
   wss.handleUpgrade(req, socket, head, (ws) => {
+    clientAuth.set(ws, decision.auth);
     wss.emit("connection", ws, req);
   });
 });
@@ -582,10 +583,6 @@ function applyCachedClose(data) {
 
 loadCloseCache();
 
-/* ─── Keep-Alive State ──────────────────────────────────────────────────── */
-const clientLastPong = new Map(); // client → timestamp (ms)
-let pingIntervalTimer = null;
-
 /* ─── Subscriber Registry (identified WS clients via ?id=) ──────────────── */
 const SUBSCRIBER_TTL_MS =
   Number(process.env.IB_REALTIME_SUBSCRIBER_TTL_MS) || 900_000;
@@ -593,6 +590,34 @@ const subscriberRegistry = createSubscriberRegistry({
   ttlMs: SUBSCRIBER_TTL_MS,
 });
 const clientId = new Map(); // ws -> id (only for identified subscribers)
+
+/* ─── Keep-Alive State ──────────────────────────────────────────────────── */
+const liveness = createLiveness({
+  clients,
+  sendAppPing: (client) => sendMessage(client, { type: "ping" }),
+  onAlive: (client, nowMs) => {
+    const sid = clientId.get(client);
+    if (sid) subscriberRegistry.onPong(sid, nowMs);
+  },
+  closeClient: (client) => client.close(),
+  log: console.log,
+});
+
+/* ─── Futu Provider Routing ────────────────────────────────────────────────
+ * Service clients authenticated via X-API-Key may opt into Futu-first quotes
+ * with ?quotes=futu-first on the upgrade URL; every other connection keeps
+ * the IB route. Enabled only when FUTU_QUOTES_URL is set — unset means the
+ * relay behaves exactly as before (no upstream socket, all routes "ib").
+ */
+const FUTU_QUOTES_URL = process.env.FUTU_QUOTES_URL || "";
+const FUTU_RECONCILE_MS = Number(process.env.FUTU_RECONCILE_MS) || 5_000;
+const futuRouting = createFutuRouting({
+  holdDownMs: Number(process.env.FUTU_HOLD_DOWN_MS) || FUTU_HOLD_DOWN_MS,
+});
+const clientAuth = new Map(); // ws -> "api-key" | "ticket" (authorizeUpgrade)
+const clientRoutes = new Map(); // ws -> Map<symbol, "futu"|"ib">
+let futuClient = null;
+let futuReconcileTimer = null;
 // Required shared secret for GET /status — the api service sends it as
 // `X-Status-Token` (constant-time compare, no loopback exception). When empty
 // /status answers 403 to everyone; dev.sh exports an ephemeral token per
@@ -751,10 +776,12 @@ function sendMessage(client, payload) {
   }
 }
 
-function sendToSymbolSubscribers(symbol, payload) {
+function sendToSymbolSubscribers(symbol, payload, route = null) {
   const subscribers = symbolSubscribers.get(symbol);
   if (!subscribers || subscribers.size === 0) return;
+  const now = Date.now();
   for (const client of subscribers) {
+    if (route && futuRouting.routeFor(client, symbol, now) !== route) continue;
     sendMessage(client, payload);
   }
 }
@@ -769,6 +796,7 @@ function sendStatus(client) {
     ib_issue: ibConnectionIssue?.code ?? null,
     ib_status_message: ibConnectionIssue?.operatorMessage ?? null,
     subscriptions,
+    providers: { futu: futuRouting.status() },
   });
 }
 
@@ -815,6 +843,7 @@ function ensureSymbolState(key, ibContract) {
     data: createPriceData(key),
     lastRealTickAt: null, // ms of last freshness-field change; null until first real tick
     lastAccessAt: null, // ms of last subscribe or real tick; LRU heat for line budget
+    mdType: null, // effective IB marketDataType for the live request; null until IB reports
   };
   symbolStates.set(key, state);
   return state;
@@ -822,11 +851,21 @@ function ensureSymbolState(key, ibContract) {
 
 function startLiveSubscription(key, ibContract) {
   if (!ibConnected) return;
+  // Symbols currently served by Futu for every interested client hold no IB
+  // line — the budget admits only IB-preference demand, IB-pinned keys, and
+  // symbols not (yet) Futu-live.
+  if (
+    !futuRouting.ibDemand(key, symbolSubscribers.get(key), Date.now())
+  ) {
+    ensureSymbolState(key, ibContract); // keep contract/state for hydration
+    return;
+  }
 
   const existing = ensureSymbolState(key, ibContract);
   const nextTickerId = (nextRequestId += 1);
   const state = existing;
   state.lastAccessAt = Date.now(); // subscribe counts as access (LRU heat)
+  resetMdType(state); // effective type is per-request; IB re-reports it
 
   if (state.tickerId != null) {
     try {
@@ -878,6 +917,7 @@ function stopLiveSubscription(symbol) {
 
 function cleanupSymbolStateForReconnect() {
   for (const state of symbolStates.values()) {
+    resetMdType(state); // per-request — stale values must not survive resubscribe
     if (state.tickerId != null) {
       try {
         ib.cancelMktData(state.tickerId);
@@ -922,6 +962,13 @@ function subscribeClientToSymbol(client, symbol) {
     clientSymbols.set(client, clientSet);
   }
   clientSet.add(symbol);
+
+  let routes = clientRoutes.get(client);
+  if (!routes) {
+    routes = new Map();
+    clientRoutes.set(client, routes);
+  }
+  routes.set(symbol, futuRouting.routeFor(client, symbol, Date.now()));
 }
 
 function unsubscribeClientFromSymbol(client, symbol) {
@@ -944,18 +991,24 @@ function unsubscribeClientFromSymbol(client, symbol) {
   if (clientSet) {
     clientSet.delete(symbol);
   }
+  clientRoutes.get(client)?.delete(symbol);
+  reconcileFutuRoutes(); // want set and IB demand may have changed
 
   return unsubscribed;
 }
 
 function disconnectClient(client) {
   removeBatchBuffer(client);
-  clientLastPong.delete(client);
+  liveness.detach(client);
   // Depth/tape cleanup must run before the L1 early-return below — a client may
   // subscribe to depth without any L1 symbol (clientSet would be null).
   disconnectClientFromDepth(client);
+  clientAuth.delete(client);
+  futuRouting.removeClient(client);
+  clientRoutes.delete(client);
   const clientSet = clientSymbols.get(client);
   if (!clientSet) {
+    reconcileFutuRoutes();
     return;
   }
 
@@ -977,6 +1030,7 @@ function disconnectClient(client) {
   // evicted-but-still-wanted symbols into the reclaimed capacity rather than
   // leaving them stale until the next unsubscribe/reconnect.
   if (freedALine) fillFreeLines();
+  reconcileFutuRoutes();
 }
 
 function sendSubscribedConfirmation(client, symbols) {
@@ -1398,7 +1452,11 @@ function computeStale(state) {
   return at == null || Date.now() - at > STALE_TICK_MS;
 }
 function withStale(state) {
-  return { ...state.data, stale: computeStale(state) };
+  return {
+    ...state.data,
+    stale: computeStale(state),
+    mdType: state.mdType ?? null,
+  };
 }
 
 /* ─── L1 market-data line budget (LRU) ──────────────────────────────────────
@@ -1450,6 +1508,7 @@ function evictLine(key) {
   }
   requestIdToSymbol.delete(state.tickerId);
   state.tickerId = null;
+  resetMdType(state);
   hydrateAndBroadcast(key); // push stale:true to subscribers
 }
 
@@ -1464,11 +1523,19 @@ function makeRoomForLine(incomingKey) {
   return true;
 }
 
+// Symbols wanted only by Futu-routed clients consume no IB line.
+function demandedLineEntries(now = Date.now()) {
+  return lineEntries().filter((e) => {
+    const subs = symbolSubscribers.get(e.key);
+    return subs && subs.size > 0 && futuRouting.ibDemand(e.key, subs, now);
+  });
+}
+
 // A line just freed — re-admit the hottest evicted-but-still-wanted symbol.
 function admitPendingLine() {
   if (!ibConnected) return;
   if (activeLineCount() >= MAX_CONCURRENT_LINES) return;
-  const key = pickAdmittable(lineEntries());
+  const key = pickAdmittable(demandedLineEntries());
   if (key == null) return;
   const state = symbolStates.get(key);
   if (!state || !state.contract || state.tickerId != null) return;
@@ -1514,7 +1581,10 @@ function hydrateAndBroadcast(symbol) {
   const subscribers = symbolSubscribers.get(symbol);
   if (!subscribers || subscribers.size === 0) return;
   const dataSnapshot = withStale(state);
+  const now = Date.now();
   for (const client of subscribers) {
+    // IB-sourced frames go only to clients whose route for this symbol is IB.
+    if (futuRouting.routeFor(client, symbol, now) !== "ib") continue;
     bufferPriceForClient(client, symbol, dataSnapshot);
   }
 }
@@ -1816,6 +1886,95 @@ function onHistoricalDailyClose(reqId, time, close) {
   }
 }
 
+// Send a client the latest quote for `symbol` from ITS routed source only.
+// Futu-routed: the cached Futu PriceData (nothing yet → silent until the next
+// batch). IB-routed: today's semantics — a withStale() snapshot, but only
+// while IB is connected (as before, no hydration frame when IB is down).
+function hydrateForClient(client, symbol) {
+  const route = futuRouting.routeFor(client, symbol, Date.now());
+  if (route === "futu") {
+    const data = futuRouting.futuData(symbol);
+    if (data) sendMessage(client, { type: "price", symbol, data });
+    return;
+  }
+  if (!ibConnected) return;
+  const state = symbolStates.get(symbol);
+  if (state) {
+    sendMessage(client, {
+      type: "price",
+      symbol,
+      data: withStale(state),
+    });
+  }
+}
+
+// Release a live IB line whose only demand is Futu-routed — the subscribers
+// are all fed from Futu, so the ticker is returned to the budget (no stale
+// broadcast: nobody listening on this symbol consumes IB frames).
+function dropIbLine(symbol) {
+  const state = symbolStates.get(symbol);
+  if (!state || state.tickerId == null) return;
+  try {
+    ib.cancelMktData(state.tickerId);
+  } catch {
+    // Ignore.
+  }
+  requestIdToSymbol.delete(state.tickerId);
+  state.tickerId = null;
+  resetMdType(state);
+  verbose(`futu serves ${symbol} — IB line dropped`);
+}
+
+// Futu -> relay batch: accept a tick only for a symbol this relay currently
+// routes to Futu, then deliver only to the clients routed to Futu for it.
+function onFutuBatch(updates) {
+  if (!updates || typeof updates !== "object") return;
+  const now = Date.now();
+  for (const [symbol, data] of Object.entries(updates)) {
+    if (data == null || typeof data !== "object") continue;
+    if (!futuRouting.futuLive(symbol, now)) continue;
+    const subs = symbolSubscribers.get(symbol);
+    if (!subs || subs.size === 0) continue;
+    const payload = { ...data, source: data.source ?? "futu" };
+    let accepted = false;
+    for (const client of subs) {
+      if (futuRouting.routeFor(client, symbol, now) !== "futu") continue;
+      bufferPriceForClient(client, symbol, payload);
+      accepted = true;
+    }
+    if (accepted) futuRouting.recordTick(symbol, payload);
+  }
+}
+
+// Reconcile routing state with subscriptions and provider health:
+//  1. per-client route transitions — clear the other source's buffered tick
+//     and hydrate from the newly selected source;
+//  2. the IB line budget — drop lines that have no IB demand left;
+//  3. the desired set pushed to the Futu service.
+function reconcileFutuRoutes() {
+  const now = Date.now();
+  for (const [symbol, subs] of symbolSubscribers) {
+    for (const client of subs) {
+      const route = futuRouting.routeFor(client, symbol, now);
+      const routes = clientRoutes.get(client);
+      const prev = routes?.get(symbol);
+      if (prev === route) continue;
+      if (!routes) continue; // unknown client — subscribe path records routes
+      routes.set(symbol, route);
+      clientBatchBuffers.get(client)?.delete(symbol); // obsolete source's tick
+      hydrateForClient(client, symbol);
+    }
+  }
+  for (const [symbol, subs] of symbolSubscribers) {
+    if (futuRouting.ibDemand(symbol, subs, now)) continue;
+    dropIbLine(symbol);
+  }
+  if (ibConnected) fillFreeLines();
+  if (futuClient) {
+    futuClient.setWant(futuRouting.desiredWant(clientSymbols));
+  }
+}
+
 function restoreSubscriptions() {
   // Restore hottest-first (newest lastAccessAt) so that under over-budget the
   // line budget keeps the symbols that were most active before the disconnect
@@ -1840,17 +1999,24 @@ function restoreSubscriptions() {
     const existing = symbolStates.get(key);
     const ibContract = existing?.contract;
     if (!ibContract) continue;
-    if (restored < MAX_CONCURRENT_LINES) {
+    if (
+      restored < MAX_CONCURRENT_LINES &&
+      futuRouting.ibDemand(key, symbolSubscribers.get(key), Date.now())
+    ) {
       startLiveSubscription(key, ibContract);
       restored += 1;
     }
     const state = symbolStates.get(key);
     if (state) {
-      sendToSymbolSubscribers(key, {
-        type: "price",
-        symbol: key,
-        data: withStale(state),
-      });
+      sendToSymbolSubscribers(
+        key,
+        {
+          type: "price",
+          symbol: key,
+          data: withStale(state),
+        },
+        "ib",
+      );
     }
   }
 }
@@ -1880,14 +2046,6 @@ async function handleClientMessage(client, data) {
         ensureSymbolState(symbol, ibContract);
         if (ibConnected) {
           startLiveSubscription(symbol, ibContract);
-          const state = symbolStates.get(symbol);
-          if (state) {
-            sendMessage(client, {
-              type: "price",
-              symbol,
-              data: withStale(state),
-            });
-          }
           // Send cached fundamentals if available
           const fund = fundamentalsStore.get(symbol);
           if (fund) {
@@ -1899,10 +2057,12 @@ async function handleClientMessage(client, data) {
           }
           subscribed.push(symbol);
         }
+        hydrateForClient(client, symbol);
       }
       // Option contract subscriptions
       for (const c of contracts) {
         const key = optionKey(c);
+        futuRouting.pinIbOnly(key); // options never route to Futu
         subscribeClientToSymbol(client, key);
         const ibContract = optionContract(
           c.symbol,
@@ -1913,78 +2073,54 @@ async function handleClientMessage(client, data) {
         ensureSymbolState(key, ibContract);
         if (ibConnected) {
           startLiveSubscription(key, ibContract);
-          const state = symbolStates.get(key);
-          if (state) {
-            sendMessage(client, {
-              type: "price",
-              symbol: key,
-              data: withStale(state),
-            });
-          }
           subscribed.push(key);
         }
+        hydrateForClient(client, key);
       }
       // Index subscriptions (e.g. VIX, VVIX on CBOE)
       for (const idx of indexes) {
         const key = idx.symbol;
+        futuRouting.pinIbOnly(key); // indexes never route to Futu
         subscribeClientToSymbol(client, key);
         const ibContract = indexContract(idx.symbol, idx.exchange);
         ensureSymbolState(key, ibContract);
         if (ibConnected) {
           startLiveSubscription(key, ibContract);
-          const state = symbolStates.get(key);
-          if (state) {
-            sendMessage(client, {
-              type: "price",
-              symbol: key,
-              data: withStale(state),
-            });
-          }
           subscribed.push(key);
         }
+        hydrateForClient(client, key);
       }
       // Forex pairs (live FX conversion, e.g. USD.JPY, USD.KRW on IDEALPRO).
       // Keyed "<base>.<quote>"; emits type:"price" like any symbol.
       for (const fx of forexes) {
         const key = fx.key;
+        futuRouting.pinIbOnly(key); // forex never routes to Futu
         subscribeClientToSymbol(client, key);
         const ibContract = forexContract(fx.base, fx.quote);
         ensureSymbolState(key, ibContract);
         if (ibConnected) {
           startLiveSubscription(key, ibContract);
-          const state = symbolStates.get(key);
-          if (state) {
-            sendMessage(client, {
-              type: "price",
-              symbol: key,
-              data: withStale(state),
-            });
-          }
           subscribed.push(key);
         }
+        hydrateForClient(client, key);
       }
       // Foreign stocks with explicit native exchange/currency (TSEJ/JPY,
       // KRX/KRW). Keyed by bare symbol like SMART/USD stocks, but the contract
       // carries the native venue so IB routes the quote correctly.
       for (const s of stocksMeta) {
         const key = s.symbol;
+        futuRouting.pinIbOnly(key); // non-US native venue never routes to Futu
         subscribeClientToSymbol(client, key);
         const ibContract = stockContract(s.symbol, s.exchange, s.currency);
         ensureSymbolState(key, ibContract);
         if (ibConnected) {
           startLiveSubscription(key, ibContract);
-          const state = symbolStates.get(key);
-          if (state) {
-            sendMessage(client, {
-              type: "price",
-              symbol: key,
-              data: withStale(state),
-            });
-          }
           subscribed.push(key);
         }
+        hydrateForClient(client, key);
       }
       sendSubscribedConfirmation(client, subscribed);
+      reconcileFutuRoutes(); // new symbols change want and IB demand
       return;
     }
     case "unsubscribe": {
@@ -2051,9 +2187,7 @@ async function handleClientMessage(client, data) {
       return;
     }
     case "pong": {
-      clientLastPong.set(client, Date.now());
-      const sid = clientId.get(client);
-      if (sid) subscriberRegistry.onPong(sid, Date.now());
+      liveness.noteAlive(client);
       return;
     }
     case "search": {
@@ -2188,6 +2322,18 @@ function wireIBEvents() {
     scheduleReconnect();
   });
 
+  // IB reports the effective marketDataType per request (we ask for type 4 —
+  // the Live→Delayed→Frozen→Delayed-Frozen cascade — at connect). Record it
+  // per symbol; index acceptance requires mdType === 1 (live).
+  ib.on(EventName.marketDataType, (reqId, mdType) => {
+    const symbol = recordMdType(
+      { requestIdToSymbol, symbolStates, snapshotRequests },
+      reqId,
+      mdType,
+    );
+    if (symbol) verbose(`mdType ${symbol} = ${mdType}`);
+  });
+
   ib.on(EventName.error, (error, code, reqId) => {
     const msg = String(error?.message ?? error);
     // Daily-close historical requests: any error/info on their reqId is terminal
@@ -2252,6 +2398,7 @@ function wireIBEvents() {
         if (state && state.tickerId === tickerId) {
           requestIdToSymbol.delete(tickerId);
           state.tickerId = null;
+          resetMdType(state);
           hydrateAndBroadcast(symbol); // line died → push stale:true
         }
       } else if (tickerId != null) {
@@ -2266,6 +2413,7 @@ function wireIBEvents() {
         if (state && state.tickerId === tickerId) {
           requestIdToSymbol.delete(tickerId);
           state.tickerId = null;
+          resetMdType(state);
           hydrateAndBroadcast(symbol); // line died → push stale:true
         }
       }
@@ -2284,6 +2432,7 @@ function wireIBEvents() {
         if (state && state.tickerId === tickerId) {
           requestIdToSymbol.delete(tickerId);
           state.tickerId = null;
+          resetMdType(state);
           hydrateAndBroadcast(symbol); // push stale:true to subscribers now
         }
       }
@@ -2455,17 +2604,29 @@ wireIBEvents();
 
 wss.on("connection", (client, req) => {
   clients.add(client);
-  clientLastPong.set(client, Date.now());
+  liveness.attach(client);
 
   let subId = null;
+  let quotesParam = null;
   try {
-    subId = new URL(
+    const u = new URL(
       req.url || "/",
       `http://${req.headers.host || "localhost"}`,
-    ).searchParams.get("id");
+    );
+    subId = u.searchParams.get("id");
+    quotesParam = u.searchParams.get("quotes");
   } catch {
     subId = null;
   }
+  // ?quotes=futu-first is honoured only for X-API-Key-authenticated upgrades.
+  // Ticket-authed connections (browsers and server-side ticket clients) always
+  // keep the IB route. Other query params are preserved and ignored as today.
+  futuRouting.setPref(
+    client,
+    clientAuth.get(client) === "api-key" && quotesParam === "futu-first"
+      ? "futu-first"
+      : "ib",
+  );
   if (subId) {
     clientId.set(client, subId);
     subscriberRegistry.onConnect(subId, Date.now());
@@ -2519,25 +2680,63 @@ wss.on("connection", (client, req) => {
 ib.connect();
 startBatchFlush();
 
-/* ─── Keep-Alive Ping Interval ─────────────────────────────────────────── */
-pingIntervalTimer = setInterval(() => {
-  const now = Date.now();
-  for (const client of clients) {
-    sendMessage(client, { type: "ping" });
-    const lastPong = clientLastPong.get(client);
-    if (lastPong !== undefined && now - lastPong > PONG_TIMEOUT_MS) {
-      console.log(
-        `Closing unresponsive client (no pong for ${Math.round((now - lastPong) / 1000)}s)`,
-      );
-      clientLastPong.delete(client);
-      try {
-        client.close();
-      } catch {
-        /* ignore */
+/* ─── Futu Quote Provider ──────────────────────────────────────────────────
+ * When FUTU_QUOTES_URL is set, connect upstream, push the desired set, apply
+ * assign partitions, and fail over to the IB line budget on any down signal.
+ * Unset → no upstream socket and every client routes IB (unchanged behavior).
+ */
+futuReconcileTimer = setInterval(reconcileFutuRoutes, FUTU_RECONCILE_MS);
+if (FUTU_QUOTES_URL) {
+  futuClient = createFutuQuotesClient({
+    url: FUTU_QUOTES_URL,
+    pingIntervalMs: Number(process.env.FUTU_PING_INTERVAL_MS) || undefined,
+    pongTimeoutMs: Number(process.env.FUTU_PONG_TIMEOUT_MS) || undefined,
+    healthDeadlineMs:
+      Number(process.env.FUTU_HEALTH_DEADLINE_MS) || undefined,
+    reconnectMs: Number(process.env.FUTU_RECONNECT_MS) || undefined,
+    log: (msg) => verbose(`[futu] ${msg}`),
+    onSocket: (open) => {
+      futuRouting.noteSocket(open);
+      if (open) {
+        futuClient?.setWant(futuRouting.desiredWant(clientSymbols));
+      } else {
+        reconcileFutuRoutes();
       }
-    }
-  }
-}, PING_INTERVAL_MS);
+      broadcastStatus();
+    },
+    onAssign: (assign) => {
+      const { entered, left, ignored } = futuRouting.applyAssign(
+        assign,
+        Date.now(),
+        futuClient?.sentGen() ?? 0,
+      );
+      if (!ignored) {
+        verbose(
+          `[futu] assign gen=${assign.gen} ok+=${entered.length} ok-=${left.length}`,
+        );
+      }
+      reconcileFutuRoutes();
+    },
+    onBatch: onFutuBatch,
+    onHealth: (health) => {
+      futuRouting.noteHealth(health);
+      reconcileFutuRoutes();
+      broadcastStatus();
+    },
+    onDown: (reason) => {
+      console.log(
+        `futu-quotes down (${reason}) — affected symbols fall back to the IB line budget`,
+      );
+      futuRouting.noteDown(reason);
+      reconcileFutuRoutes();
+      broadcastStatus();
+    },
+  });
+  futuClient.start();
+}
+
+/* ─── Keep-Alive Ping Interval ─────────────────────────────────────────── */
+liveness.start();
 
 statusBroadcastTick = setInterval(() => {
   if (ibConnected) return;
@@ -2592,11 +2791,13 @@ process.on("SIGINT", () => {
   if (statusBroadcastTick) {
     clearInterval(statusBroadcastTick);
   }
-  stopBatchFlush();
-  if (pingIntervalTimer) {
-    clearInterval(pingIntervalTimer);
-    pingIntervalTimer = null;
+  if (futuReconcileTimer) {
+    clearInterval(futuReconcileTimer);
+    futuReconcileTimer = null;
   }
+  futuClient?.stop();
+  stopBatchFlush();
+  liveness.stop();
   if (staleCheckTimer) {
     clearInterval(staleCheckTimer);
     staleCheckTimer = null;

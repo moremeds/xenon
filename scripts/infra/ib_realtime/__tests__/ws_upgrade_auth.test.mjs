@@ -83,7 +83,7 @@ test("allowed browser Origin + valid ticket -> accepted", async () => {
     makeReq({ url: "/?ticket=t1", origin: "http://localhost:3000" }),
     DEPS,
   );
-  assert.deepEqual(d, { ok: true });
+  assert.deepEqual(d, { ok: true, auth: "ticket" });
 });
 
 test("absent Origin (server-side ws client) + valid ticket -> accepted", async () => {
@@ -114,7 +114,7 @@ test("correct X-API-Key with no Origin -> accepted without ticket", async () => 
     origins: ORIGINS,
     queryApiKey: "svc-key-1",
   });
-  assert.deepEqual(d, { ok: true });
+  assert.deepEqual(d, { ok: true, auth: "api-key" });
   assert.equal(fetchCalled, false); // no ticket validation call made
 });
 
@@ -170,7 +170,7 @@ test("X-API-Key + allowed Origin + valid ticket -> ticket path accepts", async (
       queryApiKey: "svc-key-1",
     },
   );
-  assert.deepEqual(d, { ok: true });
+  assert.deepEqual(d, { ok: true, auth: "ticket" }); // ticket path, not key path
 });
 
 test("XENON_QUERY_API_KEY unset -> key path disabled", async () => {
