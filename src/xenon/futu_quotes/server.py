@@ -410,6 +410,7 @@ class FutuQuotesService:
             self._kick()
             return
         code = ad.state(sym).code
+        ad.subscribe_issued(sym)  # uncertain from here on ⇒ counted as held
         try:
             res = await self.opend.subscribe([code])
         except OpenDDownError:
@@ -459,7 +460,10 @@ class FutuQuotesService:
             err = res.get(code)
             ad.unsubscribe_result(sym, err, None if err is None else classify_unsubscribe_error(err))
         if not ad.state(sym).subscribed:
+            # Released: its buffered quote belongs to the old subscription —
+            # drop it now, before an evaluation can resubscribe the symbol.
             self.highwater.reset(sym)
+            self.batcher.drop(sym)
         self._kick()
 
     async def _op_session(self, op: _Op) -> None:

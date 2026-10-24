@@ -499,6 +499,9 @@ class FakeOpenD:
         self.quota_calls = 0
         self.subscribe_errors: dict[str, str] = {}
         self.subscribe_raise: dict[str, Exception] = {}
+        # Lost reply: OpenD records the subscription, then the caller gets
+        # this exception (raised) or error string (returned) instead.
+        self.subscribe_lost_reply: dict[str, object] = {}
         self.unsubscribe_errors: list[str] = []
         self.unsubscribe_raise: Exception | None = None
         # Entry hooks: ``hooks[method](n, codes)`` is awaited at the START of
@@ -578,6 +581,13 @@ class FakeOpenD:
         return out
 
     def _do_subscribe(self, c: str):
+        if c in self.subscribe_lost_reply:
+            lost = self.subscribe_lost_reply.pop(c)
+            self.subscribed.add(c)
+            self.own_used = len(self.subscribed)
+            if isinstance(lost, Exception):
+                raise lost
+            return lost
         if c in self.subscribe_raise:
             raise self.subscribe_raise.pop(c)
         if c in self.subscribe_errors:
@@ -1783,3 +1793,128 @@ async def test_generic_snapshot_error_is_retryable_not_unknown():
     await svc.tick_unsubscribes_once()
     await svc.drain()
     assert sorted(ws.last("assign")["ok"]) == ["AAPL", "MSFT"]
+
+
+# ---------------------------------------------------------------------------
+# Astra round-3 regressions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "lost",
+    [
+        pytest.param("Timeout", id="error-string"),  # real adapter: per-code string
+        pytest.param(opend_mod.OpenDTransientError("timed out"), id="raised"),
+    ],
+)
+async def test_lost_subscribe_reply_keeps_slot_held(lost):
+    """R235-5: OpenD accepted AAPL but the reply was lost. AAPL stays
+    believed held: MSFT is never admitted into its slot at cap 1, and AAPL
+    is unsubscribed after the normal grace once demand moves away."""
+    clock = Clock(1000.0)
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=5, own_used=0, total_used=0)
+    fake.subscribe_lost_reply["US.AAPL"] = lost
+    svc = await _settled_service(fake, clock=clock, quota_cap=1)
+    ws = FakeWS()
+    await svc.on_ws_connect(ws)
+    await _want(svc, ws, 1, ["AAPL"])
+    await svc.drain()
+    assert "US.AAPL" in fake.subscribed  # provider holds it
+    assert not svc.admission.is_ok("AAPL")
+
+    await _want(svc, ws, 2, ["MSFT"])  # demand moves before the retry
+    await svc.drain()
+    assert fake.subscribe_calls.count("US.MSFT") == 0
+    assert {"symbol": "MSFT", "reason": "quota"} in ws.last("assign")["rejected"]
+    assert svc.admission.controlled_used() <= svc.admission.ceiling()
+
+    for _ in range(4):  # past lifetime + grace
+        clock.advance(40)
+        await svc.tick_unsubscribes_once()
+        await svc.drain()
+    assert fake.unsubscribe_calls == ["US.AAPL"]
+    assert "US.AAPL" not in fake.subscribed
+    clock.advance(200)  # MSFT's quota backoff expires; the slot is free
+    await svc.tick_unsubscribes_once()
+    await svc.drain()
+    assert svc.admission.is_ok("MSFT")
+    assert fake.subscribed == {"US.MSFT"}
+
+
+@pytest.mark.asyncio
+async def test_late_old_session_success_keeps_ownership():
+    """R235-5: a session-A subscribe that succeeds after the reconnect must
+    not certify session B, but its provider-held slot stays owned: AAPL is
+    reconfirmed (no second slot) instead of being stuck at rejected/quota."""
+    clock = Clock(1000.0)
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=1, own_used=0, total_used=0)
+    gate_a = asyncio.Event()
+
+    async def sub_hook(n, codes):
+        if n == 1:
+            await gate_a.wait()
+
+    fake.hooks["subscribe"] = sub_hook
+    svc = await _settled_service(fake, clock=clock, quota_cap=1)
+    ws = FakeWS()
+    await svc.on_ws_connect(ws)
+    await _want(svc, ws, 1, ["AAPL"])
+    await _until(lambda: fake.entered.get("subscribe", 0) >= 1)
+
+    fake.drop()
+    await fake.connect()
+    fake.remain = 0  # truthful after AAPL lands: own_used=1, remain=0
+    rec = asyncio.create_task(svc.opend_recovered())
+    await svc.drain(timeout=0.05)
+    gate_a.set()  # old-session success; OpenD retains AAPL
+    await rec
+    await svc.drain()
+
+    clock.advance(500)
+    await svc.refresh_quota_once()
+    await svc.tick_unsubscribes_once()
+    await svc.drain()
+    assert svc.admission.is_ok("AAPL")
+    assert fake.subscribe_calls.count("US.AAPL") == 2  # original + reconfirm
+    assert svc.admission.own_used() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "not_subscribed"])
+async def test_unsub_release_drops_buffer_before_resubscribe(outcome):
+    """R235-6: an in-flight unsubscribe completes after a re-add. Releasing
+    the subscription drops its buffered tick at once, so the resubscribe
+    cannot flush a quote from the released subscription."""
+    clock = Clock(1000.0)
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS)
+    svc = await _settled_service(fake, clock=clock)
+    ws = FakeWS()
+    await svc.on_ws_connect(ws)
+    await _want(svc, ws, 1, ["AAPL", "MSFT"])
+    await svc.drain()
+    clock.advance(200)
+    await _want(svc, ws, 2, ["MSFT"])  # AAPL unwanted at t=1200
+    await svc.drain()
+    clock.advance(61)  # t=1261: due
+
+    reply = asyncio.Event()
+
+    async def unsub_hook(n, codes):
+        await reply.wait()  # past the pre-check: the call is at OpenD
+        if outcome == "not_subscribed":
+            fake.subscribed.discard("US.AAPL")
+
+    fake.hooks["unsubscribe"] = unsub_hook
+    await svc.tick_unsubscribes_once()
+    await _until(lambda: fake.entered.get("unsubscribe", 0) >= 1)
+    await _want(svc, ws, 3, ["AAPL", "MSFT"])  # re-add while in flight
+    await svc.drain(timeout=0.05)
+    fake.push([_raw_row("US.AAPL", 123.45)])
+    reply.set()
+    await svc.drain()
+    assert fake.subscribe_calls.count("US.AAPL") == 2  # resubscribed
+    assert svc.admission.is_ok("AAPL")
+    clock.advance(0.2)
+    await svc.flush_now()
+    assert ws.frames("batch") == []

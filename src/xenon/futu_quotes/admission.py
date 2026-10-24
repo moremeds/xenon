@@ -35,6 +35,8 @@ PENDING_REASONS = ("subscribing", "session", "opend_down", "backoff")
 REJECTED_REASONS = ("quota", "unknown_symbol", "not_supported", "provider_error")
 
 _OPEN_US_STATES = frozenset({"MORNING", "AFTERNOON"})
+# Subscribe answers that prove OpenD holds nothing; anything else is uncertain.
+_DEFINITE_SUB_REJECTIONS = frozenset({"quota", "unknown_symbol", "not_supported"})
 
 
 def futu_code(symbol: str) -> str:
@@ -460,11 +462,24 @@ class Admission:
             st.retry_at = self.now() + self._backoff(st)
             st.backoff_step += 1
 
+    def subscribe_issued(self, symbol: str) -> None:
+        """A subscribe is about to reach the SDK: from here its effect at
+        OpenD is uncertain until a definite answer arrives, so the symbol is
+        believed HELD (counted, not ready). A lost reply, a timeout, a down
+        error or a stale-session result therefore never frees the slot; the
+        record is released only by a definite rejection or an unsubscribe."""
+        st = self.state(symbol)
+        if st.subscribed_at is None:
+            st.subscribed_at = self.now()
+
     def subscribe_result(self, symbol: str, err: Optional[str], reason: Optional[str] = None) -> None:
         """Record a provider subscribe outcome for the current session. A
         late success still lands: the subscription is real at OpenD whether
-        or not the symbol is still wanted. A failed reconfirm keeps the
-        symbol held (counted) and retries after backoff."""
+        or not the symbol is still wanted. Only a definite rejection
+        (``quota`` / ``unknown_symbol`` / ``not_supported``) releases the
+        held record; any other failure is uncertain and keeps the symbol
+        held (counted, not ready) — it is reconfirmed while wanted, else
+        unsubscribed through the normal grace."""
         st = self.state(symbol)
         st.op = None
         if err is None:
@@ -480,6 +495,11 @@ class Admission:
         if reason == "unknown_symbol":
             st.verify = "unknown_symbol"
         st.rejected_reason = reason
+        if reason in _DEFINITE_SUB_REJECTIONS:
+            st.subscribed_at = None  # OpenD said no: it holds nothing
+            st.ready_epoch = None
+        elif st.subscribed_at is None:
+            st.subscribed_at = self.now()  # uncertain ⇒ held
         if reason == "quota":
             self.refresh_quota_requested = True
             st.retry_at = self.now() + self._backoff(st)

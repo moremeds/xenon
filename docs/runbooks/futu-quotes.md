@@ -81,11 +81,16 @@ Liveness uses WebSocket protocol ping/pong: ping every 10 s, pong timeout
   not mark the current session down. An old-session SDK call that is
   already in flight still holds the queue until it returns (bounded by the
   SDK call timeout).
-- Ownership: a subscription is counted against the ceiling from its
-  successful subscribe until an unsubscribe succeeds or OpenD says it is
-  not subscribed. Disconnects, failed quota refreshes and failed
-  unsubscribes do not release it; failed unsubscribes retry with bounded
-  backoff. After a reconnect a counted, wanted symbol is not `ok` until a
+- Ownership: a symbol is counted against the ceiling ("held") from the
+  moment its subscribe is sent. Only a definite rejection (`quota`,
+  `unknown_symbol`, `not_supported`) in the current session, a successful
+  unsubscribe, or an unsubscribe answered "not subscribed" releases it. An
+  uncertain outcome (timeout, lost or undecodable reply, down error, any
+  other provider error) and a late success from an old session keep it
+  held but not ready. Disconnects, failed quota refreshes and failed
+  unsubscribes do not release it either; failed unsubscribes retry with
+  bounded backoff. A held symbol that left demand is unsubscribed through
+  the normal lifetime and grace. After a reconnect a counted, wanted symbol is not `ok` until a
   subscribe succeeds in the new session (reconfirm). The reconfirm uses
   no second quota unit, retries with backoff until it succeeds or the
   symbol is released, and its slot is never given to a new symbol.
@@ -98,8 +103,9 @@ Liveness uses WebSocket protocol ping/pong: ping every 10 s, pong timeout
   while OpenD is down, or before the reconfirm, is dropped by the `ok`
   check.
 - Buffered quotes are dropped at the transition that removes them from
-  `ok`: a `want` that removes the symbol, relay-owner replacement or close,
-  session close, and OpenD loss or reconnect. The flush also re-checks
+  `ok`: a `want` that removes the symbol, an unsubscribe result that
+  releases it (with its high-water reset), relay-owner replacement or
+  close, session close, and OpenD loss or reconnect. The flush also re-checks
   `ok`.
 - Snapshot verification: a failed multi-code batch call is retried one
   code at a time (OpenD reports whole-call errors only, so one invalid code
