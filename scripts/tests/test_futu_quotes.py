@@ -2072,3 +2072,23 @@ async def test_terminal_rejection_after_uncertain_attempt_keeps_progress(reject)
     assert fake.unsubscribe_calls == ["US.AAPL"]
     assert svc.admission.is_ok("MSFT")
     assert fake.subscribed == {"US.MSFT"}
+
+
+def test_healthz_answers_http_without_taking_the_relay_slot():
+    """The compose healthcheck GETs /healthz: 200, no WS upgrade, no owner change."""
+    import urllib.request
+
+    from websockets.asyncio.server import serve
+
+    from xenon.futu_quotes.server import healthz
+
+    async def scenario():
+        svc = FutuQuotesService(FakeOpenD())
+        async with serve(svc.ws_entry, "127.0.0.1", 0, process_request=healthz) as srv:
+            port = srv.sockets[0].getsockname()[1]
+            url = f"http://127.0.0.1:{port}/healthz"
+            with await asyncio.to_thread(urllib.request.urlopen, url, timeout=2) as r:
+                assert r.status == 200
+        assert svc.conn is None
+
+    asyncio.run(scenario())

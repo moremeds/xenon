@@ -5,6 +5,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+- **futu-quotes healthcheck without log noise.** The service answers plain HTTP `GET /healthz` with 200 through the websockets `process_request` hook (no upgrade, the relay connection is untouched). `deploy/compose.prod.yml` probes `/healthz` instead of a bare TCP connect, which made websockets log a handshake traceback every 30 s. Compose change: stage the new file per `deploy/README.md` section A on the next deploy.
+
 ## [0.15.0] — 2026-10-24
 
 Summary: argon's live quotes can come from Futu instead of IB (new `futu-quotes` service + relay per-client routing, protocol-ping liveness); Futu order capability groundwork (default off, no Futu order path).
