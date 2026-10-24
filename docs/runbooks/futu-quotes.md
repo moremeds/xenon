@@ -82,9 +82,12 @@ Liveness uses WebSocket protocol ping/pong: ping every 10 s, pong timeout
   already in flight still holds the queue until it returns (bounded by the
   SDK call timeout).
 - Ownership: a symbol is counted against the ceiling ("held") from the
-  moment its subscribe is sent. Only a definite rejection (`quota`,
-  `unknown_symbol`, `not_supported`) in the current session, a successful
-  unsubscribe, or an unsubscribe answered "not subscribed" releases it. An
+  moment its subscribe is sent. A successful unsubscribe, or an
+  unsubscribe answered "not subscribed", releases it. A definite rejection
+  (`quota`, `unknown_symbol`, `not_supported`) in the current session
+  releases only the provisional slot of a fresh admission; it never
+  releases ownership from an earlier attempt (a reconfirm, or a previously
+  uncertain subscribe), which stays held and is retried. An
   uncertain outcome (timeout, lost or undecodable reply, down error, any
   other provider error) and a late success from an old session keep it
   held but not ready. Disconnects, failed quota refreshes and failed

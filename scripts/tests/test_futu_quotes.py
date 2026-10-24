@@ -1349,7 +1349,9 @@ async def test_stale_session_subscribe_cannot_certify_new_session():
     await svc.drain()
 
     st = svc.admission.state("AAPL")
-    assert st.subscribed_at is None
+    # A's late success is possible ownership (held, not ready); B's
+    # rejection does not erase it — only an unsubscribe releases it.
+    assert st.subscribed and st.ready_epoch != svc.admission.epoch
     assert not svc.admission.is_ok("AAPL")
     last = ws.last("assign")
     assert "AAPL" not in last["ok"]
@@ -1918,3 +1920,78 @@ async def test_unsub_release_drops_buffer_before_resubscribe(outcome):
     clock.advance(0.2)
     await svc.flush_now()
     assert ws.frames("batch") == []
+
+
+# ---------------------------------------------------------------------------
+# Astra round-4 regressions: a rejected reconfirm keeps prior ownership
+# ---------------------------------------------------------------------------
+
+
+async def _held_aapl_then_rejected_reconfirm(clock: Clock, *, quota_fails: bool):
+    """Cap 1: AAPL admitted; reconnect with OpenD retaining AAPL; the
+    reconfirm is rejected "subscription quota limit exceeded"."""
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=1, own_used=0, total_used=0)
+    svc = await _settled_service(fake, clock=clock, quota_cap=1)
+    ws = FakeWS()
+    await svc.on_ws_connect(ws)
+    await _want(svc, ws, 1, ["AAPL"])
+    await svc.drain()
+    assert svc.admission.is_ok("AAPL")
+
+    fake.remain = 0  # truthful: own_used=1, remain=0
+    if quota_fails:
+        fake.quota_raise = OpenDProviderError("quota unavailable")
+    fake.drop()
+    await fake.connect()
+    fake.subscribe_errors["US.AAPL"] = "subscription quota limit exceeded"
+    await svc.opend_recovered()
+    await svc.drain()
+    assert fake.subscribe_calls.count("US.AAPL") == 2  # rejected reconfirm
+    assert "US.AAPL" in fake.subscribed  # the rejection removed nothing
+    assert svc.admission.state("AAPL").subscribed  # prior ownership kept
+    return fake, svc, ws
+
+
+@pytest.mark.asyncio
+async def test_rejected_reconfirm_keeps_ownership_and_retries():
+    """R235-5 (a): truthful own_used=1/remain=0 — after the backoff AAPL is
+    reconfirmed and ok, not stuck at rejected/quota."""
+    clock = Clock(1000.0)
+    fake, svc, ws = await _held_aapl_then_rejected_reconfirm(clock, quota_fails=False)
+    clock.advance(500)
+    await svc.tick_unsubscribes_once()
+    await svc.drain()
+    assert fake.subscribe_calls.count("US.AAPL") == 3
+    assert svc.admission.is_ok("AAPL")
+    assert svc.admission.own_used() == 1
+
+
+@pytest.mark.asyncio
+async def test_rejected_reconfirm_unsubscribed_before_new_admission():
+    """R235-5 (b): quota refresh fails, reconfirm rejected, demand replaced
+    by MSFT — AAPL is unsubscribed after its grace before MSFT is admitted;
+    OpenD never holds both."""
+    clock = Clock(1000.0)
+    fake, svc, ws = await _held_aapl_then_rejected_reconfirm(clock, quota_fails=True)
+    held_at_msft: list[set] = []
+
+    async def sub_hook(n, codes):
+        if codes == ["US.MSFT"]:
+            held_at_msft.append(set(fake.subscribed))
+
+    fake.hooks["subscribe"] = sub_hook
+    await _want(svc, ws, 2, ["MSFT"])
+    await svc.drain()
+    assert fake.subscribe_calls.count("US.MSFT") == 0
+
+    clock.advance(500)
+    await svc.tick_unsubscribes_once()
+    await svc.drain()
+    assert fake.unsubscribe_calls == ["US.AAPL"]
+    assert "US.AAPL" not in fake.subscribed
+    clock.advance(200)  # MSFT's quota backoff expires
+    await svc.tick_unsubscribes_once()
+    await svc.drain()
+    assert svc.admission.is_ok("MSFT")
+    assert fake.subscribed == {"US.MSFT"}
+    assert held_at_msft and all("US.AAPL" not in h for h in held_at_msft)

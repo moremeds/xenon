@@ -71,6 +71,10 @@ class SymbolState:
     # held-but-not-ready wanted symbol needs a reconfirm; that intent is
     # derived from state, so it survives failed or declined attempts.
     ready_epoch: Optional[int] = None
+    # The held record exists only because of the subscribe now in flight (a
+    # fresh admission). A definite rejection may release only such a
+    # provisional slot, never ownership from an earlier attempt.
+    provisional: bool = False
     rejected_reason: Optional[str] = None
     retry_at: float = 0.0
     backoff_step: int = 0
@@ -469,19 +473,23 @@ class Admission:
         error or a stale-session result therefore never frees the slot; the
         record is released only by a definite rejection or an unsubscribe."""
         st = self.state(symbol)
-        if st.subscribed_at is None:
+        st.provisional = st.subscribed_at is None
+        if st.provisional:
             st.subscribed_at = self.now()
 
     def subscribe_result(self, symbol: str, err: Optional[str], reason: Optional[str] = None) -> None:
         """Record a provider subscribe outcome for the current session. A
         late success still lands: the subscription is real at OpenD whether
-        or not the symbol is still wanted. Only a definite rejection
-        (``quota`` / ``unknown_symbol`` / ``not_supported``) releases the
-        held record; any other failure is uncertain and keeps the symbol
+        or not the symbol is still wanted. A definite rejection (``quota``
+        / ``unknown_symbol`` / ``not_supported``) releases only a
+        provisional slot taken by this attempt; ownership from an earlier
+        attempt (reconfirm, or a previously uncertain subscribe) stays held
+        and is retried. Any other failure is uncertain and keeps the symbol
         held (counted, not ready) — it is reconfirmed while wanted, else
         unsubscribed through the normal grace."""
         st = self.state(symbol)
         st.op = None
+        provisional, st.provisional = st.provisional, False
         if err is None:
             st.subscribed_at = self.now()
             st.ready_epoch = self.epoch
@@ -495,8 +503,8 @@ class Admission:
         if reason == "unknown_symbol":
             st.verify = "unknown_symbol"
         st.rejected_reason = reason
-        if reason in _DEFINITE_SUB_REJECTIONS:
-            st.subscribed_at = None  # OpenD said no: it holds nothing
+        if reason in _DEFINITE_SUB_REJECTIONS and provisional:
+            st.subscribed_at = None  # OpenD refused this fresh admission
             st.ready_epoch = None
         elif st.subscribed_at is None:
             st.subscribed_at = self.now()  # uncertain ⇒ held
