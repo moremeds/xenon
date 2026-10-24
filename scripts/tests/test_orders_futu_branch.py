@@ -620,15 +620,62 @@ def test_futu_price_only_modify_sends_the_broker_quantity(futu):
     assert (kw["qty"], kw["price"]) == (1, 500.1)  # not the stored quantity 2
 
 
-def test_futu_price_only_modify_never_sends_an_unreserved_quantity(futu):
+def _reserved(sid):
+    """What Gate 4 reserves for this row now: max(qty incl. observed_qty, pending_amend_qty)."""
+    from xenon.execution import gate4
+
+    o = gate4.order_from_row(_row(sid), filled_total=0, filled_after=0)
+    return max(o.qty, o.pending_amend_qty or 0)
+
+
+def test_futu_price_only_modify_reserves_the_outgoing_quantity_against_a_lowering_observation(futu):
+    """Astra R2-F1: row qty 2, observed 10, price-only modify; an observation
+    lowers observed_qty to 5 before the send. The send must carry a quantity
+    that begin_modify reserved under the scope lock."""
     sid, oid = _placed(futu)
-    futu.ctx.book[oid]["qty"] = 5.0  # raised in the Futu app; Gate 4 reserves 2
+    futu.ctx.book[oid]["qty"] = 10.0  # raised in the Futu app
+    fo.run_pass(SCOPE, futu.ctx, resolve_meta=resolver(), audit=False)
+    assert _row(sid).legs["observed_qty"] == 10 and _reserved(sid) == 10
+    at_send = {}
+    send = futu.ctx.modify_order
+
+    def lowered_then_send(**kw):
+        futu.ctx.book[oid]["qty"] = 5.0  # cut in the app; observed before Xenon's send
+        fo.run_pass(SCOPE, futu.ctx, resolve_meta=resolver(), audit=False)
+        at_send.update(observed=_row(sid).legs["observed_qty"], reserved=_reserved(sid))
+        return send(**kw)
+
+    futu.ctx.modify_order = lowered_then_send
+    futu.ctx.modify_mode = "ignore"  # unconfirmed: the reservation must outlive the reply
 
     resp = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newPrice": 500.1, "modifySequence": 1})
 
-    assert resp.status_code == 409 and resp.json()["reason_code"] == "FUTU_MODIFY_QTY_UNRESERVED"
+    assert resp.status_code == 200 and resp.json()["confirmed"] is False, resp.text
+    [kw] = _modifies(futu)
+    assert at_send["observed"] == 5  # the observation did lower observed_qty
+    assert kw["qty"] == 10 and at_send["reserved"] >= kw["qty"]  # the send stays reserved
+    assert _row(sid).legs["pending_amend_qty"] == 10 and _reserved(sid) == 10
+
+
+def test_futu_modify_sends_nothing_when_gate4_refuses_the_outgoing_quantity(futu, monkeypatch):
+    from xenon.execution import gate4
+
+    sid, oid = _placed(futu)
+    futu.ctx.book[oid]["qty"] = 5.0
+    seen = []
+
+    def refuse(submission_id, new_qty, scope):
+        seen.append(new_qty)
+        return gate4.ModifyReservationOutcome(accept=False, reasons=["uncovered_short_call:SPY"])
+
+    monkeypatch.setattr(gate4, "begin_modify", refuse)
+
+    resp = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newPrice": 500.1, "modifySequence": 1})
+
+    assert resp.status_code == 400 and resp.json()["detail"]["amend_outcome"] == "not_sent", resp.text
+    assert resp.json()["detail"]["applied_sequence"] == 1
+    assert seen == [5]  # Gate 4 checked the full outgoing (broker) quantity, also price-only
     assert _modifies(futu) == []
-    assert _row(sid).legs.get("pending_amend_id") is None  # proven unsent: amend released
 
 
 def test_futu_quantity_only_modify_sends_the_broker_price(futu):
@@ -677,38 +724,23 @@ def _age_amend(sid):
         conn.execute(update(order_submissions).where(order_submissions.c.submission_id == sid).values(legs=legs))
 
 
-def test_futu_pending_amend_clears_only_on_a_fresh_pass_with_the_new_quantity(futu):
+def test_futu_pending_amend_is_not_cleared_by_an_observation_pass(futu):
+    """Astra R2-F2: a pass read after send_by does not prove the SDK can no
+    longer dispatch the modify, so no pass confirms or expires the amend."""
     sid, oid = _placed(futu)
     futu.ctx.modify_mode = "ignore"
     resp = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newQuantity": 5, "modifySequence": 1})
     assert resp.json()["confirmed"] is False
     _age_amend(sid)
+    futu.ctx.book[oid]["qty"] = 5.0  # Futu shows the pending quantity
 
-    fo.run_pass(SCOPE, futu.ctx, resolve_meta=resolver(), audit=False)  # Futu still shows 2: no expiry
-
-    row = _row(sid)
-    assert row.quantity == 2 and row.legs["pending_amend_qty"] == 5
-    blocked = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newPrice": 500.1, "modifySequence": 2})
-    assert blocked.status_code == 409 and blocked.json()["reason_code"] == "MODIFY_PENDING"
-
-    futu.ctx.book[oid]["qty"] = 5.0  # Futu applied the amend late
     fo.run_pass(SCOPE, futu.ctx, resolve_meta=resolver(), audit=False)
 
     row = _row(sid)
-    assert row.quantity == 5 and row.legs.get("pending_amend_qty") is None and row.legs.get("pending_amend_id") is None
-    resp = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newPrice": 500.1, "modifySequence": 3})
-    assert resp.status_code == 200, resp.text
-
-
-def test_futu_pending_amend_needs_a_read_after_send_by(futu):
-    sid, oid = _placed(futu)
-    futu.ctx.modify_mode = "ignore"
-    _post(futu, "/orders/modify", {"brokerOrderId": oid, "newQuantity": 5, "modifySequence": 1})
-    futu.ctx.book[oid]["qty"] = 5.0
-
-    fo.run_pass(SCOPE, futu.ctx, resolve_meta=resolver(), audit=False)  # send window still open
-
-    assert _row(sid).legs["pending_amend_qty"] == 5
+    assert row.quantity == 2 and row.legs["pending_amend_qty"] == 5 and row.legs["pending_amend_id"]
+    blocked = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newPrice": 500.1, "modifySequence": 2})
+    assert blocked.status_code == 409 and blocked.json()["reason_code"] == "MODIFY_PENDING"
+    assert _post(futu, "/orders/cancel", {"brokerOrderId": oid}).status_code == 200  # cancel still works
 
 
 def test_futu_accepted_place_without_a_fresh_read_keeps_the_order_id(futu):

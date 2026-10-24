@@ -71,15 +71,17 @@ row stays working until the observation pass sees it terminal).
 Body: `{"brokerOrderId", "modifySequence", "newPrice"?, "newQuantity"?}` (one of
 the two at least). `modifySequence` comes from the open-order row and must grow
 (409 `MODIFY_STALE`). An omitted field keeps Futu's current value: the server
-reads the order fresh before the send and sends nothing when it cannot.
+reads the order fresh before the send and sends nothing when it cannot. Gate 4
+checks and reserves the full outgoing quantity (also for a price-only change)
+before the send; a refusal sends nothing (400 coverage code, or 409
+`MODIFY_PENDING`).
 
 200: `{"status": "ok", "brokerOrderId", "confirmed": bool, "confirmedQuantity",
 "confirmedPrice", "applied_sequence", "message"}`. `confirmed: true` only when a fresh
 read shows the sent quantity and the same price tick. `confirmed: false` = sent, new
-terms not reported yet. After an unconfirmed quantity change every later modify
-gets 409 `MODIFY_PENDING` (with `applied_sequence`) until an observation pass
-after the send window shows the new quantity, or an operator resolves it; cancel
-still works.
+terms not reported yet. After an unconfirmed modify every later modify gets 409
+`MODIFY_PENDING` (with `applied_sequence`) until an operator resolves it (runbook
+§ 5); nothing clears it automatically. Cancel still works.
 
 ## Working orders — `GET /orders?broker=FUTU&account_env=…`
 
@@ -104,7 +106,6 @@ still works.
 | `FUTU_SEND_WINDOW_CLOSED` | modify deadline passed, nothing sent | retry |
 | `FUTU_ORDER_UNVERIFIED` | modify: the fresh order read failed or did not show the order, nothing sent | retry later |
 | `FUTU_ORDER_NOT_WORKING` | modify: Futu reports the order terminal, nothing sent | refresh orders |
-| `FUTU_MODIFY_QTY_UNRESERVED` | price-only modify: Futu quantity above the reserved one, nothing sent | refresh orders, retry |
 | `FUTU_UNLOCK_SECRET_MISSING` / `_INVALID` / `FUTU_UNLOCK_FAILED` | REAL unlock failed, nothing sent | operator |
 | `FUTU_PRICE_PRECISION` | price off the tick grid (never moved) | fix price |
 | `FUTU_ORDER_TYPE_UNSUPPORTED` / `FUTU_INVALID_ORDER` / `FUTU_REMARK_TOO_LONG` | body Futu cannot take | fix input |

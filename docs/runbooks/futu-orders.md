@@ -95,18 +95,16 @@ incomplete, so Gate 4 fails closed for that scope.
 
 ## 5. MODIFY_PENDING after an unconfirmed Futu modify
 
-A quantity modify that Futu did not confirm keeps `pending_amend_qty`; Gate 4
-reserves the larger quantity, and every later modify gets 409 `MODIFY_PENDING`.
-Cancel still works.
+Every Futu modify reserves its full outgoing quantity in Gate 4
+(`pending_amend_qty`, also for a price-only modify). A modify that Futu did not
+confirm keeps that amend: Gate 4 reserves the larger of the old and the
+outgoing quantity, and every later modify gets 409 `MODIFY_PENDING`. Cancel
+still works.
 
-The observation pass clears the amend by itself on positive evidence only: a
-fresh pass whose read began after the amend's send window closed
-(`pending_amend_send_by`) and that shows exactly the pending quantity. The row
-quantity then becomes that quantity. There is no time-based expiry for Futu: a
-pass that shows the old or another quantity, a timeout or a missing order keeps
-the amend and the larger reservation.
-
-When the pass does not clear it (Futu shows other terms):
+Nothing clears the amend by itself. The observation pass does not confirm or
+expire it: the SDK can still dispatch a modify after its send window closed
+(account check and connection wait run after the fence), so a later read does
+not prove the change can no longer reach Futu.
 
 1. In the Futu app, read the order's real quantity and price.
 2. Either cancel the order, or clear the amend by hand: set `quantity` /
@@ -117,9 +115,9 @@ When the pass does not clear it (Futu shows other terms):
 
 Futu `modify_order` sends quantity and price together. Before the send, the
 worker reads the order fresh in the request scope; a field the request omits
-takes Futu's current value (a change made in the Futu app is kept). Nothing is
-sent when that read fails or does not show the order (503
+takes Futu's current value (a change made in the Futu app is kept). Gate 4 then
+checks and reserves that outgoing quantity under the account-scope lock. Nothing
+is sent when the read fails or does not show the order (503
 `FUTU_ORDER_UNVERIFIED`), when Futu reports the order terminal (409
-`FUTU_ORDER_NOT_WORKING`), or when a price-only modify would send a quantity
-above the one Gate 4 reserves (409 `FUTU_MODIFY_QTY_UNRESERVED`; let the next
-observation pass record the larger quantity, then retry).
+`FUTU_ORDER_NOT_WORKING`), or when Gate 4 refuses the outgoing quantity (400
+with the coverage reason code, or 409 `MODIFY_PENDING`).

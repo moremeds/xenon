@@ -1485,9 +1485,7 @@ def _futu_identity_mismatch(row, obs: FutuOrderObservation) -> str | None:
     return None
 
 
-def _futu_state_values(
-    row, obs: FutuOrderObservation, *, fresh: bool, own: bool, observed_at: datetime | None = None
-) -> dict:
+def _futu_state_values(row, obs: FutuOrderObservation, *, fresh: bool, own: bool) -> dict:
     """Column updates a Futu observation may apply to an existing row.
 
     Only a fresh observation (its read began after the row's last local
@@ -1495,13 +1493,6 @@ def _futu_state_values(
     external row's quantity; a stale one applies conservative changes only.
     A Xenon row keeps its own quantity and legs; a larger broker quantity is
     kept as `observed_qty` (Gate 4 reserves the max).
-
-    Open amend on a Xenon row: only positive evidence settles it. A fresh read
-    that began after the amend's `pending_amend_send_by` and shows exactly
-    `pending_amend_qty` confirms it (`_reconcile_pending` "confirmed": the
-    quantity becomes the observed one, the amend clears). There is no
-    deadline expiry for Futu: old or other terms keep the amend and its
-    larger reservation.
     """
     values: dict = {}
     state = row.state or ""
@@ -1519,15 +1510,7 @@ def _futu_state_values(
         new_legs.pop("futu_missing", None)
         if obs.futu_code and not legs.get("futu_code"):
             new_legs["futu_code"] = obs.futu_code
-        quantity = int(row.quantity or 0)
-        send_by = _as_aware(legs.get("pending_amend_send_by"))
-        obs_at = _as_aware(observed_at)
-        if send_by is not None and obs_at is not None and obs_at > send_by:
-            settled, outcome = _reconcile_pending(new_legs, obs.quantity, observed_at=obs_at, fresh=fresh)
-            if outcome == "confirmed":  # never "expired": no Futu deadline rule
-                new_legs, quantity = settled, obs.quantity
-                values["quantity"] = quantity
-        if obs.quantity != quantity and obs.quantity != legs.get("observed_qty"):
+        if obs.quantity != int(row.quantity or 0) and obs.quantity != legs.get("observed_qty"):
             new_legs["observed_qty"] = obs.quantity
         if info is not None:
             new_legs["futu_order"] = info
@@ -1729,7 +1712,7 @@ def mirror_futu_order(
         else:
             own = not row.submission_id.startswith(FUTU_SUBMISSION_PREFIX)
             values = _futu_state_values(
-                row, obs, fresh=is_fresh_observation(observed_at, row.updated_at), own=own, observed_at=observed_at
+                row, obs, fresh=is_fresh_observation(observed_at, row.updated_at), own=own
             )
             if out["fill_skipped"] and row.reason_code != _fill_reason(out["fill_skipped"]):
                 values["reason_code"] = _fill_reason(out["fill_skipped"])

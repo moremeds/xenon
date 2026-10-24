@@ -2572,7 +2572,6 @@ class _SendWindowClosed(Exception):
 
 FUTU_ORDER_UNVERIFIED = "FUTU_ORDER_UNVERIFIED"
 FUTU_ORDER_NOT_WORKING = "FUTU_ORDER_NOT_WORKING"
-FUTU_MODIFY_QTY_UNRESERVED = "FUTU_MODIFY_QTY_UNRESERVED"
 
 
 def _futu_unsent(message: str, reason_code: str, http_status: int, exc: Exception | None = None) -> dict:
@@ -2634,11 +2633,6 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
         return order_error(exc.http_status, exc.reason_code, {"message": str(exc), "http_status": exc.http_status})
     except (ValueError, TypeError, InvalidOperation) as exc:
         return order_error(400, ReasonCode.INVALID_ORDER_BODY.value, {"message": str(exc), "http_status": 400})
-    # What Gate 4 reserves for this row without a quantity amend.
-    reserved_qty = max(
-        int(row["quantity"]), int(orders_store.normalize_legs_payload(row["legs"]).get("observed_qty") or 0)
-    )
-
     applied, current = _futu_apply_sequence(submission_id, sequence)
     if not applied:
         return order_error(
@@ -2652,35 +2646,12 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
         )
     scope_d = scope.as_dict()
     qty_amend = int(new_quantity) if new_quantity is not None else None
-    opened = gate4.begin_modify(submission_id, qty_amend, scope_d)
-    if not opened.accept:
-        if gate4.MODIFY_PENDING_REASON in opened.reasons:
-            return order_error(
-                409,
-                ReasonCode.MODIFY_PENDING.value,
-                {
-                    "message": "An earlier change to this order is not confirmed by Futu yet. Cancel the order, "
-                    "or wait until Futu reports the new quantity (see the Futu runbook).",
-                    "applied_sequence": sequence,
-                    "http_status": 409,
-                },
-            )
-        v = _gate4_reject_verdict(opened.reasons, opened.uncovered, opened.short_stock, opened.split_required)
-        return order_error(
-            400,
-            v.reason_code.value if v.reason_code else ReasonCode.GATE4_UNRESOLVED.value,
-            {
-                "message": v.reason_detail or "Modify blocked by coverage gate",
-                "applied_sequence": sequence,
-                "http_status": 400,
-            },
-        )
-    amend_id, send_by = opened.amend_id, opened.send_by
+    gen: dict = {}  # the amend generation this core opened (core and finish run on the worker)
 
     def core(ctx, mark_sent) -> dict:
         def mark_in_window() -> None:
             # Send-by fence right before the mutation: a late job sends nothing.
-            if datetime.now(timezone.utc) >= send_by:
+            if datetime.now(timezone.utc) >= gen["send_by"]:
                 raise _SendWindowClosed()
             mark_sent()
 
@@ -2701,13 +2672,26 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
             return _futu_unsent(f"Futu reports the order {cur.state}; nothing was sent", FUTU_ORDER_NOT_WORKING, 409)
         quantity = qty_amend if qty_amend is not None else int(cur.qty)
         price = req_price if req_price is not None else cur_price
-        if qty_amend is None and quantity > reserved_qty:
-            # A price-only modify must not send a quantity Gate 4 does not reserve.
+        # Gate 4 reserves the full outgoing quantity under the scope lock,
+        # also for a price-only modify: pending_amend_qty pins max(old, new)
+        # until settle, so an observation cannot lower the reservation
+        # below what this send carries.
+        opened = gate4.begin_modify(submission_id, quantity, scope_d)
+        if not opened.accept:
+            if gate4.MODIFY_PENDING_REASON in opened.reasons:
+                return _futu_unsent(
+                    "An earlier change to this order is not confirmed by Futu yet. Cancel the order, "
+                    "or resolve the change first (see the Futu runbook).",
+                    ReasonCode.MODIFY_PENDING.value,
+                    409,
+                )
+            v = _gate4_reject_verdict(opened.reasons, opened.uncovered, opened.short_stock, opened.split_required)
             return _futu_unsent(
-                f"Futu reports quantity {quantity}, above the reserved {reserved_qty}; nothing was sent",
-                FUTU_MODIFY_QTY_UNRESERVED,
-                409,
+                v.reason_detail or "Modify blocked by coverage gate",
+                v.reason_code.value if v.reason_code else ReasonCode.GATE4_UNRESOLVED.value,
+                400,
             )
+        gen.update(amend_id=opened.amend_id, send_by=opened.send_by)
         try:
             res = futu_orders.modify(
                 ctx,
@@ -2755,12 +2739,13 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
         if reply.get("status") != "ok":
             # Proven unsent releases the amend; anything else keeps the
             # larger reservation (gate4.settle_modify "uncertain").
-            gate4.settle_modify(
-                submission_id,
-                amend_id,
-                "rejected" if reply.get("amend_outcome") == "not_sent" else "uncertain",
-                scope_d,
-            )
+            if gen.get("amend_id") is not None:
+                gate4.settle_modify(
+                    submission_id,
+                    gen["amend_id"],
+                    "rejected" if reply.get("amend_outcome") == "not_sent" else "uncertain",
+                    scope_d,
+                )
             return _futu_manage_error(reply, "modify", applied_sequence=sequence)
         got_qty, sent_qty, sent_price = reply.get("qty"), reply["sent_qty"], reply["sent_price"]
         # Same tick on the price grid (a sub-dollar stock tick is 0.0001), never a tolerance.
@@ -2770,13 +2755,14 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
             and futu_orders.tick_price(base_spec, reply.get("price")) == sent_price
         )
         # Settle only on fresh evidence of the new terms; otherwise the
-        # amend stays uncertain (a quantity amend keeps max(old, new)).
+        # amend stays uncertain and keeps max(old, outgoing) until an
+        # operator resolves it (runbook § 5).
         if confirmed:
             gate4.settle_modify(
-                submission_id, amend_id, "confirmed", scope_d, new_qty=sent_qty, new_limit_price=sent_price
+                submission_id, gen.get("amend_id"), "confirmed", scope_d, new_qty=sent_qty, new_limit_price=sent_price
             )
         else:
-            gate4.settle_modify(submission_id, amend_id, "uncertain", scope_d)
+            gate4.settle_modify(submission_id, gen.get("amend_id"), "uncertain", scope_d)
         _futu_mirror(scope, reply.get("row"), reply.get("read_at"))
         return {
             "status": "ok",
