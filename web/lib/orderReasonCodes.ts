@@ -261,10 +261,6 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
     severity: "warn",
     copy: "Futu reports this order is no longer working — nothing sent.",
   },
-  FUTU_MODIFY_QTY_UNRESERVED: {
-    severity: "error",
-    copy: "Futu order quantity is above the reserved quantity — nothing sent. Set the quantity explicitly.",
-  },
   PROTECT_TP_PARTIAL: {
     severity: "error",
     copy: "The take-profit reached IB and ended; check its fills and close any rest from the order ticket.",
