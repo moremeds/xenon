@@ -42,6 +42,8 @@ def main(argv: list[str] | None = None) -> int:
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    # Each /healthz probe is a "rejected" (200) handshake that websockets logs at INFO.
+    logging.getLogger("websockets.server").setLevel(logging.WARNING)
     log = logging.getLogger("xenon.futu_quotes")
 
     # Imported late: the futu SDK touches the filesystem at import time.

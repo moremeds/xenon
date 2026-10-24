@@ -2078,6 +2078,7 @@ def test_healthz_answers_http_without_taking_the_relay_slot():
     """The compose healthcheck GETs /healthz: 200, no WS upgrade, no owner change."""
     import urllib.request
 
+    from websockets.asyncio.client import connect
     from websockets.asyncio.server import serve
 
     from xenon.futu_quotes.server import healthz
@@ -2086,9 +2087,18 @@ def test_healthz_answers_http_without_taking_the_relay_slot():
         svc = FutuQuotesService(FakeOpenD())
         async with serve(svc.ws_entry, "127.0.0.1", 0, process_request=healthz) as srv:
             port = srv.sockets[0].getsockname()[1]
-            url = f"http://127.0.0.1:{port}/healthz"
-            with await asyncio.to_thread(urllib.request.urlopen, url, timeout=2) as r:
-                assert r.status == 200
-        assert svc.conn is None
+            # A WS client on / still upgrades and becomes the relay owner.
+            async with connect(f"ws://127.0.0.1:{port}/") as relay:
+                for _ in range(50):
+                    if svc.conn is not None:
+                        break
+                    await asyncio.sleep(0.01)
+                owner = svc.conn
+                assert owner is not None
+                url = f"http://127.0.0.1:{port}/healthz"
+                with await asyncio.to_thread(urllib.request.urlopen, url, timeout=2) as r:
+                    assert r.status == 200
+                assert svc.conn is owner  # the probe did not replace the relay
+                await relay.ping()  # and the relay connection is still open
 
     asyncio.run(scenario())
