@@ -106,10 +106,32 @@ expire it: the SDK can still dispatch a modify after its send window closed
 (account check and connection wait run after the fence), so a later read does
 not prove the change can no longer reach Futu.
 
-1. In the Futu app, read the order's real quantity and price.
-2. Either cancel the order, or clear the amend by hand: set `quantity` /
-   `limit_price` to the values the app shows and set the `pending_amend_*` keys in
-   `legs` to null.
+Never clear the amend while the api process that sent the modify still runs:
+a blocked SDK call can still send the old outgoing quantity after the clear,
+on top of new demand that Gate 4 accepted against the freed reservation.
+
+Preferred: cancel the order from Xenon. The reservation stays until the
+observation pass sees the order terminal (CANCELLED or FILLED); a late modify
+cannot revive a terminal order. Nothing else is needed.
+
+To keep the order working instead:
+
+1. Stop the api container and confirm it has exited (`docker inspect -f
+   '{{.State.Running}}' <api container>` prints `false`). This ends the Futu
+   order worker and any SDK call it holds; a timeout, a passed `send_by`, a later
+   app read or `FutuOrderWorker.stop()` alone is not enough.
+2. Wait one minute, then read the order's quantity, price and filled quantity in
+   the Futu app (same account and env).
+3. With the api still stopped, update the one row in one transaction, scoped
+   exactly (`submission_id`, `broker='FUTU'`, `account_env`, `broker_account`,
+   and `legs->>'pending_amend_id'` = the generation you read): set `quantity` /
+   `limit_price` to the app values and remove `pending_amend_id`,
+   `pending_amend_qty`, `pending_amend_opened_at`, `pending_amend_send_by` and
+   `pending_amend_deadline` from `legs`. If the row no longer matches, stop and
+   re-read.
+4. Start the api (§ 1 step 4). The next observation pass records fills.
+
+If you cannot stop the api, keep the reservation and cancel instead.
 
 ## 6. Modify sends the broker's current terms
 
