@@ -165,6 +165,102 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
     severity: "error",
     copy: "Order submitted, status unknown — check working orders. Do not resubmit.",
   },
+  FUTU_SEND_UNCERTAIN: {
+    severity: "error",
+    copy: "Request may have reached Futu — refresh working orders. Do not resend.",
+  },
+  FUTU_SCOPE_REQUIRED: {
+    severity: "error",
+    copy: "Futu account environment missing on the request.",
+  },
+  FUTU_SCOPE_INVALID: {
+    severity: "error",
+    copy: "Futu account environment is not valid.",
+  },
+  FUTU_SCOPE_CHANGE_PENDING: {
+    severity: "error",
+    copy: "Futu account changed with unresolved orders — operator action required.",
+  },
+  FUTU_ACCOUNT_ABSENT: {
+    severity: "error",
+    copy: "Futu account not found in OpenD — nothing sent.",
+  },
+  FUTU_ACCOUNT_AMBIGUOUS: {
+    severity: "error",
+    copy: "Multiple Futu accounts match — nothing sent.",
+  },
+  FUTU_ACCOUNT_ENV_MISMATCH: {
+    severity: "error",
+    copy: "Futu account does not match the selected environment — nothing sent.",
+  },
+  FUTU_ACCOUNT_NOT_ACTIVE: {
+    severity: "error",
+    copy: "Futu account is not active — nothing sent.",
+  },
+  FUTU_ACCOUNT_NO_US_AUTHORITY: {
+    severity: "error",
+    copy: "Futu account lacks US trading authority — nothing sent.",
+  },
+  FUTU_OPEND_UNREACHABLE: {
+    severity: "error",
+    copy: "Futu OpenD is unreachable — retry later.",
+  },
+  FUTU_NOT_READY: {
+    severity: "error",
+    copy: "Futu OpenD is not ready — retry later.",
+  },
+  FUTU_WORKER_BUSY: {
+    severity: "error",
+    copy: "Futu order worker is busy — retry shortly.",
+  },
+  FUTU_WORKER_STOPPED: {
+    severity: "error",
+    copy: "Futu order worker is not running — retry later.",
+  },
+  FUTU_SEND_WINDOW_CLOSED: {
+    severity: "error",
+    copy: "Futu modify window closed — nothing sent.",
+  },
+  FUTU_UNLOCK_SECRET_MISSING: {
+    severity: "error",
+    copy: "REAL trading unlock is not configured — nothing sent.",
+  },
+  FUTU_UNLOCK_SECRET_INVALID: {
+    severity: "error",
+    copy: "REAL trading unlock secret is invalid — nothing sent.",
+  },
+  FUTU_UNLOCK_FAILED: {
+    severity: "error",
+    copy: "Futu REAL unlock failed — check operator credentials.",
+  },
+  FUTU_PRICE_PRECISION: {
+    severity: "error",
+    copy: "Limit price is off the Futu tick grid.",
+  },
+  FUTU_ORDER_TYPE_UNSUPPORTED: {
+    severity: "error",
+    copy: "This order type is not supported on Futu.",
+  },
+  FUTU_INVALID_ORDER: {
+    severity: "error",
+    copy: "Futu rejected the order body — fix inputs and retry.",
+  },
+  FUTU_REMARK_TOO_LONG: {
+    severity: "error",
+    copy: "Order remark exceeds Futu length limits.",
+  },
+  FUTU_NOT_SENT: {
+    severity: "error",
+    copy: "Futu refused the request before send — retry.",
+  },
+  FUTU_ORDER_UNVERIFIED: {
+    severity: "error",
+    copy: "Futu order could not be read before the change — nothing sent. Retry.",
+  },
+  FUTU_ORDER_NOT_WORKING: {
+    severity: "warn",
+    copy: "Futu reports this order is no longer working — nothing sent.",
+  },
   PROTECT_TP_PARTIAL: {
     severity: "error",
     copy: "The take-profit reached IB and ended; check its fills and close any rest from the order ticket.",

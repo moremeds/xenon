@@ -46,6 +46,8 @@ type OptionsChainTabProps = {
   tickerPriceData: PriceData | null;
   focusPosition?: PortfolioPosition | null;
   focusPositionRequested?: boolean;
+  /** False when the active account is Futu: no IB order builder. */
+  orderEntry?: boolean;
 };
 
 type ChainStrike = {
@@ -402,9 +404,9 @@ function OrderBuilder({
           };
 
       const placed = await submitPlaceOrder(attemptId, {
-          ...body,
-          client_attempt_id: attemptId.id,
-        });
+        ...body,
+        client_attempt_id: attemptId.id,
+      });
       if (placed.kind !== "ok") {
         setError(placed.message);
       } else {
@@ -541,12 +543,7 @@ function OrderBuilder({
       return;
     }
     wizardSession.refresh();
-  }, [
-    parsedPrice,
-    netPrices.mid,
-    wizardLauncher.sessionId,
-    wizardSession,
-  ]);
+  }, [parsedPrice, netPrices.mid, wizardLauncher.sessionId, wizardSession]);
 
   const handleWizardRepriceNatural = useCallback(async () => {
     if (!wizardLauncher.sessionId || netPrices.ask == null) return;
@@ -911,9 +908,7 @@ function OrderBuilder({
               }}
             >
               BID
-              {netPrices.bid != null
-                ? ` ${netPrices.bid.toFixed(2)}`
-                : ""}
+              {netPrices.bid != null ? ` ${netPrices.bid.toFixed(2)}` : ""}
             </button>
             <button
               className="btn-quick"
@@ -927,9 +922,7 @@ function OrderBuilder({
               }}
             >
               MID
-              {netPrices.mid != null
-                ? ` ${netPrices.mid.toFixed(2)}`
-                : ""}
+              {netPrices.mid != null ? ` ${netPrices.mid.toFixed(2)}` : ""}
             </button>
             <button
               className="btn-quick"
@@ -943,9 +936,7 @@ function OrderBuilder({
               }}
             >
               ASK
-              {netPrices.ask != null
-                ? ` ${netPrices.ask.toFixed(2)}`
-                : ""}
+              {netPrices.ask != null ? ` ${netPrices.ask.toFixed(2)}` : ""}
             </button>
           </div>
           {isValidPrice && (
@@ -1025,6 +1016,7 @@ export default function OptionsChainTab({
   tickerPriceData,
   focusPosition = null,
   focusPositionRequested = false,
+  orderEntry = true,
 }: OptionsChainTabProps) {
   const [expirations, setExpirations] = useState<string[]>([]);
   const [selectedExpiry, setSelectedExpiry] = useState<string | null>(null);
@@ -1548,15 +1540,17 @@ export default function OptionsChainTab({
         </div>
       )}
 
-      {/* Order Builder */}
-      <OrderBuilder
-        ticker={ticker}
-        legs={orderLegs}
-        prices={prices}
-        onRemoveLeg={handleRemoveLeg}
-        onUpdateLeg={handleUpdateLeg}
-        onClearLegs={handleClearLegs}
-      />
+      {/* Order Builder (IB only) */}
+      {orderEntry && (
+        <OrderBuilder
+          ticker={ticker}
+          legs={orderLegs}
+          prices={prices}
+          onRemoveLeg={handleRemoveLeg}
+          onUpdateLeg={handleUpdateLeg}
+          onClearLegs={handleClearLegs}
+        />
+      )}
     </div>
   );
 }

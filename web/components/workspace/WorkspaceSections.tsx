@@ -1,11 +1,7 @@
 "use client";
 
 import { usePerfTracker } from "@/lib/perfTracker";
-import type {
-  OrdersData,
-  PortfolioData,
-  WorkspaceSection,
-} from "@/lib/types";
+import type { OrdersData, PortfolioData, WorkspaceSection } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 import PerformancePanel from "../PerformancePanel";
 import TickerWorkspace from "../TickerWorkspace";
@@ -49,6 +45,10 @@ type WorkspaceSectionsProps = {
   /** Futu tab only: retry action wired to useFutuPortfolio().syncNow(). */
   onFutuRetry?: () => void;
   futuRetrying?: boolean;
+  /** Futu tab: true when health says trading[env] is on. */
+  futuOrderActionsEnabled?: boolean;
+  futuAccountIdTail?: string | null;
+  futuAccountEnv?: import("@/lib/futuAccountEnv").FutuAccountEnv;
 };
 
 // =============================================================================
@@ -95,6 +95,9 @@ export default function WorkspaceSections({
   futuRead,
   onFutuRetry,
   futuRetrying,
+  futuOrderActionsEnabled = false,
+  futuAccountIdTail = null,
+  futuAccountEnv = "paper",
 }: WorkspaceSectionsProps) {
   usePerfTracker("WorkspaceSections");
   switch (section) {
@@ -109,6 +112,9 @@ export default function WorkspaceSections({
           futuRead={futuRead}
           onFutuRetry={onFutuRetry}
           futuRetrying={futuRetrying}
+          futuOrderActionsEnabled={futuOrderActionsEnabled}
+          futuAccountIdTail={futuAccountIdTail}
+          futuAccountEnv={futuAccountEnv}
         />
       );
     case "performance":
@@ -126,13 +132,20 @@ export default function WorkspaceSections({
           prices={prices}
           portfolio={portfolio}
           activeAccount={activeAccount}
+          futuOrderActionsEnabled={futuOrderActionsEnabled}
         />
       );
     case "journal":
       return <JournalSections activeAccount={activeAccount} />;
     case "ticker-detail":
       return tickerParam ? (
-        <TickerWorkspace ticker={tickerParam} theme={theme ?? "dark"} />
+        <TickerWorkspace
+          ticker={tickerParam}
+          theme={theme ?? "dark"}
+          // Futu: no IB execution surface; the scoped Futu ticket is the only
+          // Futu place entry.
+          ibExecution={activeAccount !== "futu"}
+        />
       ) : null;
     default:
       return (
@@ -143,6 +156,9 @@ export default function WorkspaceSections({
           futuRead={futuRead}
           onFutuRetry={onFutuRetry}
           futuRetrying={futuRetrying}
+          futuOrderActionsEnabled={futuOrderActionsEnabled}
+          futuAccountIdTail={futuAccountIdTail}
+          futuAccountEnv={futuAccountEnv}
         />
       );
   }

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CheckCircle2,
   ChevronDown,
@@ -49,28 +49,54 @@ import {
   type PositionFillGroup,
 } from "./fillGrouping";
 import { HistoricalTradesSection } from "./HistoricalTradesSection";
+import {
+  FUTU_MANAGEMENT_UNCONFIRMED_COPY,
+  futuManageableOpenOrder,
+  isFutuOpenOrder,
+} from "@/lib/futuOpenOrder";
+import { useFutuAccountEnv } from "@/lib/futuAccountEnv";
+import {
+  orderActionScope,
+  scopesMatch,
+  type OrderActionScope,
+} from "@/lib/orderActionScope";
+import { futuTradingEnabledForEnv, useFutuTrading } from "@/lib/useFutuTrading";
 
 export function OrdersSections({
   orders,
   prices,
   portfolio,
   activeAccount = "ib",
+  futuOrderActionsEnabled = false,
 }: {
   orders: OrdersData | null;
   prices?: Record<string, PriceData>;
   portfolio?: PortfolioData | null;
   activeAccount?: "ib" | "futu";
+  futuOrderActionsEnabled?: boolean;
 }) {
   // Futu is read-only: no order modify/cancel surfaces (mirrors the position table gate).
-  const readonly = activeAccount === "futu";
+  const readonly = activeAccount === "futu" && !futuOrderActionsEnabled;
+  const futuEnv = useFutuAccountEnv();
+  const futuTrading = useFutuTrading();
+  const viewScope: OrderActionScope = useMemo(
+    () =>
+      activeAccount === "futu"
+        ? { broker: "FUTU", accountEnv: futuEnv }
+        : { broker: "IB" },
+    [activeAccount, futuEnv],
+  );
   const {
-    pendingCancels,
-    pendingModifies,
+    isPendingCancel: checkPendingCancel,
+    isPendingModify: checkPendingModify,
     cancelledOrders,
     requestCancel,
     requestModify,
     lockedReplacements,
+    isFutuManagementLocked,
   } = useOrderActions();
+  const futuComboActionsHidden =
+    activeAccount === "futu" && futuOrderActionsEnabled;
   const openOrderExtract = useMemo(
     () => makeOpenOrderExtract(prices, portfolio),
     [prices, portfolio],
@@ -94,21 +120,55 @@ export function OrdersSections({
   } | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
 
+  useEffect(() => {
+    setCancelTarget(null);
+    setModifyTarget(null);
+  }, [viewScope.broker, viewScope.accountEnv, futuOrderActionsEnabled]);
+
+  const canManageOrder = useCallback(
+    (o: OpenOrder) => {
+      if (!scopesMatch(orderActionScope(o, futuEnv), viewScope)) return false;
+      if (isFutuOpenOrder(o)) {
+        if (!futuManageableOpenOrder(o)) return false;
+        if (isFutuManagementLocked(o)) return false;
+        if (
+          !futuTradingEnabledForEnv(
+            futuTrading,
+            o.accountEnv === "paper" || o.accountEnv === "live"
+              ? o.accountEnv
+              : futuEnv,
+          )
+        ) {
+          return false;
+        }
+      }
+      return true;
+    },
+    [futuEnv, viewScope, futuTrading, isFutuManagementLocked],
+  );
+
   const handleCancel = useCallback(async () => {
-    if (!cancelTarget) return;
+    if (!cancelTarget || !canManageOrder(cancelTarget)) {
+      setCancelTarget(null);
+      return;
+    }
     setActionLoading(true);
     const result = await requestCancel(cancelTarget);
     setActionLoading(false);
     // B4 — keep modal open on failure so the user sees the FAILED pill on the
-    // row and the toast. Only dismiss on a clean 2xx.
-    if (result.ok) {
+    // row and the toast. Dismiss on a clean 2xx, or when the outcome is
+    // uncertain (the row then shows the unconfirmed state, no resend).
+    if (result.ok || isFutuManagementLocked(cancelTarget)) {
       setCancelTarget(null);
     }
-  }, [cancelTarget, requestCancel]);
+  }, [cancelTarget, requestCancel, canManageOrder, isFutuManagementLocked]);
 
   const handleModify = useCallback(
     async (request: ModifyOrderRequest) => {
-      if (!modifyTarget) return;
+      if (!modifyTarget || !canManageOrder(modifyTarget.requestOrder)) {
+        setModifyTarget(null);
+        return;
+      }
       setActionLoading(true);
       const result = await requestModify(
         modifyTarget.requestOrder,
@@ -117,11 +177,11 @@ export function OrdersSections({
           : request,
       );
       setActionLoading(false);
-      if (result.ok) {
+      if (result.ok || isFutuManagementLocked(modifyTarget.requestOrder)) {
         setModifyTarget(null);
       }
     },
-    [modifyTarget, requestModify],
+    [modifyTarget, requestModify, canManageOrder, isFutuManagementLocked],
   );
 
   const handleCancelCombo = useCallback(
@@ -215,20 +275,29 @@ export function OrdersSections({
     );
   }
 
-  const canModify = (o: OpenOrder) =>
-    o.orderType === "LMT" || o.orderType === "STP LMT";
+  const canModify = (o: OpenOrder) => {
+    if (!canManageOrder(o)) return false;
+    if (isFutuOpenOrder(o)) return true;
+    return o.orderType === "LMT" || o.orderType === "STP LMT";
+  };
   const execCount = orders.executed_count + cancelledOrders.length;
 
   return (
     <>
       <CancelOrderDialog
-        order={cancelTarget}
+        order={
+          cancelTarget && canManageOrder(cancelTarget) ? cancelTarget : null
+        }
         loading={actionLoading}
         onConfirm={handleCancel}
         onClose={() => setCancelTarget(null)}
       />
       <ModifyOrderModal
-        order={modifyTarget?.modalOrder ?? null}
+        order={
+          modifyTarget && canManageOrder(modifyTarget.requestOrder)
+            ? modifyTarget.modalOrder
+            : null
+        }
         loading={actionLoading}
         prices={prices}
         portfolio={portfolio}
@@ -332,21 +401,21 @@ export function OrdersSections({
                   if (o.kind === "combo") {
                     const comboCanModify = o.orders.every(canModify);
                     const comboModifyTarget = buildGroupedComboModifyTarget(o);
-                    const isPendingCancel = o.orders.some((order) =>
-                      pendingCancels.has(order.permId),
+                    const comboPendingCancel = o.orders.some((order) =>
+                      checkPendingCancel(order),
                     );
-                    const isPendingModify = o.orders.some((order) =>
-                      pendingModifies.has(order.permId),
+                    const comboPendingModify = o.orders.some((order) =>
+                      checkPendingModify(order),
                     );
-                    const isPending = isPendingCancel || isPendingModify;
+                    const isPending = comboPendingCancel || comboPendingModify;
 
                     return (
                       <tr
                         key={o.id}
                         className={
-                          isPendingCancel
+                          comboPendingCancel
                             ? "row-pending-cancel"
-                            : isPendingModify
+                            : comboPendingModify
                               ? "row-pending-modify"
                               : undefined
                         }
@@ -375,10 +444,10 @@ export function OrdersSections({
                         <td className="right">
                           <span
                             className={
-                              isPendingModify ? "status-modifying" : ""
+                              comboPendingModify ? "status-modifying" : ""
                             }
                           >
-                            {isPendingModify
+                            {comboPendingModify
                               ? "—"
                               : o.limitPrice != null
                                 ? fmtPrice(o.limitPrice)
@@ -389,11 +458,11 @@ export function OrdersSections({
                           price={resolveOpenOrderComboPrice(o.orders, prices)}
                         />
                         <td>
-                          {isPendingCancel ? (
+                          {comboPendingCancel ? (
                             <span className="status-cancelling">
                               Cancelling...
                             </span>
-                          ) : isPendingModify ? (
+                          ) : comboPendingModify ? (
                             <span className="status-modifying">
                               Modifying...
                             </span>
@@ -403,7 +472,7 @@ export function OrdersSections({
                         </td>
                         <td>{o.tif}</td>
                         <td className="actions-cell">
-                          {readonly ? (
+                          {futuComboActionsHidden ? null : readonly ? (
                             <span className="cancel-pending-label">
                               READ-ONLY
                             </span>
@@ -445,19 +514,20 @@ export function OrdersSections({
                     );
                   }
 
-                  const isPendingCancel = pendingCancels.has(o.order.permId);
-                  const isPendingModify = pendingModifies.has(o.order.permId);
-                  const isPending = isPendingCancel || isPendingModify;
+                  const rowPendingCancel = checkPendingCancel(o.order);
+                  const rowPendingModify = checkPendingModify(o.order);
+                  const isPending = rowPendingCancel || rowPendingModify;
+                  const rowKey =
+                    o.order.brokerOrderId ??
+                    o.order.submissionId ??
+                    `${o.order.orderId}-${o.order.permId}`;
                   return (
                     <tr
-                      key={
-                        o.order.submissionId ??
-                        `${o.order.orderId}-${o.order.permId}`
-                      }
+                      key={rowKey}
                       className={
-                        isPendingCancel
+                        rowPendingCancel
                           ? "row-pending-cancel"
-                          : isPendingModify
+                          : rowPendingModify
                             ? "row-pending-modify"
                             : undefined
                       }
@@ -490,7 +560,7 @@ export function OrdersSections({
                       <td>{o.order.orderType}</td>
                       <td className="right">{o.order.totalQuantity}</td>
                       <td className="right">
-                        {isPendingModify && o.order.orderType === "STP LMT" ? (
+                        {rowPendingModify && o.order.orderType === "STP LMT" ? (
                           <span className="status-modifying">Modifying...</span>
                         ) : o.order.limitPrice != null ? (
                           fmtPrice(o.order.limitPrice)
@@ -506,11 +576,11 @@ export function OrdersSections({
                         )}
                       />
                       <td>
-                        {isPendingCancel ? (
+                        {rowPendingCancel ? (
                           <span className="status-cancelling">
                             Cancelling...
                           </span>
-                        ) : isPendingModify ? (
+                        ) : rowPendingModify ? (
                           <span className="status-modifying">Modifying...</span>
                         ) : (
                           o.order.status
@@ -524,6 +594,10 @@ export function OrdersSections({
                           </span>
                         ) : isPending ? (
                           <span className="cancel-pending-label">PENDING</span>
+                        ) : isFutuManagementLocked(o.order) ? (
+                          <span className="cancel-pending-label">
+                            {FUTU_MANAGEMENT_UNCONFIRMED_COPY}
+                          </span>
                         ) : (
                           <>
                             <button

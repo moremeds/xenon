@@ -1,19 +1,23 @@
 import { NextResponse } from "next/server";
 import { xenonFetch } from "@/lib/xenonApi";
+import { forwardRequestQuery } from "@/lib/forwardRequestQuery";
 
 export const runtime = "nodejs";
 
 type OrdersPayload = Record<string, unknown>;
 
-// Per-broker singleflight so an IB refresh and a FUTU refresh don't collapse together.
+// Per-broker (and per Futu account_env) singleflight so refreshes never collapse.
 const syncInFlight: Record<string, Promise<void> | null> = {};
 
-function brokerQuery(req?: Request): string {
-  // `req` (or req.url) is absent when the route handler is unit-tested directly;
-  // production Next.js always supplies a Request. Default to the IB scope.
-  if (!req?.url) return "";
-  const broker = new URL(req.url).searchParams.get("broker");
-  return broker ? `?broker=${encodeURIComponent(broker)}` : "";
+function ordersSyncKey(req?: Request): string {
+  if (!req?.url) return "ib";
+  const sp = new URL(req.url).searchParams;
+  const broker = sp.get("broker");
+  if (broker?.toUpperCase() === "FUTU") {
+    const env = sp.get("account_env");
+    return `futu:${env ?? ""}`;
+  }
+  return "ib";
 }
 
 async function fetchOrders(qs: string): Promise<OrdersPayload> {
@@ -24,7 +28,7 @@ async function fetchOrders(qs: string): Promise<OrdersPayload> {
 }
 
 export async function GET(req?: Request): Promise<Response> {
-  const qs = brokerQuery(req);
+  const qs = forwardRequestQuery(req);
   try {
     return NextResponse.json(await fetchOrders(qs));
   } catch (error) {
@@ -35,8 +39,8 @@ export async function GET(req?: Request): Promise<Response> {
 }
 
 export async function POST(req?: Request): Promise<Response> {
-  const qs = brokerQuery(req);
-  const key = qs || "ib";
+  const qs = forwardRequestQuery(req);
+  const key = ordersSyncKey(req);
   try {
     if (!syncInFlight[key]) {
       syncInFlight[key] = xenonFetch(`/orders/refresh${qs}`, {

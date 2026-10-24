@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { xenonFetch, XenonApiError } from "@/lib/xenonApi";
+import { forwardRequestQuery } from "@/lib/forwardRequestQuery";
 
 export const runtime = "nodejs";
 
@@ -11,9 +12,10 @@ export const runtime = "nodejs";
  * OpenD — if the user wants fresh data they POST to /api/futu/sync.
  * No disk fallback: Postgres/FastAPI is the runtime source of truth.
  */
-export async function GET() {
+export async function GET(req: Request) {
+  const qs = forwardRequestQuery(req);
   try {
-    const data = await xenonFetch("/futu/portfolio", { method: "GET" });
+    const data = await xenonFetch(`/futu/portfolio${qs}`, { method: "GET" });
     return NextResponse.json(data);
   } catch (err) {
     // 404 from FastAPI means "never synced".
@@ -40,9 +42,10 @@ export async function GET() {
  * Force a live sync against OpenD. Delegates to FastAPI's POST /futu/sync
  * which holds the singleflight lock.
  */
-export async function POST() {
+export async function POST(req: Request) {
+  const qs = forwardRequestQuery(req);
   try {
-    const data = await xenonFetch("/futu/sync", { method: "POST" });
+    const data = await xenonFetch(`/futu/sync${qs}`, { method: "POST" });
     return NextResponse.json(data);
   } catch (err) {
     if (err instanceof XenonApiError) {

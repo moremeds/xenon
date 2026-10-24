@@ -148,6 +148,11 @@ export type OpenOrder = {
   avgFillPrice: number | null;
   tif: string;
   modifySequence?: number;
+  /** Futu OpenD order id (string digits). IB rows omit this. */
+  brokerOrderId?: string;
+  accountEnv?: "paper" | "live";
+  brokerAccount?: string;
+  futuStatus?: string;
   /** Set by mergeDashboardOrders so the combined dashboard card can label
    *  which broker each working order belongs to (FUTU rows are read-only). */
   broker?: "IB" | "FUTU";

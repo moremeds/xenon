@@ -73,7 +73,7 @@ describe("/api/performance proxy route", () => {
     const { GET } = await import("../app/api/performance/route");
     await GET(makeRequest("http://test/api/performance?broker=FUTU") as never);
     expect(mockXenonFetch).toHaveBeenCalledWith(
-      "/performance?broker=FUTU&period=YTD",
+      "/performance?broker=FUTU",
       expect.anything(),
     );
     mockXenonFetch.mockReset();

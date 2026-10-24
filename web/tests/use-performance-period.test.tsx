@@ -25,7 +25,9 @@ describe("usePerformance period parameter", () => {
     const config = (useSyncHook as ReturnType<typeof vi.fn>).mock.calls.at(
       -1,
     )![0];
-    expect(config.endpoint).toBe("/api/performance?broker=FUTU&period=3M");
+    expect(config.endpoint).toBe(
+      "/api/performance?broker=FUTU&period=3M&account_env=paper",
+    );
   });
 
   it("defaults to broker=IB and period=YTD when args omitted", () => {

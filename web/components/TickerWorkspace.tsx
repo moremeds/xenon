@@ -10,11 +10,14 @@ import TickerDetailContent from "./TickerDetailContent";
 type TickerWorkspaceProps = {
   ticker: string;
   theme: "dark" | "light";
+  /** False when the active account is Futu: hide every IB order surface. */
+  ibExecution?: boolean;
 };
 
 export default function TickerWorkspace({
   ticker,
   theme,
+  ibExecution = true,
 }: TickerWorkspaceProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -87,6 +90,7 @@ export default function TickerWorkspace({
         depths={depths}
         tape={tape}
         theme={theme}
+        ibExecution={ibExecution}
       />
     </div>
   );

@@ -44,22 +44,34 @@ export function isUncertainPlaceResponse(
   body: Record<string, unknown> | null,
 ): boolean {
   const code = readReasonCode(body);
-  if (code === "PLACE_OUTCOME_UNKNOWN" || code === "ATTEMPT_ALREADY_PLACED") return true;
+  if (
+    code === "PLACE_OUTCOME_UNKNOWN" ||
+    code === "FUTU_SEND_UNCERTAIN" ||
+    code === "ATTEMPT_ALREADY_PLACED"
+  )
+    return true;
   if (status < 500) return false;
   return !(code && code in ORDER_REASON_CODES);
 }
 
+export type SubmitPlaceOptions = {
+  /** e.g. `?broker=FUTU&account_env=paper` from futuScopeQuery */
+  scopeQuery?: string;
+};
+
 export async function submitPlaceOrder(
   attempt: PlaceAttempt,
   body: Record<string, unknown>,
+  options?: SubmitPlaceOptions,
 ): Promise<PlaceOutcome> {
   if (attempt.isUncertain()) {
     return { kind: "uncertain", message: PLACE_UNCERTAIN_COPY };
   }
   attempt.markSubmitted();
+  const placeUrl = `/api/orders/place${options?.scopeQuery ?? ""}`;
   let res: Response;
   try {
-    res = await fetch("/api/orders/place", {
+    res = await fetch(placeUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...body, client_attempt_id: attempt.id }),

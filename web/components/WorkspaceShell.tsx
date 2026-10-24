@@ -36,6 +36,13 @@ import MetricCards from "@/components/MetricCards";
 import AccountTabBar, {
   type AccountTabState,
 } from "@/components/AccountTabBar";
+import FutuEnvSwitch from "@/components/FutuEnvSwitch";
+import {
+  futuTabEnvironmentLabel,
+  useFutuAccountEnv,
+} from "@/lib/futuAccountEnv";
+import { futuTradingEnabledForEnv, useFutuTrading } from "@/lib/useFutuTrading";
+import { futuAccountTail } from "@/lib/futuOpenOrder";
 import { computeFutuStaleness } from "@/lib/futuStaleness";
 import ToastContainer from "@/components/Toast";
 
@@ -73,6 +80,14 @@ export default function WorkspaceShell({
   const isMarketActive = marketState !== MarketState.CLOSED;
 
   const { activeAccount, setActiveAccount } = useActiveAccount();
+  const futuAccountEnv = useFutuAccountEnv();
+  const futuTrading = useFutuTrading();
+  const futuOrderActionsEnabled = useMemo(
+    () =>
+      activeAccount === "futu" &&
+      futuTradingEnabledForEnv(futuTrading, futuAccountEnv),
+    [activeAccount, futuTrading, futuAccountEnv],
+  );
 
   // Both accounts stay hot in the background so tab switching is instant.
   // The Operator section is read-only: gate the broker-sync hooks off so
@@ -86,6 +101,10 @@ export default function WorkspaceShell({
     skipReads: isOperator,
   });
   const futuData = useFutuPortfolio(isMarketActive && !isOperator);
+  const futuAccountIdTail = useMemo(
+    () => futuAccountTail(futuData.envelope?.account_id ?? null),
+    [futuData.envelope?.account_id],
+  );
 
   // The `portfolio` variable the rest of the shell consumes is the
   // broker-appropriate one. Every downstream component sees a normal
@@ -387,11 +406,14 @@ export default function WorkspaceShell({
   const syncNow = isOrdersPage ? ordersSyncNow : portfolioSyncNow;
   const syncTarget = isOrdersPage ? "orders" : "portfolio";
 
+  const ordersScopeKey =
+    activeAccount === "futu" ? `FUTU:${futuAccountEnv}` : "IB";
+
   // Register the orders-data updater so the cancel provider can push fresh data
   useEffect(() => {
-    setOrdersUpdater(updateOrdersData);
-    return () => setOrdersUpdater(null);
-  }, [setOrdersUpdater, updateOrdersData]);
+    setOrdersUpdater(updateOrdersData, ordersScopeKey);
+    return () => setOrdersUpdater(null, null);
+  }, [setOrdersUpdater, updateOrdersData, ordersScopeKey]);
 
   // Drain cancel-context notifications into the toast system
   useEffect(() => {
@@ -524,6 +546,7 @@ export default function WorkspaceShell({
             <AccountTabBar
               active={activeAccount}
               onChange={setActiveAccount}
+              futuEnv={futuAccountEnv}
               ib={{
                 label: "IB",
                 accountId: ibData.data?.account_summary ? "IB Account" : null,
@@ -537,7 +560,7 @@ export default function WorkspaceShell({
               futu={{
                 label: "FUTU",
                 accountId: futuData.envelope?.account_id ?? null,
-                environment: "real",
+                environment: futuTabEnvironmentLabel(futuAccountEnv),
                 positionCount: futuData.data?.positions.length ?? 0,
                 lastSync: futuData.lastSync,
                 netLiquidation:
@@ -550,6 +573,13 @@ export default function WorkspaceShell({
                 }),
               }}
             />
+          ) : null}
+
+          {activeAccount === "futu" &&
+          activeSection !== "dashboard" &&
+          activeSection !== "ticker-detail" &&
+          activeSection !== "operator" ? (
+            <FutuEnvSwitch />
           ) : null}
 
           {activeSection === "dashboard" ? (
@@ -588,6 +618,9 @@ export default function WorkspaceShell({
               futuRead={futuData.initialRead}
               onFutuRetry={futuData.syncNow}
               futuRetrying={futuData.syncing}
+              futuOrderActionsEnabled={futuOrderActionsEnabled}
+              futuAccountIdTail={futuAccountIdTail}
+              futuAccountEnv={futuAccountEnv}
             />
           ) : null}
         </div>

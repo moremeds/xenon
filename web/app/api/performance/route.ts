@@ -24,9 +24,10 @@ function jsonWithNoStore(
  *  to stale-after-write surprises. */
 export async function GET(request: NextRequest): Promise<Response> {
   const requestId = getRequestId();
-  const broker = request.nextUrl.searchParams.get("broker") ?? "IB";
-  const period = request.nextUrl.searchParams.get("period") ?? "YTD";
-  const path = `/performance?broker=${encodeURIComponent(broker)}&period=${encodeURIComponent(period)}`;
+  const search = request.nextUrl.search;
+  const path = search
+    ? `/performance${search}`
+    : "/performance?broker=IB&period=YTD";
   try {
     const data = await xenonFetch<PerformancePayload>(path, {
       timeout: 180_000,
