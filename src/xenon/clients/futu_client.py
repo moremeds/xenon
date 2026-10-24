@@ -268,8 +268,10 @@ class FutuClient:
                 self.filter_trading_market,
             )
         except FutuError:
+            self.disconnect()  # close the context this attempt opened; no stale account
             raise
         except Exception as exc:
+            self.disconnect()
             raise classify_futu_exception(exc)
 
     def disconnect(self) -> None:

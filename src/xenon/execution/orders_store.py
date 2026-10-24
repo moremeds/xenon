@@ -19,7 +19,7 @@ from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import Text, cast, func, insert, literal, select, text, update
+from sqlalchemy import Integer, Text, cast, func, insert, literal, select, text, update
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -1801,20 +1801,46 @@ def _futu_scope_conds(account_env: str, broker_account: str) -> tuple:
 
 
 def futu_unobserved_order_ids(
-    *, broker_account: str, account_env: str, observed: set, include_not_observed: bool = False
+    *,
+    broker_account: str,
+    account_env: str,
+    observed: set,
+    include_not_observed: bool = False,
+    recheck_limit: int = 20,
 ) -> list[str]:
     """Broker order ids of non-terminal Futu rows in scope that a full pass
     did not see. Rows already UNKNOWN for FUTU_NOT_OBSERVED are included only
-    with `include_not_observed` (the caller's slow recheck cadence)."""
+    with `include_not_observed` (the caller's slow recheck cadence), at most
+    `recheck_limit` of them, so a recheck pass stays bounded."""
     conds = [
         *_futu_scope_conds(account_env, broker_account),
         order_submissions.c.broker_order_id.is_not(None),
         order_submissions.c.state.in_(NON_TERMINAL_STATES),
     ]
-    if not include_not_observed:
-        conds.append(order_submissions.c.reason_code.is_distinct_from(FUTU_NOT_OBSERVED))
     with get_sync_engine().connect() as conn:
-        ids = conn.execute(select(order_submissions.c.broker_order_id).where(*conds)).scalars()
+        ids = list(
+            conn.execute(
+                select(order_submissions.c.broker_order_id).where(
+                    *conds, order_submissions.c.reason_code.is_distinct_from(FUTU_NOT_OBSERVED)
+                )
+            ).scalars()
+        )
+        if include_not_observed:
+            # At most `recheck_limit` held rows per pass, fewest misses first:
+            # each recheck miss raises `futu_missing`, so the set rotates.
+            misses = cast(order_submissions.c.legs["futu_missing"].astext, Integer)
+            ids += list(
+                conn.execute(
+                    select(order_submissions.c.broker_order_id)
+                    .where(
+                        *conds,
+                        order_submissions.c.reason_code == FUTU_NOT_OBSERVED,
+                        order_submissions.c.broker_order_id.not_in(observed or [""]),
+                    )
+                    .order_by(misses, order_submissions.c.updated_at, order_submissions.c.submission_id)
+                    .limit(recheck_limit)
+                ).scalars()
+            )
         return sorted(oid for oid in ids if oid not in observed)
 
 

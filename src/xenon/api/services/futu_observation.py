@@ -500,6 +500,9 @@ def _audit_open_orders(parsed: dict, scope: AccountScope) -> list[dict]:
 # restart): slow, so a deleted order does not cost one request per minute, but
 # never "held forever". Counter per scope, per process.
 NOT_OBSERVED_RECHECK_PASSES = 10
+# Held rows rechecked per such pass (rotating), so the pass stays well inside
+# PASS_TIMEOUT_S even with many held rows.
+NOT_OBSERVED_RECHECK_MAX = 20
 _FULL_PASSES: dict[AccountScope, int] = {}
 
 
@@ -528,6 +531,7 @@ def _sweep_unobserved(
         account_env=scope.account_env,
         observed=seen,
         include_not_observed=full % NOT_OBSERVED_RECHECK_PASSES == 0,
+        recheck_limit=NOT_OBSERVED_RECHECK_MAX,
     ):
         read_at = datetime.now(timezone.utc)
         rows = _read(
