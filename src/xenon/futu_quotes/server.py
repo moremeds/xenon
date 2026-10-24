@@ -658,6 +658,17 @@ async def _opend_supervisor(svc: FutuQuotesService, opend: OpenDLike) -> None:
             pass
 
 
+def healthz(connection: Any, request: Any) -> Any:
+    """``process_request`` hook: plain HTTP ``GET /healthz`` gets 200, no upgrade.
+
+    A WS probe would replace the relay connection (see ``on_ws_connect``); a bare
+    TCP probe makes websockets log a handshake traceback per check.
+    """
+    if request.path == "/healthz":
+        return connection.respond(200, "ok\n")
+    return None
+
+
 async def run_forever(
     host: str,
     port: int,
@@ -692,6 +703,7 @@ async def run_forever(
             svc.ws_entry,
             host,
             port,
+            process_request=healthz,
             ping_interval=ping_interval_s,
             ping_timeout=ping_timeout_s,
         ):
