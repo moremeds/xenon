@@ -1,9 +1,17 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from xenon.db.schema import account_snapshots
+
+# Display-snapshot rows only. FUTU keeps two row kinds in account_snapshots:
+# display rows (`/futu/sync`, no `observation` key) and observation-loop rows
+# (Gate 4, one per minute). Portfolio, preflight, entry-date and heartbeat
+# readers take display rows; Gate 4 / health read observation rows
+# explicitly. An IB row is both kinds at once (ib_sync stamps its own
+# `observation`), so the filter never drops IB rows.
+DISPLAY_SNAPSHOT = or_(account_snapshots.c.broker != "FUTU", ~account_snapshots.c.payload.has_key("observation"))
 
 
 async def get_latest_portfolio_payload(
@@ -25,6 +33,7 @@ async def get_latest_portfolio_payload(
         .where(account_snapshots.c.broker == broker)
         .where(account_snapshots.c.account_env == account_env)
         .where(account_snapshots.c.broker_account == broker_account)
+        .where(DISPLAY_SNAPSHOT)
         .order_by(account_snapshots.c.snapshot_at.desc())
         .limit(1)
     )

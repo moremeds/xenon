@@ -1,37 +1,111 @@
-"""orders_payload_for_scope FUTU branch: shape parity with IB OpenOrder/ExecutedOrder."""
+"""X3b Task 2: GET /orders + refresh for FUTU read the execution ledger.
+
+Rows come from `order_submissions` + `order_fills` of the configured Futu
+trade scope (FUTU_TRADE_ACC_ID + FUTU_TRADE_ENV), written by a real
+observation pass over a fake Futu trade context. `futu_orders` /
+`futu_trades` are history only and never read here. 19-digit Futu ids stay
+strings; no display hash is returned. All ids, quantities and prices are
+made-up test values, not market data.
+"""
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
 import pytest
-import pytest_asyncio
-import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy import update
 
-from xenon._test_db import is_pg_reachable, sync_test_db_url
-from xenon.api.routes.orders import _futu_contract, _futu_surrogate_id, orders_payload_for_scope
+from scripts.tests.test_futu_observation import (  # noqa: F401 — autouse fixture
+    ACC,
+    SCOPE,
+    FakeTradeCtx,
+    _env,
+    _order,
+    _pos,
+    resolver,
+)
+from xenon.api.routes.orders import orders_payload_for_scope
+from xenon.api.services import futu_observation as fo
+from xenon.db.engine import get_sync_engine
 from xenon.db.queries.futu_history import insert_orders
-from xenon.db.queries.futu_history import insert_trades as _insert_trades
-from xenon.db.schema import futu_orders, futu_trades
+from xenon.db.schema import order_submissions
 from xenon.execution.account_scope import AccountScope
 
-SCOPE = AccountScope(broker="FUTU", account_env="paper", broker_account="pytest-orders")
+pytestmark = pytest.mark.committed_db
+
+os.environ.setdefault("XENON_API_TEST_MODE", "1")
+
+# A display/history scope that differs from the configured trade scope.
+OTHER = AccountScope(broker="FUTU", account_env="live", broker_account="999000111")
+WORKING_ID = "8812345678901234567"  # 19 digits: beyond JS Number precision
+FILLED_ID = "8812345678901234999"
 
 
-def _clean(t):
-    return sa.delete(t).where((t.c.broker == "FUTU") & (t.c.broker_account == "pytest-orders"))
+@pytest.fixture(autouse=True)
+def _configured(monkeypatch):
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID", ACC)
+    monkeypatch.setenv("FUTU_TRADE_ENV", "SIMULATE")
 
 
-@pytest_asyncio.fixture
-async def seeded():
-    if not is_pg_reachable():
-        pytest.skip("PG test DB unreachable")
-    url = sync_test_db_url().replace("postgresql+psycopg://", "postgresql+asyncpg://")
-    eng = create_async_engine(url, pool_pre_ping=True)
-    async with eng.begin() as conn:
-        for t in (futu_orders, futu_trades):
-            await conn.execute(_clean(t))
+def _observe():
+    ctx = FakeTradeCtx(
+        positions=[_pos("US.SPY", 100.0)],
+        open_orders=[_order(order_id=WORKING_ID, side="SELL", qty=2.0, status="FILLED_PART", dealt=1.0, avg=1.5)],
+        history=[
+            _order(order_id=FILLED_ID, code="US.SPY", side="BUY", qty=10.0, status="FILLED_ALL", dealt=10.0, avg=2.0)
+        ],
+    )
+    result = fo.run_pass(SCOPE, ctx, resolve_meta=resolver(), audit=False)
+    assert result["complete"], result
+
+
+def test_futu_open_orders_come_from_the_ledger_with_string_ids():
+    _observe()
+    with get_sync_engine().begin() as conn:
+        conn.execute(
+            update(order_submissions).where(order_submissions.c.broker_order_id == WORKING_ID).values(modify_sequence=3)
+        )
+
+    body = orders_payload_for_scope(SCOPE)
+
+    assert body["scope"] == {"broker": "FUTU", "accountEnv": "paper", "brokerAccount": ACC}
+    assert body["open_count"] == 1
+    row = body["open_orders"][0]
+    assert row["submissionId"] == f"futu-paper-{ACC}-{WORKING_ID}"
+    assert row["brokerOrderId"] == WORKING_ID and isinstance(row["brokerOrderId"], str)
+    assert row["modifySequence"] == 3
+    assert (row["broker"], row["accountEnv"], row["brokerAccount"]) == ("FUTU", "paper", ACC)
+    # No display hash: there is no numeric IB id for a Futu order.
+    assert row["orderId"] == 0 and row["permId"] == 0
+    assert row["status"] == "PartiallyFilled"
+    assert (row["totalQuantity"], row["filled"], row["remaining"]) == (2, 1, 1)
+    assert row["contract"]["secType"] == "OPT" and row["contract"]["symbol"] == "SPY"
+
+
+def test_futu_executed_orders_come_from_order_fills():
+    _observe()
+
+    body = orders_payload_for_scope(SCOPE)
+
+    by_order = {r["brokerOrderId"]: r for r in body["executed_orders"]}
+    assert set(by_order) == {WORKING_ID, FILLED_ID}
+    stock = by_order[FILLED_ID]
+    assert stock["execId"] == f"futu:paper:{ACC}:ord:{FILLED_ID}:10"
+    assert stock["submissionId"] == f"futu-paper-{ACC}-{FILLED_ID}"
+    assert (stock["side"], stock["quantity"], stock["avgPrice"]) == ("BOT", 10.0, 2.0)
+    assert stock["exchange"] == "FUTU" and stock["broker"] == "FUTU" and stock["brokerAccount"] == ACC
+    assert by_order[WORKING_ID]["side"] == "SLD" and by_order[WORKING_ID]["quantity"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_futu_history_tables_are_not_the_read_path():
+    """A futu_orders history row of the scope is not an open order here."""
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from xenon._test_db import sync_test_db_url
+
+    eng = create_async_engine(sync_test_db_url().replace("postgresql+psycopg://", "postgresql+asyncpg://"))
     now = datetime.now(timezone.utc)
     await insert_orders(
         eng,
@@ -45,7 +119,7 @@ async def seeded():
                 "action": "BUY",
                 "order_type": "NORMAL",
                 "quantity": 1,
-                "limit_price": 630.96,
+                "limit_price": 1.0,
                 "aux_price": None,
                 "status": "SUBMITTED",
                 "tif": "GTC",
@@ -54,94 +128,116 @@ async def seeded():
                 "created_at": now,
                 "updated_at": now,
                 "raw": {},
-            },
-            {
-                "futu_order_id": "100200999",
-                "ticker": "QQQ250620C500000",
-                "futu_code": "US.QQQ250620C500000",
-                "market": "US",
-                "action": "SELL",
-                "order_type": "STOP",
-                "quantity": 2,
-                "limit_price": None,
-                "aux_price": 4.5,
-                "status": "FILLED_ALL",
-                "tif": "DAY",
-                "filled_qty": 2,
-                "avg_fill_price": 4.5,
-                "created_at": now,
-                "updated_at": now,
-                "raw": {},
-            },
-        ],
-    )
-    await _insert_trades(
-        eng,
-        SCOPE,
-        [
-            {
-                "futu_deal_id": "d1",
-                "futu_order_id": "100200300",
-                "ticker": "QQQ",
-                "futu_code": "US.QQQ",
-                "market": "US",
-                "action": "BUY",
-                "quantity": 1,
-                "price": 630.0,
-                "fees": 0.75,
-                "filled_at": now,
-                "raw": {"trd_side": "BUY"},
             }
         ],
     )
-    try:
-        yield
-    finally:
-        async with eng.begin() as conn:
-            for t in (futu_orders, futu_trades):
-                await conn.execute(_clean(t))
-        await eng.dispose()
+    await eng.dispose()
+
+    body = orders_payload_for_scope(SCOPE)
+
+    assert body["open_orders"] == [] and body["executed_orders"] == []
 
 
-def test_futu_contract_parses_occ_option():
-    c = _futu_contract("QQQ250620C500000")
-    assert c["secType"] == "OPT"
-    assert c["right"] == "C"
-    assert c["strike"] == 500.0
-    assert c["expiry"] == "2025-06-20"
-    assert c["symbol"] == "QQQ"
-    assert _futu_contract("QQQ")["secType"] == "STK"
+def test_no_configured_scope_returns_empty_with_reason(monkeypatch):
+    _observe()
+    monkeypatch.delenv("FUTU_TRADE_ACC_ID")
+
+    body = orders_payload_for_scope(SCOPE)
+
+    assert body["open_orders"] == [] and body["executed_orders"] == []
+    assert body["scope"] is None and body["scope_reason"] == "FUTU_TRADE_ACC_ID_MISSING"
 
 
-def test_surrogate_id_is_js_safe_and_distinct():
-    a = _futu_surrogate_id("123456789012345678")  # 18-digit
-    b = _futu_surrogate_id("123456789012345679")
-    assert a != b
-    assert a < 2**53  # JS-safe
+def test_get_orders_route_serves_ledger_while_opend_offline(monkeypatch):
+    """OpenD offline (client never connected): the route still serves the
+    persisted ledger rows of the configured scope."""
+    from fastapi.testclient import TestClient
+
+    from xenon.api import guards, server
+    from xenon.api.routes import futu as futu_routes
+
+    _observe()
+    offline = type("Offline", (), {"is_connected": lambda self: False})()
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: offline)
+    monkeypatch.setattr(guards, "_futu_scope_from_db", lambda: SCOPE)
+
+    resp = TestClient(server.app).get("/orders", params={"broker": "FUTU"})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [r["brokerOrderId"] for r in body["open_orders"]] == [WORKING_ID]
+    assert body["scope"]["brokerAccount"] == ACC
 
 
-def test_orders_payload_futu_shapes_like_ib(seeded):
-    payload = orders_payload_for_scope(SCOPE)
-    # Only the SUBMITTED order is "open"; FILLED_ALL is excluded.
-    assert payload["open_count"] == 1
-    oo = payload["open_orders"][0]
-    assert set(oo) >= {
-        "submissionId",
-        "symbol",
-        "action",
-        "orderType",
-        "totalQuantity",
-        "limitPrice",
-        "status",
-        "tif",
-        "contract",
+
+@pytest.mark.parametrize(
+    "request_scope",
+    [
+        AccountScope(broker="FUTU", account_env="live", broker_account=ACC),  # REAL tab, SIMULATE configured
+        OTHER,  # another account
+    ],
+)
+def test_request_scope_other_than_configured_gets_no_rows(request_scope):
+    """Paper and live never blend: the configured scope's orders are served
+    only under exactly that scope."""
+    _observe()
+
+    body = orders_payload_for_scope(request_scope)
+
+    assert body["open_orders"] == [] and body["executed_orders"] == []
+    assert body["open_count"] == 0 and body["executed_count"] == 0
+    assert body["scope"] is None and body["scope_reason"] == "scope_mismatch"
+    assert body["request_scope"] == {
+        "broker": "FUTU",
+        "accountEnv": request_scope.account_env,
+        "brokerAccount": request_scope.broker_account,
     }
-    assert oo["orderType"] == "LMT"  # NORMAL → LMT
-    assert oo["status"] == "Submitted"  # SUBMITTED → Submitted
-    assert oo["tif"] == "GTC"
-    assert oo["submissionId"] == "100200300"
-    # Today's fill shows up as an executed order with BOT side + commission.
-    assert payload["executed_count"] == 1
-    eo = payload["executed_orders"][0]
-    assert eo["side"] == "BOT"
-    assert eo["commission"] == 0.75
+    assert body["configured_scope"] == {"broker": "FUTU", "accountEnv": "paper", "brokerAccount": ACC}
+
+
+def _route_client(monkeypatch, db_scope):
+    from fastapi.testclient import TestClient
+
+    from xenon.api import guards, server
+    from xenon.api.routes import futu as futu_routes
+
+    offline = type("Offline", (), {"is_connected": lambda self: False})()
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: offline)
+    monkeypatch.setattr(guards, "_futu_scope_from_db", lambda: db_scope)
+    return TestClient(server.app)
+
+
+def test_get_orders_route_uses_the_configured_scope_not_the_db_fallback(monkeypatch):
+    """R2 F5: with a configured trade scope, the route never takes another
+    account's last-synced scope; the configured ledger is served."""
+    _observe()
+
+    body = _route_client(monkeypatch, OTHER).get("/orders", params={"broker": "FUTU"}).json()
+
+    assert [r["brokerOrderId"] for r in body["open_orders"]] == [WORKING_ID]
+    assert body.get("scope_reason") is None
+
+
+@pytest.mark.parametrize("db_scope", [SCOPE, OTHER, None])
+def test_orders_refresh_applies_the_same_scope_rule(monkeypatch, db_scope):
+    """No observation loop running (e.g. OpenD scope not started): refresh
+    returns the persisted ledger of the configured scope, whatever the DB
+    fallback would say (and with no synced history at all)."""
+    expected = [WORKING_ID]
+    from xenon.api import server
+
+    _observe()
+    monkeypatch.setattr(server, "_is_test_mode", lambda: False)
+    monkeypatch.setattr(server.app.state, "futu_observation_loop", None, raising=False)
+
+    resp = _route_client(monkeypatch, db_scope).post("/orders/refresh", params={"broker": "FUTU"})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [r["brokerOrderId"] for r in body["open_orders"]] == expected
+    assert body.get("scope_reason") is None
+
+
+def test_ib_payload_shape_unchanged():
+    body = orders_payload_for_scope(AccountScope(broker="IB", account_env="paper", broker_account="DU0000000"))
+    assert set(body) == {"last_sync", "open_orders", "executed_orders", "open_count", "executed_count"}

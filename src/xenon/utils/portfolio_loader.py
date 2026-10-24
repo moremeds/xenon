@@ -22,6 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as _pg_insert
 
 from xenon.db.engine import get_sync_engine
+from xenon.db.queries.portfolio import DISPLAY_SNAPSHOT
 from xenon.db.schema import account_snapshots, nav_history, order_fills, trades
 from xenon.execution.account_scope import AccountScope
 
@@ -63,13 +64,19 @@ def load_portfolio_payload_sync(*, scope: AccountScope | None = None) -> dict[st
     analyst-ratings target list, UW candidate underlyings) where mixing
     accounts is acceptable.
     """
-    stmt = select(account_snapshots.c.payload).order_by(account_snapshots.c.snapshot_at.desc()).limit(1)
+    stmt = (
+        select(account_snapshots.c.payload)
+        .where(DISPLAY_SNAPSHOT)
+        .order_by(account_snapshots.c.snapshot_at.desc())
+        .limit(1)
+    )
     if scope is not None:
         stmt = (
             select(account_snapshots.c.payload)
             .where(account_snapshots.c.broker == scope.broker)
             .where(account_snapshots.c.account_env == scope.account_env)
             .where(account_snapshots.c.broker_account == scope.broker_account)
+            .where(DISPLAY_SNAPSHOT)
             .order_by(account_snapshots.c.snapshot_at.desc())
             .limit(1)
         )
@@ -93,6 +100,7 @@ def load_account_snapshots_history_sync(*, scope: AccountScope, limit: int = 5) 
         .where(account_snapshots.c.broker == scope.broker)
         .where(account_snapshots.c.account_env == scope.account_env)
         .where(account_snapshots.c.broker_account == scope.broker_account)
+        .where(DISPLAY_SNAPSHOT)
         .order_by(account_snapshots.c.snapshot_at.desc())
         .limit(limit)
     )
@@ -411,6 +419,7 @@ def load_entry_date_lookups_sync(*, scope: AccountScope) -> EntryDateLookups:
             .where(account_snapshots.c.broker == scope.broker)
             .where(account_snapshots.c.account_env == scope.account_env)
             .where(account_snapshots.c.broker_account == scope.broker_account)
+            .where(DISPLAY_SNAPSHOT)
             .order_by(account_snapshots.c.snapshot_at.desc())
             .limit(5)
         )

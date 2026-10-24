@@ -321,15 +321,20 @@ async def _futu_refresh_db_first(scope) -> None:
         logger.warning("futu refresh: sync failed (%s); serving DB snapshot", exc)
 
 
+# FUTU /orders/refresh waits at most this long for the observation pass.
+FUTU_REFRESH_WAIT_S = 10.0
+
+
 @router.post("/orders/refresh")
 async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
     """Sync orders into Postgres, then return the scoped payload.
 
     IB: subprocess pull (auto-allocated clientId 20-49, gateway auto-restart on
     ECONNREFUSED), gated on IB mode verification.
-    FUTU: read-only pull from OpenD into futu_orders/trades/closed_trades + journal
-    via sync_futu_orders (DB-first; no-ops under XENON_READ_ONLY=1). The GET read
-    path stays Postgres-only.
+    FUTU: one observation pass (run or joined) for the configured scope when
+    the request scope matches it, then the ledger payload (empty with
+    `scope_mismatch` otherwise). Reads only; the GET read path stays
+    Postgres-only.
     """
     from xenon.api import server
 
@@ -337,7 +342,7 @@ async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
     # OpenD connect, no writes. Placed before the mode check and the test-mode
     # short-circuit so the single contract holds under every flag combination.
     if is_read_only():
-        return orders_payload_for_scope(scope)
+        return await asyncio.to_thread(orders_payload_for_scope, scope)
 
     # IB requires a verified trading mode before any work — including the
     # test-mode short-circuit — so a mode mismatch is refused even in test mode
@@ -350,8 +355,20 @@ async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
         return {"status": "ok", "orders": []}
 
     if scope.broker == "FUTU":
-        await _futu_refresh_db_first(scope)
-        return orders_payload_for_scope(scope)
+        # The FUTU read path is the observation ledger, so refresh runs (or
+        # joins) one observation pass of the configured scope, only when the
+        # request scope is exactly that scope. History sync (futu_orders /
+        # futu_trades) stays separate (nightly loop, POST /blotter).
+        loop = getattr(request.app.state, "futu_observation_loop", None)
+        if loop is not None and loop.scope == scope:
+            try:
+                # Bounded wait (the web client times out first); the pass
+                # keeps running and the next read sees its result.
+                await asyncio.wait_for(asyncio.shield(loop.refresh()), FUTU_REFRESH_WAIT_S)
+            except TimeoutError:
+                payload = await asyncio.to_thread(orders_payload_for_scope, scope)
+                return {**payload, "refresh": "in_progress"}
+        return await asyncio.to_thread(orders_payload_for_scope, scope)
 
     # IB path — mode already verified above; touch the gateway.
     result = await server._run_ib_script_with_recovery(
@@ -359,4 +376,4 @@ async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
     )
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
-    return orders_payload_for_scope(scope)
+    return await asyncio.to_thread(orders_payload_for_scope, scope)

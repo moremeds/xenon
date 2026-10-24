@@ -345,11 +345,14 @@ def run_shadow_audit(
     scope_account: str,
     *,
     observation: dict | None,
+    scope: dict | None = None,
 ) -> AuditResult:
     """Audit the sync pass, log the outcome, record service health.
 
-    Never raises: an audit failure is logged and recorded as `error` so the
-    sync that called it still completes.
+    `scope` ({broker, account_env, broker_account}) keys the health row; when
+    omitted it resolves from the env (the IB sync subprocess). Never raises:
+    an audit failure is logged and recorded as `error` so the sync that
+    called it still completes.
     """
     started = datetime.now(timezone.utc)
     try:
@@ -369,6 +372,8 @@ def run_shadow_audit(
     record_service_health(
         SERVICE,
         result.status,
+        broker=(scope or {}).get("broker"),
+        account_env=(scope or {}).get("account_env"),
         broker_account=scope_account if coverage.is_real_account(scope_account) else None,
         started_at=started,
         finished_at=datetime.now(timezone.utc),

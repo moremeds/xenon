@@ -411,6 +411,20 @@ def _maybe_start_futu_history_loop() -> None:
     logger.info("futu history loop started (target: 16:30 ET weekdays)")
 
 
+def _maybe_start_futu_observation_loop(app: FastAPI) -> None:
+    """Start the Futu observation loop; never blocks or fails boot."""
+    from xenon.api.services import futu_observation
+
+    try:
+        loop = futu_observation.start_observation_loop(
+            resolve_meta=futu_observation.make_ib_meta_resolver(asyncio.get_running_loop(), lambda: ib_pool)
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("futu observation loop failed to start")
+        loop = None
+    app.state.futu_observation_loop = loop
+
+
 async def _run_fills_replay_on_boot() -> None:
     """Replay IB fills into xenon.order_fills once on boot. Best-effort.
 
@@ -636,6 +650,11 @@ async def lifespan(app: FastAPI):
     # set XENON_FUTU_HISTORY_LOOP=0 to suppress.
     _maybe_start_futu_history_loop()
 
+    # Futu observation loop (X3b): every 60 s, read positions + orders of the
+    # configured Futu trade scope and mirror them into Postgres. Reads only;
+    # skipped under XENON_READ_ONLY=1 or without FUTU_TRADE_ACC_ID/ENV.
+    _maybe_start_futu_observation_loop(app)
+
     # Wizard Risk Alert (spec §2.9). Starts in read-only sessions too: it
     # evaluates there but never writes.
     _maybe_start_wizard_risk_alert()
@@ -684,6 +703,11 @@ async def lifespan(app: FastAPI):
                 _cancel_task(getattr(app.state, "futu_history_loop_task", None)),
                 _SHUTDOWN_STEP_S["futu_loop"],
             )
+            observation_loop = getattr(app.state, "futu_observation_loop", None)
+            if observation_loop is not None:
+                await _bounded_cleanup(
+                    "futu observation loop", observation_loop.stop(), _SHUTDOWN_STEP_S["futu_observation"]
+                )
             if futu_routes._futu_client is not None:
                 await _bounded_cleanup(
                     "FutuClient disconnect", asyncio.to_thread(futu_routes._futu_client.disconnect), _SHUTDOWN_STEP_S["futu"]
@@ -816,7 +840,7 @@ _IB_SCRIPT_COOLDOWN_SECS = 15.0
 _ib_last_failure: dict[str, float] = {"data": 0.0}
 # Lifespan shutdown budget. uvicorn drains requests for 10 s
 # (--timeout-graceful-shutdown, docker/api.Dockerfile), then the lifespan
-# runs: IB disconnect wait 35 s + the other steps (sum 10 s) = 55 s, under
+# runs: IB disconnect wait 35 s + the other steps (sum 11 s) = 56 s, under
 # the 60 s compose stop_grace_period / WATCHTOWER_TIMEOUT. The IB wait
 # bounds only the wait: a disconnect queued behind a started order core is
 # never dropped and runs when the core ends. A core blocked on a broker call
@@ -830,6 +854,7 @@ _SHUTDOWN_STEP_S = {
     "poller": 1,
     "wizard": 1,
     "futu_loop": 1,
+    "futu_observation": 1,
     "futu": 1,
     "engine": 2,
 }

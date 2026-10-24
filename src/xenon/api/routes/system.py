@@ -24,6 +24,7 @@ from xenon.api.services import order_entry
 from xenon.api.services.flex_token import flex_token_status
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.db.engine import get_sync_engine
+from xenon.db.queries.portfolio import DISPLAY_SNAPSHOT
 from xenon.db.schema import account_snapshots, order_events, order_submissions
 from xenon.execution import gate4
 
@@ -37,34 +38,64 @@ logger = logging.getLogger("xenon.api")
 
 
 def _compute_futu_health() -> dict[str, Any]:
-    """Derive the Futu health block from the singleton + cached file.
+    """Derive the Futu health block from the singleton + Postgres.
 
-    Never probes OpenD (tribunal T11) — reachability comes from the last
-    cached sync result, not a TCP probe. Cheap enough to compute per
-    /health call.
+    Never probes OpenD (tribunal T11). One scope feeds every field: the
+    configured trade scope (`FUTU_TRADE_ACC_ID` + `FUTU_TRADE_ENV`), else the
+    connected client's matched account. `last_sync_at` is that scope's newest
+    display snapshot (`/futu/sync`), `observation` its newest observation
+    pass, `held_rows` its rows held by FUTU_FILL_UNPRICED / FUTU_FILL_CONFLICT /
+    FUTU_NOT_OBSERVED; never another account's row. A DB failure leaves the
+    fields None.
+    The account number is not reported (`/health` is unauthenticated).
     """
     from xenon.api import server
+    from xenon.execution import futu_scope, orders_store
 
-    cached_path = server.DATA_DIR / "futu_portfolio.json"
     last_sync_at: Optional[str] = None
     last_sync_age_s: Optional[float] = None
-    if cached_path.exists():
-        try:
-            data = json.loads(cached_path.read_text())
-            last_sync_at = data.get("fetched_at")
+    observation: Optional[dict[str, Any]] = None
+    held_rows: Optional[dict[str, Any]] = None
+    scope, _reason = futu_scope.configured_scope()
+    if scope is None:
+        scope = futu_routes.client_scope(futu_routes._futu_client)
+    try:
+        if scope is not None:
+            display = futu_routes.latest_display_snapshot(scope)
+            last_sync_at = (display or {}).get("fetched_at")
             if last_sync_at:
-                from datetime import datetime, timezone
-
-                dt = datetime.fromisoformat(last_sync_at.replace("Z", "+00:00"))
+                dt = datetime.fromisoformat(str(last_sync_at).replace("Z", "+00:00"))
                 last_sync_age_s = (datetime.now(timezone.utc) - dt).total_seconds()
-        except Exception:
-            pass
+            with get_sync_engine().connect() as conn:
+                obs = conn.execute(
+                    select(account_snapshots.c.payload["observation"])
+                    .where(
+                        account_snapshots.c.broker == scope.broker,
+                        account_snapshots.c.account_env == scope.account_env,
+                        account_snapshots.c.broker_account == scope.broker_account,
+                        account_snapshots.c.payload.has_key("observation"),
+                    )
+                    .order_by(account_snapshots.c.snapshot_at.desc(), account_snapshots.c.id.desc())
+                    .limit(1)
+                ).scalar()
+            if isinstance(obs, dict):
+                observation = {"as_of": obs.get("as_of"), "complete": obs.get("complete") is True}
+            held_rows = orders_store.futu_held_rows(broker_account=scope.broker_account, account_env=scope.account_env)
+    except Exception as exc:  # noqa: BLE001 — health must render without the DB
+        logger.debug("futu health: snapshot read failed: %s", exc)
 
+    loop = getattr(server.app.state, "futu_observation_loop", None)
     return {
         "configured": True,  # v1 assumption; cloud branch flips to False
         "connected": futu_routes._futu_client is not None and futu_routes._futu_client.is_connected(),
         "last_sync_at": last_sync_at,
         "last_sync_age_s": last_sync_age_s,
+        "observation_loop": loop is not None and loop.running,
+        "observation": observation,
+        # Rows that keep the scope incomplete or hold demand, by reason code.
+        # Futu order ids only: submission ids embed the account number.
+        "held_rows": held_rows,
+        "scope_env": scope.account_env if scope is not None else None,
     }
 
 
@@ -80,7 +111,7 @@ def _snapshotter_health(scope: dict | None = None) -> dict:
     try:
         engine = get_sync_engine()
         with engine.connect() as conn:
-            stmt = select(func.max(account_snapshots.c.snapshot_at))
+            stmt = select(func.max(account_snapshots.c.snapshot_at)).where(DISPLAY_SNAPSHOT)
             if scope is not None:
                 stmt = stmt.where(
                     account_snapshots.c.broker == scope["broker"],
@@ -364,7 +395,7 @@ async def health():
         "ib_pool": server.ib_pool.status() if server.ib_pool else {},
         "orders_owner": owner,
         "uw": server.uw_available,
-        "futu": _compute_futu_health(),
+        "futu": await asyncio.to_thread(_compute_futu_health),
         "trading_mode": getattr(server.app.state, "trading_mode", trading_mode.MODE),
         # /health is auth-exempt — mask the IB account so the public payload
         # does not leak the full identifier. The raw value stays on app.state
@@ -384,8 +415,8 @@ async def admin_operator():
     """Operator console aggregate. Read-only. No per-route Depends — gated by
     the global auth_middleware like every data route (a per-route Depends would
     401 cross-container in Docker since the Next proxy forwards no token). The
-    DB helpers are called inline (not via to_thread) to match /health and to
-    stay on the Phase-2 test connection."""
+    IB-side DB helpers are called inline to match /health and to stay on the
+    Phase-2 test connection; the Futu health read runs off the event loop."""
     from xenon.api import server
 
     gw = await check_ib_gateway()
@@ -404,7 +435,7 @@ async def admin_operator():
         "flex_divergence": _flex_divergence_health(),
         "flex_token": flex_token_status(),
         "realtime_subscribers": await asyncio.to_thread(_realtime_subscribers_health),
-        "futu": _compute_futu_health(),
+        "futu": await asyncio.to_thread(_compute_futu_health),
         "writers": _service_health_rows(),
     }
 

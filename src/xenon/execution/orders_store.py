@@ -8,6 +8,7 @@ Spec: docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md §12.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -18,7 +19,7 @@ from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import Text, cast, func, insert, literal, select, text, update
+from sqlalchemy import Integer, Text, cast, func, insert, literal, select, text, update
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -1366,6 +1367,536 @@ def update_fill_commission(
             },
         )
         return True
+
+
+# ── Futu order-grain mirror (X3b) ──
+
+# External Futu orders (no Xenon remark) get submission_id
+# "futu-<account_env>-<acc_id>-<order_id>" (the PK is global, the order id is
+# only unique per scope).
+FUTU_SUBMISSION_PREFIX = "futu-"
+FUTU_NOT_OBSERVED = "FUTU_NOT_OBSERVED"
+FUTU_FILL_UNPRICED = "FUTU_FILL_UNPRICED"
+# The fill's exec_id already belongs to another submission: nothing advances.
+FUTU_FILL_CONFLICT = "FUTU_FILL_CONFLICT"
+# Rows an operator may need to look at (`/health` futu `held_rows`).
+FUTU_HELD_REASONS = (FUTU_FILL_UNPRICED, FUTU_FILL_CONFLICT, FUTU_NOT_OBSERVED)
+# Full passes in a row a non-terminal order must be absent from before it
+# becomes UNKNOWN (one-pass grace, like the IB disappeared-order sweep).
+FUTU_MISSING_PASSES = 2
+
+
+def futu_submission_id(account_env: str, broker_account: str, order_id: str) -> str:
+    return f"{FUTU_SUBMISSION_PREFIX}{account_env}-{broker_account}-{order_id}"
+
+
+_FUTU_TERMINAL = frozenset({"FILLED", "CANCELLED", "REJECTED", "FAILED"})
+_MONEY_4 = Decimal("0.0001")
+
+
+def futu_exec_id(account_env: str, acc_id: str, order_id: str, cum_qty: int) -> str:
+    """Deterministic, replay-safe fill id for one cumulative-quantity step,
+    scoped like the submission id (`order_fills.exec_id` is a global PK)."""
+    return f"futu:{account_env}:{acc_id}:ord:{order_id}:{cum_qty}"
+
+
+@dataclass(frozen=True)
+class FutuOrderObservation:
+    """One Futu order row as seen by an observation pass (already parsed)."""
+
+    order_id: str
+    remark: str | None
+    ticker: str
+    security_type: Literal["STK", "OPT"]
+    action: Literal["BUY", "SELL"]
+    quantity: int
+    limit_price: Decimal | None
+    state: str
+    legs: dict
+    dealt_qty: int
+    dealt_avg_price: Decimal | None
+    # Order observation timing: Futu `updated_time` converted to UTC. It is
+    # the order's last update, not a proven execution timestamp.
+    updated_at: datetime
+    strike: float | None = None
+    right: str | None = None
+    expiry: str | None = None
+    con_id: int | None = None
+    # Observed order semantics (Futu `order_type`, `time_in_force`,
+    # `aux_price` = trigger price), kept for the read path.
+    order_type: str | None = None
+    tif: str | None = None
+    aux_price: Decimal | None = None
+    # Raw Futu `order_status` (several statuses map to UNKNOWN).
+    futu_status: str | None = None
+    # Full Futu code (e.g. US.SPY261218C500125): exact instrument identity;
+    # the strike column (Numeric(12, 2)) is display precision only.
+    futu_code: str | None = None
+    fill_metadata: dict | None = None
+
+
+def _futu_order_info(obs: FutuOrderObservation) -> dict | None:
+    """Observed order type, trigger price and raw Futu status, stored in the
+    legs payload (`futu_order`); None when the row reported none of them."""
+    if obs.order_type is None and obs.futu_status is None:
+        return None
+    return {
+        "order_type": obs.order_type,
+        "aux_price": str(obs.aux_price) if obs.aux_price is not None else None,
+        "status": obs.futu_status,
+    }
+
+
+def _same_strike(row, obs: FutuOrderObservation) -> bool:
+    """Exact option identity. Both Futu codes known → they must be equal.
+    Else the full-precision strike (qualified leg, else the 2-dp column) must
+    equal the observed strike exactly; a strike the stored row cannot
+    represent exactly is not established → mismatch (fail closed)."""
+    legs = normalize_legs_payload(row.legs)
+    code = legs.get("futu_code")
+    if code and obs.futu_code:
+        return code == obs.futu_code
+    if obs.strike is None:
+        return False
+    leg = (legs.get("legs") or [{}])[0] if isinstance(legs.get("legs"), list) else {}
+    stored = leg.get("strike") if isinstance(leg, dict) and leg.get("strike") is not None else row.strike
+    return stored is not None and Decimal(str(stored)) == Decimal(str(obs.strike))
+
+
+def _futu_identity_mismatch(row, obs: FutuOrderObservation) -> str | None:
+    """Which immutable identity field of `row` the observation contradicts
+    (symbol, security type, side, option right / expiry / strike, qualified
+    con_id when both are known), or None when it is the same order."""
+    if str(row.ticker or "").upper() != obs.ticker.upper():
+        return "symbol"
+    if row.security_type != obs.security_type:
+        return "security_type"
+    if row.action != obs.action:
+        return "side"
+    if obs.security_type == "OPT":
+        if (row.right or None) != obs.right:
+            return "right"
+        if (row.expiry.strftime("%Y%m%d") if row.expiry else None) != obs.expiry:
+            return "expiry"
+        if not _same_strike(row, obs):
+            return "strike"
+        if row.con_id is not None and obs.con_id is not None and int(row.con_id) != int(obs.con_id):
+            return "con_id"
+    return None
+
+
+def _futu_state_values(row, obs: FutuOrderObservation, *, fresh: bool, own: bool) -> dict:
+    """Column updates a Futu observation may apply to an existing row.
+
+    Only a fresh observation (its read began after the row's last local
+    write) may make a row terminal, resurrect a terminal row or lower an
+    external row's quantity; a stale one applies conservative changes only.
+    A Xenon row keeps its own quantity and legs; a larger broker quantity is
+    kept as `observed_qty` (Gate 4 reserves the max).
+    """
+    values: dict = {}
+    state = row.state or ""
+    if obs.state != state:
+        to_terminal = obs.state in _FUTU_TERMINAL
+        from_terminal = state in _FUTU_TERMINAL
+        if fresh or not (to_terminal or from_terminal):
+            values["state"] = obs.state
+    legs = normalize_legs_payload(row.legs)
+    info = _futu_order_info(obs)
+    if row.reason_code == FUTU_NOT_OBSERVED:
+        values["reason_code"] = None
+    if own:
+        new_legs = dict(legs)
+        new_legs.pop("futu_missing", None)
+        if obs.futu_code and not legs.get("futu_code"):
+            new_legs["futu_code"] = obs.futu_code
+        if obs.quantity != int(row.quantity or 0) and obs.quantity != legs.get("observed_qty"):
+            new_legs["observed_qty"] = obs.quantity
+        if info is not None:
+            new_legs["futu_order"] = info
+        if new_legs != legs:
+            values["legs"] = new_legs
+        return values
+    quantity = obs.quantity if fresh else max(obs.quantity, int(row.quantity or 0))
+    if quantity != int(row.quantity or 0):
+        values["quantity"] = quantity
+    if fresh and obs.limit_price is not None and obs.limit_price != row.limit_price:
+        values["limit_price"] = obs.limit_price
+    if obs.tif is not None and obs.tif != row.tif:
+        values["tif"] = obs.tif
+    merged = merge_observed_legs(row.legs, obs.legs)
+    merged.pop("futu_missing", None)
+    if obs.futu_code and not merged.get("futu_code"):
+        merged["futu_code"] = obs.futu_code
+    if info is not None:
+        merged["futu_order"] = info
+    if merged != legs:
+        values["legs"] = merged
+    return values
+
+
+def _fill_reason(skip: str | None) -> str | None:
+    if skip is None:
+        return None
+    return FUTU_FILL_CONFLICT if skip == "exec_id_conflict" else FUTU_FILL_UNPRICED
+
+
+def mirror_futu_order(
+    obs: FutuOrderObservation,
+    *,
+    broker_account: str,
+    account_env: str,
+    observed_at: datetime,
+) -> dict:
+    """Mirror one observed Futu order into order_submissions + order_fills.
+
+    One transaction under the Gate-4 account-scope lock and a row lock
+    (`SELECT … FOR UPDATE`). The row is found by (scope, broker_order_id),
+    else a Xenon row in the same scope named by the remark `xo:<id>` (and not
+    yet bound to another broker order), else a new external row
+    `futu-<account_env>-<acc_id>-<order_id>` is inserted (multiplier 1 for
+    stock, the qualified one for an option, else NULL).
+
+    Fills are order grain: `filled_qty` is the durable high-water. Only when
+    the observed cumulative `dealt_qty` exceeds it is one `order_fills` row
+    written (qty = delta, price from the cumulative notional change,
+    exec_id = futu_exec_id(...)) and the high-water advanced, in the same
+    transaction. An unchanged or lower cumulative writes nothing. A delta
+    without `dealt_avg_price`, or whose cumulative notional did not grow,
+    writes no fill and is reported as `fill_skipped`, so the caller can mark
+    its pass incomplete; the row then stays non-terminal (a terminal status
+    is not applied; a new row is UNKNOWN) with reason_code
+    FUTU_FILL_UNPRICED, so Gate 4 keeps its demand. Deltas use the precise cumulative notional kept in
+    the legs payload (`futu_fill`), not the 4-place display average.
+
+    A row whose immutable identity (symbol, sec type, side, option fields)
+    contradicts the observation is not bound or changed:
+    `identity_mismatch` names the field.
+    """
+    ensure_writable()
+    broker = "FUTU"
+    scope_conds = (
+        order_submissions.c.broker == broker,
+        order_submissions.c.account_env == account_env,
+        order_submissions.c.broker_account == broker_account,
+    )
+    out: dict = {"submission_id": None, "action": "NOOP", "fill": None, "fill_skipped": None}
+    with get_sync_engine().begin() as conn:
+        _lock_gate4_scope(conn, broker, account_env, broker_account)
+        now = datetime.now(timezone.utc)
+
+        def _row(*conds):
+            return conn.execute(select(order_submissions).where(*conds, *scope_conds).with_for_update()).first()
+
+        row = _row(order_submissions.c.broker_order_id == obs.order_id)
+        bind = False
+        if row is None:
+            sid = submission_id_from_order_ref(obs.remark)
+            if sid is not None:
+                row = _row(order_submissions.c.submission_id == sid, order_submissions.c.broker_order_id.is_(None))
+                bind = row is not None
+        if row is not None:
+            # A remark (or a stored broker id) is not proof of contract
+            # identity: a contradicting observation binds nothing, writes
+            # nothing and keeps the reservation; the caller marks its pass
+            # incomplete, so Gate 4 fails closed on the missing demand.
+            mismatch = _futu_identity_mismatch(row, obs)
+            if mismatch is not None:
+                out["submission_id"] = row.submission_id
+                out["identity_mismatch"] = mismatch
+                return out
+            if bind:
+                conn.execute(
+                    update(order_submissions)
+                    .where(order_submissions.c.submission_id == row.submission_id)
+                    .values(broker_order_id=obs.order_id)
+                )
+        # Decide the fill before any state change: a cumulative increase that
+        # cannot be priced must not let the row turn terminal with
+        # filled_qty behind (Gate 4 would drop its demand). The row then
+        # stays non-terminal with reason_code FUTU_FILL_UNPRICED and the
+        # caller marks its pass incomplete.
+        stored = int(row.filled_qty or 0) if row is not None else 0
+        delta = obs.dealt_qty - stored
+        price = notional = None
+        stored_legs = normalize_legs_payload(row.legs) if row is not None else {}
+        sid_for_fill = row.submission_id if row is not None else futu_submission_id(account_env, broker_account, obs.order_id)
+        exec_id = futu_exec_id(account_env, broker_account, obs.order_id, obs.dealt_qty)
+        if delta > 0:
+            skip = None
+            if obs.dealt_avg_price is None:
+                skip = "no_dealt_avg_price"
+            else:
+                # Precise cumulative notional high-water (legs `futu_fill`);
+                # `avg_fill_price` is a 4-place display value, used only for
+                # a row that has no stored notional yet.
+                avg = Decimal(str(obs.dealt_avg_price))
+                hw = stored_legs.get("futu_fill") or {}
+                if stored == 0:
+                    prev_notional = Decimal(0)
+                elif hw.get("cum_qty") == stored and hw.get("cum_notional") is not None:
+                    prev_notional = Decimal(str(hw["cum_notional"]))
+                elif row is not None and row.avg_fill_price is not None:
+                    prev_notional = Decimal(stored) * Decimal(str(row.avg_fill_price))
+                else:
+                    prev_notional = None
+                    skip = "no_prior_notional"
+                if prev_notional is not None:
+                    notional = Decimal(obs.dealt_qty) * avg
+                    price = (notional - prev_notional) / Decimal(delta)
+                    if price <= 0:
+                        # Never fabricate a delta price from the cumulative average.
+                        skip, price = "notional_inconsistent", None
+            if skip is None:
+                owner = conn.execute(
+                    select(order_fills.c.submission_id).where(order_fills.c.exec_id == exec_id)
+                ).scalar()
+                if owner is not None and owner != sid_for_fill:
+                    # Not a replay of this submission's fill: never advance
+                    # the high-water over another submission's execution.
+                    skip, price = "exec_id_conflict", None
+            if skip is not None:
+                out["fill_skipped"] = skip
+                if obs.state in _FUTU_TERMINAL:
+                    keep = row.state if row is not None and row.state not in _FUTU_TERMINAL else "UNKNOWN"
+                    obs = dataclasses.replace(obs, state=keep)
+
+        if row is None:
+            info = _futu_order_info(obs)
+            sid = futu_submission_id(account_env, broker_account, obs.order_id)
+            mult = (obs.legs.get("legs") or [{}])[0].get("mult")
+            pg_insert_values = dict(
+                reason_code=_fill_reason(out["fill_skipped"]),
+                # Stock is 1 share per unit; an option without IB-qualified
+                # metadata has no known multiplier (NULL, never a default).
+                multiplier=1 if obs.security_type == "STK" else (int(mult) if mult else None),
+            )
+            conn.execute(
+                pg_insert(order_submissions)
+                .values(
+                    submission_id=sid,
+                    user_id="futu-observation",
+                    client_attempt_id=sid,
+                    ticker=obs.ticker,
+                    security_type=obs.security_type,
+                    action=obs.action,
+                    quantity=obs.quantity,
+                    **pg_insert_values,
+                    limit_price=obs.limit_price,
+                    state=obs.state,
+                    filled_qty=0,
+                    submitted_at=now,
+                    updated_at=now,
+                    modify_sequence=0,
+                    broker=broker,
+                    account_env=account_env,
+                    broker_account=broker_account,
+                    broker_order_id=obs.order_id,
+                    strike=obs.strike,
+                    right=obs.right,
+                    expiry=datetime.strptime(obs.expiry, "%Y%m%d").date() if obs.expiry else None,
+                    con_id=obs.con_id,
+                    legs={
+                        **obs.legs,
+                        **({"futu_order": info} if info is not None else {}),
+                        **({"futu_code": obs.futu_code} if obs.futu_code else {}),
+                    },
+                    **({"tif": obs.tif} if obs.tif is not None else {}),
+                )
+                .on_conflict_do_nothing()
+            )
+            row = _row(order_submissions.c.broker_order_id == obs.order_id)
+            if row is None:
+                raise RuntimeError(f"Futu order {obs.order_id}: row neither found nor inserted")
+            out["action"] = "INSERTED"
+        else:
+            own = not row.submission_id.startswith(FUTU_SUBMISSION_PREFIX)
+            values = _futu_state_values(
+                row, obs, fresh=is_fresh_observation(observed_at, row.updated_at), own=own
+            )
+            if out["fill_skipped"] and row.reason_code != _fill_reason(out["fill_skipped"]):
+                values["reason_code"] = _fill_reason(out["fill_skipped"])
+            if values:
+                values["updated_at"] = monotone_updated_at(now)
+                conn.execute(
+                    update(order_submissions).where(order_submissions.c.submission_id == row.submission_id).values(**values)
+                )
+                out["action"] = "UPDATED"
+        out["submission_id"] = row.submission_id
+        if delta <= 0 or price is None:
+            return out
+        current_legs = normalize_legs_payload(
+            conn.execute(
+                select(order_submissions.c.legs).where(order_submissions.c.submission_id == row.submission_id)
+            ).scalar()
+        )
+        basis = "cumulative_notional_delta"
+        price = price.quantize(_MONEY_4)
+        metadata = {
+            **(obs.fill_metadata or {}),
+            "sec_type": row.security_type,
+            "source": "futu_order_observation",
+            "time_basis": "order_updated_time",
+            "price_basis": basis,
+            "cum_qty": obs.dealt_qty,
+        }
+        inserted = conn.execute(
+            pg_insert(order_fills)
+            .values(
+                exec_id=exec_id,
+                submission_id=row.submission_id,
+                ticker=row.ticker,
+                side=row.action,
+                qty=Decimal(delta),
+                price=price,
+                filled_at=obs.updated_at,
+                metadata=metadata,
+                broker=broker,
+                account_env=account_env,
+                broker_account=broker_account,
+            )
+            .on_conflict_do_nothing(index_elements=["exec_id"])
+            .returning(order_fills.c.exec_id)
+        ).first()
+        conn.execute(
+            update(order_submissions)
+            .where(order_submissions.c.submission_id == row.submission_id)
+            .values(
+                filled_qty=obs.dealt_qty,
+                avg_fill_price=avg.quantize(_MONEY_4),
+                legs={**current_legs, "futu_fill": {"cum_qty": obs.dealt_qty, "cum_notional": str(notional)}},
+                **({"reason_code": None} if row.reason_code in (FUTU_FILL_UNPRICED, FUTU_FILL_CONFLICT) else {}),
+                updated_at=monotone_updated_at(now),
+            )
+        )
+        if inserted is not None:
+            out["fill"] = exec_id
+            emit_outbox_in_txn(
+                conn,
+                channel=CHANNEL_FILL_RECORDED,
+                source="mirror_futu_order",
+                payload={
+                    "exec_id": exec_id,
+                    "submission_id": row.submission_id,
+                    "ticker": row.ticker,
+                    "side": row.action,
+                    "qty": str(delta),
+                    "price": str(price),
+                    "filled_at": obs.updated_at.isoformat(),
+                    "metadata": metadata,
+                    "broker": broker,
+                    "account_env": account_env,
+                    "broker_account": broker_account,
+                },
+            )
+    return out
+
+
+def _futu_scope_conds(account_env: str, broker_account: str) -> tuple:
+    return (
+        order_submissions.c.broker == "FUTU",
+        order_submissions.c.account_env == account_env,
+        order_submissions.c.broker_account == broker_account,
+    )
+
+
+def futu_unobserved_order_ids(
+    *,
+    broker_account: str,
+    account_env: str,
+    observed: set,
+    include_not_observed: bool = False,
+    recheck_limit: int = 20,
+) -> list[str]:
+    """Broker order ids of non-terminal Futu rows in scope that a full pass
+    did not see. Rows already UNKNOWN for FUTU_NOT_OBSERVED are included only
+    with `include_not_observed` (the caller's slow recheck cadence), at most
+    `recheck_limit` of them, so a recheck pass stays bounded."""
+    conds = [
+        *_futu_scope_conds(account_env, broker_account),
+        order_submissions.c.broker_order_id.is_not(None),
+        order_submissions.c.state.in_(NON_TERMINAL_STATES),
+    ]
+    with get_sync_engine().connect() as conn:
+        ids = list(
+            conn.execute(
+                select(order_submissions.c.broker_order_id).where(
+                    *conds, order_submissions.c.reason_code.is_distinct_from(FUTU_NOT_OBSERVED)
+                )
+            ).scalars()
+        )
+        if include_not_observed:
+            # At most `recheck_limit` held rows per pass, fewest misses first:
+            # each recheck miss raises `futu_missing`, so the set rotates.
+            misses = cast(order_submissions.c.legs["futu_missing"].astext, Integer)
+            ids += list(
+                conn.execute(
+                    select(order_submissions.c.broker_order_id)
+                    .where(
+                        *conds,
+                        order_submissions.c.reason_code == FUTU_NOT_OBSERVED,
+                        order_submissions.c.broker_order_id.not_in(observed or [""]),
+                    )
+                    .order_by(misses, order_submissions.c.updated_at, order_submissions.c.submission_id)
+                    .limit(recheck_limit)
+                ).scalars()
+            )
+        return sorted(oid for oid in ids if oid not in observed)
+
+
+def futu_held_rows(*, broker_account: str, account_env: str, limit: int = 20) -> dict:
+    """Non-terminal Futu rows in scope held by a FUTU_HELD_REASONS code:
+    {reason: {"count", "order_ids"}} (oldest first, at most `limit` ids)."""
+    with get_sync_engine().connect() as conn:
+        rows = conn.execute(
+            select(order_submissions.c.reason_code, order_submissions.c.broker_order_id)
+            .where(
+                *_futu_scope_conds(account_env, broker_account),
+                order_submissions.c.state.in_(NON_TERMINAL_STATES),
+                order_submissions.c.reason_code.in_(FUTU_HELD_REASONS),
+            )
+            .order_by(order_submissions.c.updated_at, order_submissions.c.submission_id)
+        ).all()
+    out = {reason: {"count": 0, "order_ids": []} for reason in FUTU_HELD_REASONS}
+    for reason, oid in rows:
+        out[reason]["count"] += 1
+        if len(out[reason]["order_ids"]) < limit:
+            out[reason]["order_ids"].append(oid)
+    return out
+
+
+def mark_futu_order_unobserved(order_id: str, *, broker_account: str, account_env: str) -> int:
+    """Count one full pass in which a by-id lookup did not find the order.
+    At FUTU_MISSING_PASSES the row becomes UNKNOWN with reason_code
+    FUTU_NOT_OBSERVED (demand kept, never a terminal guess). Returns the new
+    count (0 when no non-terminal row matches)."""
+    ensure_writable()
+    with get_sync_engine().begin() as conn:
+        _lock_gate4_scope(conn, "FUTU", account_env, broker_account)
+        row = conn.execute(
+            select(order_submissions)
+            .where(
+                *_futu_scope_conds(account_env, broker_account),
+                order_submissions.c.broker_order_id == order_id,
+                order_submissions.c.state.in_(NON_TERMINAL_STATES),
+            )
+            .with_for_update()
+        ).first()
+        if row is None:
+            return 0
+        legs = normalize_legs_payload(row.legs)
+        missing = int(legs.get("futu_missing") or 0) + 1
+        values: dict = {"legs": {**legs, "futu_missing": missing}}
+        if missing >= FUTU_MISSING_PASSES and row.reason_code != FUTU_NOT_OBSERVED:
+            values.update(
+                state="UNKNOWN",
+                reason_code=FUTU_NOT_OBSERVED,
+                updated_at=monotone_updated_at(datetime.now(timezone.utc)),
+            )
+        conn.execute(
+            update(order_submissions).where(order_submissions.c.submission_id == row.submission_id).values(**values)
+        )
+        return missing
 
 
 def record_event(
