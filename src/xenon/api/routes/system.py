@@ -37,34 +37,52 @@ logger = logging.getLogger("xenon.api")
 
 
 def _compute_futu_health() -> dict[str, Any]:
-    """Derive the Futu health block from the singleton + cached file.
+    """Derive the Futu health block from the singleton + Postgres.
 
-    Never probes OpenD (tribunal T11) — reachability comes from the last
-    cached sync result, not a TCP probe. Cheap enough to compute per
-    /health call.
+    Never probes OpenD (tribunal T11). `last_sync_at` comes from the newest
+    Futu display snapshot (`/futu/sync`), `observation` from the newest
+    observation-pass snapshot of the configured trade scope. Both are
+    `account_snapshots` rows; a DB failure leaves the fields None.
     """
     from xenon.api import server
+    from xenon.execution import futu_scope
 
-    cached_path = server.DATA_DIR / "futu_portfolio.json"
     last_sync_at: Optional[str] = None
     last_sync_age_s: Optional[float] = None
-    if cached_path.exists():
-        try:
-            data = json.loads(cached_path.read_text())
-            last_sync_at = data.get("fetched_at")
-            if last_sync_at:
-                from datetime import datetime, timezone
+    observation: Optional[dict[str, Any]] = None
+    try:
+        display = futu_routes.latest_display_snapshot()
+        last_sync_at = (display or {}).get("fetched_at")
+        if last_sync_at:
+            dt = datetime.fromisoformat(str(last_sync_at).replace("Z", "+00:00"))
+            last_sync_age_s = (datetime.now(timezone.utc) - dt).total_seconds()
+        scope, _reason = futu_scope.configured_scope()
+        if scope is not None:
+            with get_sync_engine().connect() as conn:
+                obs = conn.execute(
+                    select(account_snapshots.c.payload["observation"])
+                    .where(
+                        account_snapshots.c.broker == scope.broker,
+                        account_snapshots.c.account_env == scope.account_env,
+                        account_snapshots.c.broker_account == scope.broker_account,
+                        account_snapshots.c.payload.has_key("observation"),
+                    )
+                    .order_by(account_snapshots.c.snapshot_at.desc(), account_snapshots.c.id.desc())
+                    .limit(1)
+                ).scalar()
+            if isinstance(obs, dict):
+                observation = {"as_of": obs.get("as_of"), "complete": obs.get("complete") is True}
+    except Exception as exc:  # noqa: BLE001 — health must render without the DB
+        logger.debug("futu health: snapshot read failed: %s", exc)
 
-                dt = datetime.fromisoformat(last_sync_at.replace("Z", "+00:00"))
-                last_sync_age_s = (datetime.now(timezone.utc) - dt).total_seconds()
-        except Exception:
-            pass
-
+    loop = getattr(server.app.state, "futu_observation_loop", None)
     return {
         "configured": True,  # v1 assumption; cloud branch flips to False
         "connected": futu_routes._futu_client is not None and futu_routes._futu_client.is_connected(),
         "last_sync_at": last_sync_at,
         "last_sync_age_s": last_sync_age_s,
+        "observation_loop": loop is not None and loop.running,
+        "observation": observation,
     }
 
 

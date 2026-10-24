@@ -8,11 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import json
 import logging
 import os
 import threading
-from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -104,40 +102,77 @@ def _futu_cleanup_after_timeout(
     marker.set_result(None)
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers: the display snapshot lives in Postgres (no data/*.json)
 # ---------------------------------------------------------------------------
+#
+# A /futu/sync result is stored as an `account_snapshots` row (broker FUTU)
+# whose payload has NO `observation` key: a display snapshot. The observation
+# loop's rows carry `observation` and serve Gate 4; they read no balances
+# (bankroll column 0), so display readers never select them.
 
 
-def _read_cache(path: Path) -> Optional[dict]:
-    """Read a JSON cache file, return None if missing/corrupt."""
-    try:
-        return json.loads(path.read_text())
-    except Exception:
-        return None
+def _display_rows():
+    from sqlalchemy import desc, select
+
+    from xenon.db.schema import account_snapshots
+
+    return (
+        select(account_snapshots.c.payload, account_snapshots.c.snapshot_at)
+        .where(
+            account_snapshots.c.broker == "FUTU",
+            ~account_snapshots.c.payload.has_key("observation"),
+        )
+        .order_by(desc(account_snapshots.c.snapshot_at), desc(account_snapshots.c.id))
+    )
 
 
-def _write_cache(path: Path, data: dict) -> None:
-    """Write JSON to cache file atomically via temp file + os.replace()."""
-    import tempfile
+def latest_display_snapshot() -> Optional[dict]:
+    """Newest Futu display snapshot payload (any account, like the old single
+    cache file), or None when nothing was ever synced."""
+    from xenon.db.engine import get_sync_engine
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp", prefix=".cache_")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp_path, str(path))
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+    with get_sync_engine().connect() as conn:
+        row = conn.execute(_display_rows().limit(1)).first()
+    return dict(row.payload) if row is not None and row.payload else None
 
 
-def _atomic_save(path: str, data: dict) -> str:
-    """Use the project's atomic_save for portfolio/orders files."""
-    from xenon.utils.atomic_io import atomic_save
+def _persist_display_snapshot(client: FutuClient, result: dict) -> bool:
+    """Store one /futu/sync result as a FUTU display snapshot for the client's
+    matched account. No-op (False) under XENON_READ_ONLY=1 or when the matched
+    account is unknown."""
+    from decimal import Decimal
 
-    return atomic_save(path, data)
+    from sqlalchemy import func, insert
+
+    from xenon.api.guards import is_read_only
+    from xenon.db.engine import get_sync_engine
+    from xenon.db.schema import account_snapshots
+    from xenon.execution.account_scope import env_from_trd_env
+
+    if is_read_only():
+        return False
+    acc_id = getattr(client, "_acc_id", None)
+    trd_env = client.trd_env_of_matched_account()
+    if acc_id is None or trd_env is None:
+        logger.warning("Futu display snapshot not stored: matched account unknown")
+        return False
+    account_env = env_from_trd_env(trd_env)
+    net_liq = (result.get("account_summary") or {}).get("net_liquidation")
+    net_liq_d = Decimal(str(net_liq)) if isinstance(net_liq, (int, float)) else None
+    with get_sync_engine().begin() as conn:
+        conn.execute(
+            insert(account_snapshots).values(
+                account=str(acc_id),
+                bankroll=net_liq_d if net_liq_d is not None else Decimal(0),
+                net_liquidation=net_liq_d,
+                payload=result,
+                broker="FUTU",
+                account_env=account_env,
+                broker_account=str(acc_id),
+                snapshot_at=func.clock_timestamp(),
+            )
+        )
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -161,22 +196,19 @@ def _futu_in_cooldown() -> bool:
 def _maybe_preserve_partial_failure(new_result: dict) -> Optional[dict]:
     """Refuse to overwrite a good snapshot with a degraded one.
 
-    Returns the previous cached file when the new result has warnings AND
-    fewer positions than the cache. Writes a sidecar
-    `data/futu_portfolio.error.json` so the rejected payload is inspectable.
+    Returns the previous display snapshot (Postgres) when the new result has
+    warnings AND fewer positions than it. The rejected result is not stored;
+    its counts and warnings are logged.
 
     Returns None when there is nothing to preserve (caller proceeds with
     the normal save path).
     """
-    from xenon.api import server
-
     new_warnings = new_result.get("warnings") or []
     new_count = new_result.get("count", 0)
     if not new_warnings:
         return None
 
-    cached_path = server.DATA_DIR / "futu_portfolio.json"
-    prev = _read_cache(cached_path)
+    prev = latest_display_snapshot()
     if prev is None:
         return None
 
@@ -184,23 +216,18 @@ def _maybe_preserve_partial_failure(new_result: dict) -> Optional[dict]:
     if new_count >= prev_count:
         return None  # new snapshot isn't degraded
 
-    error_path = server.DATA_DIR / "futu_portfolio.error.json"
-    try:
-        _write_cache(error_path, new_result)
-    except Exception as exc:
-        logger.warning("Failed to write futu error sidecar: %s", exc)
     logger.warning(
-        "Futu sync degraded (new=%d, prev=%d, warnings=%d) — preserved prior snapshot",
+        "Futu sync degraded (new=%d, prev=%d, warnings=%s) — preserved prior snapshot",
         new_count,
         prev_count,
-        len(new_warnings),
+        new_warnings[:20],
     )
     return prev
 
 
 @router.post("/futu/sync")
 async def futu_sync():
-    """Force-fetch Futu positions + account, write data/futu_portfolio.json.
+    """Force-fetch Futu positions + account, store a FUTU display snapshot in Postgres.
 
     Patterns:
     - **Singleflight.** Concurrent callers serialize on an asyncio lock AND
@@ -209,8 +236,8 @@ async def futu_sync():
       OpenD roundtrip.
     - **10s cooldown.** Repeat calls within 10s return the cached result.
     - **Partial-failure preservation (tribunal T15).** If the new snapshot
-      has warnings and fewer positions than the cache, the cache is
-      preserved untouched and a sidecar error file is written.
+      has warnings and fewer positions than the previous display snapshot
+      (Postgres), that snapshot is returned and the new one is not stored.
     - **Off-loop blocking calls.** The Futu SDK is fully sync; the call runs
       on a dedicated single-worker executor. While a worker is still alive
       (e.g. after a timeout), new requests 503 instead of queueing behind the
@@ -225,7 +252,7 @@ async def futu_sync():
 
     # Early cooldown check — avoids lock contention when cache is fresh.
     if _futu_in_cooldown():
-        cached = _read_cache(server.DATA_DIR / "futu_portfolio.json")
+        cached = latest_display_snapshot()
         if cached:
             return {"ok": True, **cached}
 
@@ -241,7 +268,7 @@ async def futu_sync():
         # Re-check inside lock — race guard so two tabs inside the lock
         # window piggyback on the same result.
         if _futu_in_cooldown():
-            cached = _read_cache(server.DATA_DIR / "futu_portfolio.json")
+            cached = latest_display_snapshot()
             if cached:
                 return {"ok": True, **cached}
 
@@ -302,7 +329,11 @@ async def futu_sync():
             ]
             return {"ok": True, **preserved, "warnings": preserved_warnings}
 
-        _atomic_save(str(server.DATA_DIR / "futu_portfolio.json"), result)
+        try:
+            _persist_display_snapshot(client, result)
+        except Exception as exc:  # noqa: BLE001 — the fetch itself succeeded
+            logger.warning("Futu display snapshot not stored: %s", exc)
+            result = {**result, "warnings": list(result.get("warnings") or []) + ["display_snapshot_not_stored"]}
         _futu_last_sync_monotonic = _time.monotonic()
 
         # Persist FUTU NAV to xenon.nav_history (spec §10). Best-effort —
@@ -326,8 +357,8 @@ async def futu_sync():
         return {"ok": True, **result}
 
 
-# Canonical "never synced" envelope — used by /futu/portfolio when no cache
-# file exists yet. HTTP 200 with a failure-shaped body (tribunal T14) so
+# Canonical "never synced" envelope — used by /futu/portfolio when no display
+# snapshot exists yet. HTTP 200 with a failure-shaped body (tribunal T14) so
 # the UI can distinguish "first boot" from "sync failed" without a 404
 # flashing an error state.
 _FUTU_NEVER_SYNCED = {
@@ -343,16 +374,13 @@ _FUTU_NEVER_SYNCED = {
 
 @router.get("/futu/portfolio")
 async def futu_portfolio():
-    """Read the cached Futu portfolio snapshot.
+    """Read the newest Futu display snapshot from Postgres.
 
-    Does not hit OpenD — serves the last written `data/futu_portfolio.json`.
-    Returns HTTP 200 with `{ok:false, code:"never_synced"}` on first boot
-    so the UI can render a "click sync" prompt distinctly from errors.
-    Clients that need fresh data call `POST /futu/sync`.
+    Does not hit OpenD. Returns HTTP 200 with `{ok:false, code:"never_synced"}`
+    when nothing was synced yet so the UI can render a "click sync" prompt
+    distinctly from errors. Clients that need fresh data call `POST /futu/sync`.
     """
-    from xenon.api import server
-
-    cached = _read_cache(server.DATA_DIR / "futu_portfolio.json")
+    cached = latest_display_snapshot()
     if cached is None:
         return dict(_FUTU_NEVER_SYNCED)
     return {"ok": True, **cached}

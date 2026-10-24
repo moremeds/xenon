@@ -28,12 +28,19 @@ nothing and invalidates the Gate-4 view instead, so an older stamp is never
 renewed. Fractional holdings and option legs without
 IB-qualified metadata are not defaulted: Gate 4 fails their symbol closed.
 This module never sends anything to Futu.
+
+The lifespan runs one pass every 60 s (`start_observation_loop` /
+`ObservationLoop`) on its own worker thread; a published `complete:true`
+pass also runs the shadow naked-short audit (it never cancels).
 """
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import logging
 import os
+import threading
 from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -44,7 +51,7 @@ from sqlalchemy import func, insert
 
 from xenon.db.engine import get_sync_engine
 from xenon.db.schema import account_snapshots
-from xenon.execution import coverage, futu_scope, gate4, orders_store
+from xenon.execution import coverage, futu_scope, gate4, naked_short_audit, orders_store
 from xenon.execution.account_scope import AccountScope
 from xenon.utils.symbol_norm import futu_to_ib
 
@@ -399,14 +406,65 @@ def _invalidate(scope: AccountScope, reason: str) -> None:
         log.error("futu observation: view invalidation failed (%s): %s", reason, exc)
 
 
-def run_pass(scope: AccountScope, ctx: Any, *, resolve_meta: MetaResolver | None = None) -> dict:
+_TERMINAL_STATES = frozenset({"FILLED", "CANCELLED", "REJECTED"})
+
+
+def _audit_open_orders(parsed: dict, scope: AccountScope) -> list[dict]:
+    """Live observed orders in the IB open-order shape the shadow audit reads
+    (`gate4.legs_payload_from_snapshot_order`). Option metadata is the
+    IB-qualified leg metadata; an unresolved leg carries none, so the audit
+    skips that symbol unless the order is a pure BUY."""
+    out = []
+    for obs in parsed.values():
+        if obs is None or obs.state in _TERMINAL_STATES:
+            continue
+        leg = ((obs.legs or {}).get("legs") or [{}])[0]
+        out.append(
+            {
+                "clientId": "futu",
+                "orderId": obs.order_id,
+                "permId": None,
+                "account": scope.broker_account,
+                "action": obs.action,
+                "totalQuantity": obs.quantity,
+                "filled": obs.dealt_qty,
+                "status": obs.state,
+                "contract": {
+                    "secType": obs.security_type,
+                    "symbol": obs.ticker,
+                    "right": obs.right,
+                    "expiry": obs.expiry,
+                    "strike": obs.strike,
+                    "conId": obs.con_id,
+                    "tradingClass": leg.get("tc"),
+                    "multiplier": leg.get("mult"),
+                    "underSecType": leg.get("und_sec"),
+                },
+            }
+        )
+    return out
+
+
+def run_pass(
+    scope: AccountScope, ctx: Any, *, resolve_meta: MetaResolver | None = None, audit: bool = True
+) -> dict:
     """One observation pass for `scope` on the Futu trade context `ctx`.
 
     `resolve_meta(specs)` returns IB-qualified option metadata per spec
     (`contract_meta` shape); without it every option leg stays unresolved.
-    Returns {"published", "complete", "reads", "observation", "orders", "fills"}.
+    With `audit`, a published `complete:true` pass also runs the shadow
+    naked-short audit (log + service_health only; it never cancels).
+    Returns {"published", "complete", "reads", "observation", "orders", "fills", "audit"}.
     """
-    result: dict = {"published": False, "complete": False, "reads": {}, "observation": None, "orders": 0, "fills": 0}
+    result: dict = {
+        "published": False,
+        "complete": False,
+        "reads": {},
+        "observation": None,
+        "orders": 0,
+        "fills": 0,
+        "audit": None,
+    }
     if os.environ.get("XENON_READ_ONLY") == "1":
         log.info("futu observation: XENON_READ_ONLY=1 — pass skipped")
         return result
@@ -500,4 +558,200 @@ def run_pass(scope: AccountScope, ctx: Any, *, resolve_meta: MetaResolver | None
         log.warning("futu observation: publish failed (%s)", exc, exc_info=True)
         _invalidate(scope, "futu_publish_failed")
     result["complete"] = complete and result["published"]
+    if result["complete"] and audit:
+        audited = naked_short_audit.run_shadow_audit(
+            payload,
+            _audit_open_orders(parsed, scope),
+            scope.broker_account,
+            observation=observation,
+            scope=scope.as_dict(),
+        )
+        result["audit"] = audited.summary()
     return result
+
+
+# ---------------------------------------------------------------------------
+# Lifespan loop: one pass every OBSERVATION_INTERVAL_S on its own thread
+# ---------------------------------------------------------------------------
+
+OBSERVATION_INTERVAL_S = 60.0
+# A pass that runs longer is abandoned by the loop (its thread finishes on its
+# own); no new pass starts while it is still running.
+PASS_TIMEOUT_S = 50.0
+META_TIMEOUT_S = 20.0
+
+Connector = Callable[[], tuple[Any, Callable[[], None]]]
+
+
+def make_ib_meta_resolver(loop: asyncio.AbstractEventLoop, get_pool: Callable[[], Any]) -> MetaResolver:
+    """`run_pass` resolver, called on the observation thread: qualifies option
+    specs through the IB pool's `data` role on the API event loop, with the
+    place gate's `_resolve_leg_meta_with_client`. No pool, a timeout or any
+    error → every spec None (unresolved, fail closed)."""
+
+    def resolve(specs: list[dict]) -> list[dict | None]:
+        pool = get_pool()
+        if pool is None or not specs:
+            return [None] * len(specs)
+        from xenon.api.services.order_entry import _resolve_leg_meta_with_client
+
+        async def _qualify() -> list[dict | None]:
+            async with pool.acquire("data") as client:
+                return await pool.run_sync("data", _resolve_leg_meta_with_client, client, specs)
+
+        fut = asyncio.run_coroutine_threadsafe(_qualify(), loop)
+        try:
+            return list(fut.result(timeout=META_TIMEOUT_S))
+        except Exception as exc:  # noqa: BLE001 — fail closed
+            fut.cancel()
+            log.warning("futu observation: IB contract qualification failed (%s)", exc)
+            return [None] * len(specs)
+
+    return resolve
+
+
+def futu_client_connector(scope: AccountScope) -> Connector:
+    """Opens a dedicated read-only trade context for the loop (not the
+    /futu/sync singleton, so neither blocks the other). `FutuClient.connect`
+    probes the OpenD port first, so a down OpenD fails fast instead of the
+    SDK retrying forever. The account is verified per pass by `run_pass`."""
+
+    def connect() -> tuple[Any, Callable[[], None]]:
+        from xenon.clients.futu_client import FutuClient
+
+        client = FutuClient(
+            host=os.environ.get("FUTU_OPEND_HOST", "127.0.0.1"),
+            port=int(os.environ.get("FUTU_OPEND_PORT", "11111")),
+            security_firm=os.environ.get("FUTU_SECURITY_FIRM", "FUTUSECURITIES"),
+            trd_env=_TRD_ENV[scope.account_env],
+            filter_trading_market="US",
+        )
+        client.connect()
+        return client._trd_ctx, client.disconnect
+
+    return connect
+
+
+class ObservationLoop:
+    """Runs `run_pass` for one scope on a single-worker executor.
+
+    Reads only. The trade context is opened lazily on the worker thread and
+    reopened after a failed pass. An OpenD that cannot be reached invalidates
+    the Gate-4 view (no pass, so no stamp is renewed); the read routes keep
+    serving the persisted rows.
+    """
+
+    def __init__(
+        self,
+        scope: AccountScope,
+        *,
+        connect: Connector,
+        resolve_meta: MetaResolver | None = None,
+        run: Callable[..., dict] = run_pass,
+        interval_s: float = OBSERVATION_INTERVAL_S,
+        pass_timeout_s: float = PASS_TIMEOUT_S,
+    ) -> None:
+        self.scope = scope
+        self._connect = connect
+        self._resolve_meta = resolve_meta
+        self._run = run
+        self._interval_s = interval_s
+        self._pass_timeout_s = pass_timeout_s
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="xenon-futu-observe")
+        self._ctx: Any = None
+        self._close: Callable[[], None] | None = None
+        self._inflight: concurrent.futures.Future | None = None
+        self._stop = asyncio.Event()
+        self._task: asyncio.Task | None = None
+        self.last_result: dict | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._main(), name="futu-observation-loop")
+
+    async def _main(self) -> None:
+        while not self._stop.is_set():
+            await self.tick()
+            try:
+                await asyncio.wait_for(self._stop.wait(), self._interval_s)
+            except TimeoutError:
+                pass
+
+    async def tick(self) -> dict | None:
+        """One pass on the worker thread; None when skipped or timed out."""
+        if self._inflight is not None and not self._inflight.done():
+            log.warning("futu observation: previous pass still running — tick skipped")
+            return None
+        fut = self._executor.submit(self._pass_blocking)
+        self._inflight = fut
+        try:
+            result = await asyncio.wait_for(asyncio.wrap_future(fut), self._pass_timeout_s)
+        except TimeoutError:
+            log.warning("futu observation: pass exceeded %.0fs", self._pass_timeout_s)
+            return None
+        self.last_result = result
+        return result
+
+    def _pass_blocking(self) -> dict:
+        if self._ctx is None:
+            try:
+                self._ctx, self._close = self._connect()
+            except Exception as exc:  # noqa: BLE001 — OpenD down: keep serving persisted rows
+                log.warning("futu observation: OpenD connect failed (%s)", exc)
+                _invalidate(self.scope, "futu_opend_unreachable")
+                return {"published": False, "complete": False, "error": "connect_failed"}
+        try:
+            result = self._run(self.scope, self._ctx, resolve_meta=self._resolve_meta)
+        except Exception as exc:  # noqa: BLE001 — the loop must survive any pass bug
+            log.warning("futu observation: pass failed (%s)", exc, exc_info=True)
+            self._reset()
+            _invalidate(self.scope, "futu_observation_failed")
+            return {"published": False, "complete": False, "error": type(exc).__name__}
+        if (result.get("reads") or {}).get("account") is not True:
+            self._reset()  # reconnect on the next tick
+        return result
+
+    def _reset(self) -> None:
+        close, self._ctx, self._close = self._close, None, None
+        if close is not None:
+            try:
+                close()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("futu observation: context close failed (%s)", exc)
+
+    async def stop(self) -> None:
+        """Stop the loop. Never waits for an in-flight pass: the context is
+        closed on a daemon thread because the SDK's close() can block."""
+        self._stop.set()
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except BaseException:  # noqa: BLE001 — CancelledError or a late pass error
+                pass
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        close, self._ctx, self._close = self._close, None, None
+        if close is not None:
+            threading.Thread(target=close, name="xenon-futu-observe-close", daemon=True).start()
+
+
+def start_observation_loop(
+    *, resolve_meta: MetaResolver | None = None, connector: Callable[[AccountScope], Connector] = futu_client_connector
+) -> ObservationLoop | None:
+    """Start the loop for the configured Futu trade scope (`FUTU_TRADE_ACC_ID`
+    + `FUTU_TRADE_ENV`). Not gated on `XENON_FUTU_TRADING`. Returns None (no
+    loop) under `XENON_READ_ONLY=1` or without a configured scope."""
+    if os.environ.get("XENON_READ_ONLY") == "1":
+        log.info("futu observation loop skipped: XENON_READ_ONLY=1")
+        return None
+    scope, reason = futu_scope.configured_scope()
+    if scope is None:
+        log.info("futu observation loop skipped: no configured Futu scope (%s)", reason)
+        return None
+    loop = ObservationLoop(scope, connect=connector(scope), resolve_meta=resolve_meta)
+    loop.start()
+    log.info("futu observation loop started (%s, every %.0fs)", scope.account_env, OBSERVATION_INTERVAL_S)
+    return loop
