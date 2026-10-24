@@ -444,21 +444,20 @@ def test_f11_multiplier_only_from_qualified_metadata(code, metas, expected):
 
 
 # ---------------------------------------------------------------------------
-# Strike precision: compare at the column precision (Numeric(12, 2))
+# Strike precision: exact Futu code, not the Numeric(12, 2) column
 # ---------------------------------------------------------------------------
 
 
 def test_strike_with_three_decimals_matches_its_stored_row():
-    """Futu "C500125" = 500.125. The stored value is read back from Postgres
-    (not assumed): numeric rounds the tie away from zero to 500.13. Later
-    passes compare at that precision, so the same order is no identity
-    mismatch and the pass stays complete."""
+    """Futu "C500125" = 500.125. The stored column value is read back from
+    Postgres (500.13, display precision). Later passes compare the exact Futu
+    code, so the same order is no identity mismatch and the pass stays
+    complete."""
     odd = f"US.SPY{SPY_META['exp'][2:]}C500125"
     ctx = FakeTradeCtx(positions=[_pos("US.SPY", 100.0)], open_orders=[_order("7601", code=odd)])
     assert _run(ctx)["complete"] is True
     stored = _subs()["7601"].strike
-    assert stored == Decimal("500.13")
-    assert orders_store._strike_at_column(500.125) == stored
+    assert stored == Decimal("500.13")  # display precision only; identity is the Futu code
 
     ctx.open_orders = [_order("7601", code=odd, status="FILLED_ALL", dealt=1.0, avg=1.20)]
     result = _run(ctx)

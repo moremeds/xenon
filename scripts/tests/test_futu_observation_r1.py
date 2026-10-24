@@ -484,4 +484,3 @@ async def test_f8_stop_during_pass_retires_it_and_closes_the_context():
         await asyncio.sleep(0.02)
 
     assert connector.closes == 1 and _observation_rows() == before
-

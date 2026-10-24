@@ -54,6 +54,11 @@ def configured_scope() -> tuple[AccountScope | None, str | None]:
     return AccountScope(broker="FUTU", account_env=account_env, broker_account=acc_id), None
 
 
+def trd_env_for(scope: AccountScope) -> str:
+    """Futu TrdEnv name ('SIMULATE' / 'REAL') of a Futu scope."""
+    return _ENV_TO_TRD[scope.account_env]
+
+
 def verify_live(scope: AccountScope, acc_rows: Iterable[Mapping[str, Any]] | Any) -> tuple[bool, str | None]:
     """Pure check of `scope` against `get_acc_list()` rows (a DataFrame or row dicts)."""
     trd_env = _ENV_TO_TRD.get(scope.account_env)

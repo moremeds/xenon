@@ -91,7 +91,7 @@ def test_futu_executed_orders_come_from_order_fills():
     by_order = {r["brokerOrderId"]: r for r in body["executed_orders"]}
     assert set(by_order) == {WORKING_ID, FILLED_ID}
     stock = by_order[FILLED_ID]
-    assert stock["execId"] == f"futu:{ACC}:ord:{FILLED_ID}:10"
+    assert stock["execId"] == f"futu:paper:{ACC}:ord:{FILLED_ID}:10"
     assert stock["submissionId"] == f"futu-paper-{ACC}-{FILLED_ID}"
     assert (stock["side"], stock["quantity"], stock["avgPrice"]) == ("BOT", 10.0, 2.0)
     assert stock["exchange"] == "FUTU" and stock["broker"] == "FUTU" and stock["brokerAccount"] == ACC

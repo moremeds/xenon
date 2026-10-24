@@ -351,6 +351,7 @@ def _order_observation(
         tif=_text(row.get("time_in_force")),
         aux_price=_decimal(row.get("aux_price")),
         futu_status=status or None,
+        futu_code=_text(row.get("code")),
         fill_metadata={
             "futu_code": _text(row.get("code")),
             "futu_order_id": _text(row.get("order_id")),
@@ -494,6 +495,14 @@ def _audit_open_orders(parsed: dict, scope: AccountScope) -> list[dict]:
     return out
 
 
+# Rows already UNKNOWN / FUTU_NOT_OBSERVED are looked up again on every
+# NOT_OBSERVED_RECHECK_PASSES-th full pass (and on the first one after a
+# restart): slow, so a deleted order does not cost one request per minute, but
+# never "held forever". Counter per scope, per process.
+NOT_OBSERVED_RECHECK_PASSES = 10
+_FULL_PASSES: dict[AccountScope, int] = {}
+
+
 def _sweep_unobserved(
     scope: AccountScope,
     ctx: Any,
@@ -507,12 +516,18 @@ def _sweep_unobserved(
 
     Found → mirrored like any observed order. Absent → its miss counter
     grows; at `FUTU_MISSING_PASSES` the row becomes UNKNOWN (demand kept,
-    reason FUTU_NOT_OBSERVED). A failed lookup counts nothing and returns
+    reason FUTU_NOT_OBSERVED). Rows already in that state are included only
+    on every `NOT_OBSERVED_RECHECK_PASSES`-th full pass. A failed lookup counts nothing and returns
     False (the pass is incomplete). Called only after a full pass.
     """
     ok = True
+    full = _FULL_PASSES.get(scope, 0)
+    _FULL_PASSES[scope] = full + 1
     for oid in orders_store.futu_unobserved_order_ids(
-        broker_account=scope.broker_account, account_env=scope.account_env, observed=seen
+        broker_account=scope.broker_account,
+        account_env=scope.account_env,
+        observed=seen,
+        include_not_observed=full % NOT_OBSERVED_RECHECK_PASSES == 0,
     ):
         read_at = datetime.now(timezone.utc)
         rows = _read(

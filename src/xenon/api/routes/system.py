@@ -44,15 +44,18 @@ def _compute_futu_health() -> dict[str, Any]:
     configured trade scope (`FUTU_TRADE_ACC_ID` + `FUTU_TRADE_ENV`), else the
     connected client's matched account. `last_sync_at` is that scope's newest
     display snapshot (`/futu/sync`), `observation` its newest observation
-    pass; never another account's row. A DB failure leaves the fields None.
+    pass, `held_rows` its rows held by FUTU_FILL_UNPRICED / FUTU_FILL_CONFLICT /
+    FUTU_NOT_OBSERVED; never another account's row. A DB failure leaves the
+    fields None.
     The account number is not reported (`/health` is unauthenticated).
     """
     from xenon.api import server
-    from xenon.execution import futu_scope
+    from xenon.execution import futu_scope, orders_store
 
     last_sync_at: Optional[str] = None
     last_sync_age_s: Optional[float] = None
     observation: Optional[dict[str, Any]] = None
+    held_rows: Optional[dict[str, Any]] = None
     scope, _reason = futu_scope.configured_scope()
     if scope is None:
         scope = futu_routes.client_scope(futu_routes._futu_client)
@@ -77,6 +80,7 @@ def _compute_futu_health() -> dict[str, Any]:
                 ).scalar()
             if isinstance(obs, dict):
                 observation = {"as_of": obs.get("as_of"), "complete": obs.get("complete") is True}
+            held_rows = orders_store.futu_held_rows(broker_account=scope.broker_account, account_env=scope.account_env)
     except Exception as exc:  # noqa: BLE001 — health must render without the DB
         logger.debug("futu health: snapshot read failed: %s", exc)
 
@@ -88,6 +92,9 @@ def _compute_futu_health() -> dict[str, Any]:
         "last_sync_age_s": last_sync_age_s,
         "observation_loop": loop is not None and loop.running,
         "observation": observation,
+        # Rows that keep the scope incomplete or hold demand, by reason code.
+        # Futu order ids only: submission ids embed the account number.
+        "held_rows": held_rows,
         "scope_env": scope.account_env if scope is not None else None,
     }
 

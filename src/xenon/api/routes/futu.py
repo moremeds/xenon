@@ -55,15 +55,24 @@ def _get_futu_lock() -> asyncio.Lock:
 
 
 def _get_futu_client() -> FutuClient:
-    """Lazy-init the shared FutuClient singleton."""
+    """Lazy-init the shared FutuClient singleton.
+
+    With a configured trade scope (`FUTU_TRADE_ACC_ID` + `FUTU_TRADE_ENV`)
+    the display client selects exactly that account and environment, so
+    display and trade use one Futu environment. `FUTU_TRD_ENV` (first account
+    of that env) applies only when no scope is configured."""
     global _futu_client
     if _futu_client is None:
+        from xenon.execution import futu_scope
+
+        scope, _ = futu_scope.configured_scope()
         _futu_client = FutuClient(
             host=os.environ.get("FUTU_OPEND_HOST", "127.0.0.1"),
             port=int(os.environ.get("FUTU_OPEND_PORT", "11111")),
             security_firm=os.environ.get("FUTU_SECURITY_FIRM", "FUTUSECURITIES"),
-            trd_env=os.environ.get("FUTU_TRD_ENV", "REAL"),
+            trd_env=futu_scope.trd_env_for(scope) if scope else os.environ.get("FUTU_TRD_ENV", "REAL"),
             filter_trading_market=os.environ.get("FUTU_MARKET", "US"),
+            acc_id=int(scope.broker_account) if scope else None,
         )
     return _futu_client
 
@@ -169,6 +178,27 @@ def client_scope(client: Optional[FutuClient]) -> Optional[AccountScope]:
 
 def _scope_fields(scope: AccountScope) -> dict:
     return {"broker": scope.broker, "accountEnv": scope.account_env, "brokerAccount": scope.broker_account}
+
+
+def _selected_scope(client: Optional[FutuClient]) -> Optional[AccountScope]:
+    """The Futu display scope: the configured trade scope (the same one
+    `GET /futu/portfolio` reads), else the client's own matched account."""
+    from xenon.execution import futu_scope
+
+    configured, _ = futu_scope.configured_scope()
+    return configured if configured is not None else client_scope(client)
+
+
+def _sync_scope_mismatch(selected: AccountScope, matched: Optional[AccountScope]) -> dict:
+    """`/futu/sync` answer when the client's account is not the selected
+    scope: no payload of another account or environment, nothing stored."""
+    logger.warning("Futu sync: client account is not the selected Futu scope — nothing served or stored")
+    return {
+        **_FUTU_NEVER_SYNCED,
+        "code": "scope_mismatch",
+        "scope": _scope_fields(selected),
+        "client_scope": _scope_fields(matched) if matched is not None else None,
+    }
 
 
 def _persist_display_snapshot(client: FutuClient, result: dict) -> bool:
@@ -286,8 +316,10 @@ async def futu_sync():
     # Early cooldown check — avoids lock contention when cache is fresh.
     # Serves only the connected client's own scope.
     if _futu_in_cooldown():
-        scope = client_scope(_futu_client)
-        cached = await asyncio.to_thread(latest_display_snapshot, scope) if scope is not None else None
+        matched, selected = client_scope(_futu_client), _selected_scope(_futu_client)
+        if selected is not None and matched is not None and matched != selected:
+            return _sync_scope_mismatch(selected, matched)
+        cached = await asyncio.to_thread(latest_display_snapshot, selected) if selected is not None else None
         if cached:
             return {"ok": True, **cached}
 
@@ -303,8 +335,10 @@ async def futu_sync():
         # Re-check inside lock — race guard so two tabs inside the lock
         # window piggyback on the same result.
         if _futu_in_cooldown():
-            scope = client_scope(_futu_client)
-            cached = await asyncio.to_thread(latest_display_snapshot, scope) if scope is not None else None
+            matched, selected = client_scope(_futu_client), _selected_scope(_futu_client)
+            if selected is not None and matched is not None and matched != selected:
+                return _sync_scope_mismatch(selected, matched)
+            cached = await asyncio.to_thread(latest_display_snapshot, selected) if selected is not None else None
             if cached:
                 return {"ok": True, **cached}
 
@@ -356,9 +390,15 @@ async def futu_sync():
         except FutuError as exc:
             raise HTTPException(status_code=502, detail=f"Futu error: {exc}")
 
+        # The fetched account must be the selected scope before anything is
+        # served, preserved or stored.
+        matched, selected = client_scope(client), _selected_scope(client)
+        if selected is not None and matched != selected:
+            return _sync_scope_mismatch(selected, matched)
+
         # Partial-failure guard: if this snapshot looks worse than the
         # cache, keep the cache and return it with a warning tag.
-        preserved = await asyncio.to_thread(_maybe_preserve_partial_failure, result, client_scope(client))
+        preserved = await asyncio.to_thread(_maybe_preserve_partial_failure, result, selected)
         if preserved is not None:
             preserved_warnings = list(preserved.get("warnings") or []) + [
                 "partial_failure_preserved",

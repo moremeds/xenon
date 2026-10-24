@@ -15,7 +15,7 @@ import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -1377,6 +1377,10 @@ def update_fill_commission(
 FUTU_SUBMISSION_PREFIX = "futu-"
 FUTU_NOT_OBSERVED = "FUTU_NOT_OBSERVED"
 FUTU_FILL_UNPRICED = "FUTU_FILL_UNPRICED"
+# The fill's exec_id already belongs to another submission: nothing advances.
+FUTU_FILL_CONFLICT = "FUTU_FILL_CONFLICT"
+# Rows an operator may need to look at (`/health` futu `held_rows`).
+FUTU_HELD_REASONS = (FUTU_FILL_UNPRICED, FUTU_FILL_CONFLICT, FUTU_NOT_OBSERVED)
 # Full passes in a row a non-terminal order must be absent from before it
 # becomes UNKNOWN (one-pass grace, like the IB disappeared-order sweep).
 FUTU_MISSING_PASSES = 2
@@ -1390,9 +1394,10 @@ _FUTU_TERMINAL = frozenset({"FILLED", "CANCELLED", "REJECTED", "FAILED"})
 _MONEY_4 = Decimal("0.0001")
 
 
-def futu_exec_id(acc_id: str, order_id: str, cum_qty: int) -> str:
-    """Deterministic, replay-safe fill id for one cumulative-quantity step."""
-    return f"futu:{acc_id}:ord:{order_id}:{cum_qty}"
+def futu_exec_id(account_env: str, acc_id: str, order_id: str, cum_qty: int) -> str:
+    """Deterministic, replay-safe fill id for one cumulative-quantity step,
+    scoped like the submission id (`order_fills.exec_id` is a global PK)."""
+    return f"futu:{account_env}:{acc_id}:ord:{order_id}:{cum_qty}"
 
 
 @dataclass(frozen=True)
@@ -1424,6 +1429,9 @@ class FutuOrderObservation:
     aux_price: Decimal | None = None
     # Raw Futu `order_status` (several statuses map to UNKNOWN).
     futu_status: str | None = None
+    # Full Futu code (e.g. US.SPY261218C500125): exact instrument identity;
+    # the strike column (Numeric(12, 2)) is display precision only.
+    futu_code: str | None = None
     fill_metadata: dict | None = None
 
 
@@ -1439,12 +1447,20 @@ def _futu_order_info(obs: FutuOrderObservation) -> dict | None:
     }
 
 
-def _strike_at_column(value) -> Decimal:
-    """A strike at `order_submissions.strike` precision (Numeric(12, 2)).
-    Postgres rounds numeric ties away from zero (500.125 -> 500.13); for the
-    positive strikes here that is Decimal ROUND_HALF_UP. Without this a
-    3-decimal Futu strike would contradict its own stored row every pass."""
-    return Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+def _same_strike(row, obs: FutuOrderObservation) -> bool:
+    """Exact option identity. Both Futu codes known → they must be equal.
+    Else the full-precision strike (qualified leg, else the 2-dp column) must
+    equal the observed strike exactly; a strike the stored row cannot
+    represent exactly is not established → mismatch (fail closed)."""
+    legs = normalize_legs_payload(row.legs)
+    code = legs.get("futu_code")
+    if code and obs.futu_code:
+        return code == obs.futu_code
+    if obs.strike is None:
+        return False
+    leg = (legs.get("legs") or [{}])[0] if isinstance(legs.get("legs"), list) else {}
+    stored = leg.get("strike") if isinstance(leg, dict) and leg.get("strike") is not None else row.strike
+    return stored is not None and Decimal(str(stored)) == Decimal(str(obs.strike))
 
 
 def _futu_identity_mismatch(row, obs: FutuOrderObservation) -> str | None:
@@ -1462,7 +1478,7 @@ def _futu_identity_mismatch(row, obs: FutuOrderObservation) -> str | None:
             return "right"
         if (row.expiry.strftime("%Y%m%d") if row.expiry else None) != obs.expiry:
             return "expiry"
-        if row.strike is None or obs.strike is None or _strike_at_column(row.strike) != _strike_at_column(obs.strike):
+        if not _same_strike(row, obs):
             return "strike"
         if row.con_id is not None and obs.con_id is not None and int(row.con_id) != int(obs.con_id):
             return "con_id"
@@ -1492,6 +1508,8 @@ def _futu_state_values(row, obs: FutuOrderObservation, *, fresh: bool, own: bool
     if own:
         new_legs = dict(legs)
         new_legs.pop("futu_missing", None)
+        if obs.futu_code and not legs.get("futu_code"):
+            new_legs["futu_code"] = obs.futu_code
         if obs.quantity != int(row.quantity or 0) and obs.quantity != legs.get("observed_qty"):
             new_legs["observed_qty"] = obs.quantity
         if info is not None:
@@ -1508,11 +1526,19 @@ def _futu_state_values(row, obs: FutuOrderObservation, *, fresh: bool, own: bool
         values["tif"] = obs.tif
     merged = merge_observed_legs(row.legs, obs.legs)
     merged.pop("futu_missing", None)
+    if obs.futu_code and not merged.get("futu_code"):
+        merged["futu_code"] = obs.futu_code
     if info is not None:
         merged["futu_order"] = info
     if merged != legs:
         values["legs"] = merged
     return values
+
+
+def _fill_reason(skip: str | None) -> str | None:
+    if skip is None:
+        return None
+    return FUTU_FILL_CONFLICT if skip == "exec_id_conflict" else FUTU_FILL_UNPRICED
 
 
 def mirror_futu_order(
@@ -1594,6 +1620,8 @@ def mirror_futu_order(
         delta = obs.dealt_qty - stored
         price = notional = None
         stored_legs = normalize_legs_payload(row.legs) if row is not None else {}
+        sid_for_fill = row.submission_id if row is not None else futu_submission_id(account_env, broker_account, obs.order_id)
+        exec_id = futu_exec_id(account_env, broker_account, obs.order_id, obs.dealt_qty)
         if delta > 0:
             skip = None
             if obs.dealt_avg_price is None:
@@ -1619,6 +1647,14 @@ def mirror_futu_order(
                     if price <= 0:
                         # Never fabricate a delta price from the cumulative average.
                         skip, price = "notional_inconsistent", None
+            if skip is None:
+                owner = conn.execute(
+                    select(order_fills.c.submission_id).where(order_fills.c.exec_id == exec_id)
+                ).scalar()
+                if owner is not None and owner != sid_for_fill:
+                    # Not a replay of this submission's fill: never advance
+                    # the high-water over another submission's execution.
+                    skip, price = "exec_id_conflict", None
             if skip is not None:
                 out["fill_skipped"] = skip
                 if obs.state in _FUTU_TERMINAL:
@@ -1630,7 +1666,7 @@ def mirror_futu_order(
             sid = futu_submission_id(account_env, broker_account, obs.order_id)
             mult = (obs.legs.get("legs") or [{}])[0].get("mult")
             pg_insert_values = dict(
-                reason_code=FUTU_FILL_UNPRICED if out["fill_skipped"] else None,
+                reason_code=_fill_reason(out["fill_skipped"]),
                 # Stock is 1 share per unit; an option without IB-qualified
                 # metadata has no known multiplier (NULL, never a default).
                 multiplier=1 if obs.security_type == "STK" else (int(mult) if mult else None),
@@ -1660,7 +1696,11 @@ def mirror_futu_order(
                     right=obs.right,
                     expiry=datetime.strptime(obs.expiry, "%Y%m%d").date() if obs.expiry else None,
                     con_id=obs.con_id,
-                    legs={**obs.legs, "futu_order": info} if info is not None else obs.legs,
+                    legs={
+                        **obs.legs,
+                        **({"futu_order": info} if info is not None else {}),
+                        **({"futu_code": obs.futu_code} if obs.futu_code else {}),
+                    },
                     **({"tif": obs.tif} if obs.tif is not None else {}),
                 )
                 .on_conflict_do_nothing()
@@ -1674,8 +1714,8 @@ def mirror_futu_order(
             values = _futu_state_values(
                 row, obs, fresh=is_fresh_observation(observed_at, row.updated_at), own=own
             )
-            if out["fill_skipped"] and row.reason_code != FUTU_FILL_UNPRICED:
-                values["reason_code"] = FUTU_FILL_UNPRICED
+            if out["fill_skipped"] and row.reason_code != _fill_reason(out["fill_skipped"]):
+                values["reason_code"] = _fill_reason(out["fill_skipped"])
             if values:
                 values["updated_at"] = monotone_updated_at(now)
                 conn.execute(
@@ -1692,7 +1732,6 @@ def mirror_futu_order(
         )
         basis = "cumulative_notional_delta"
         price = price.quantize(_MONEY_4)
-        exec_id = futu_exec_id(broker_account, obs.order_id, obs.dealt_qty)
         metadata = {
             **(obs.fill_metadata or {}),
             "sec_type": row.security_type,
@@ -1726,7 +1765,7 @@ def mirror_futu_order(
                 filled_qty=obs.dealt_qty,
                 avg_fill_price=avg.quantize(_MONEY_4),
                 legs={**current_legs, "futu_fill": {"cum_qty": obs.dealt_qty, "cum_notional": str(notional)}},
-                **({"reason_code": None} if row.reason_code == FUTU_FILL_UNPRICED else {}),
+                **({"reason_code": None} if row.reason_code in (FUTU_FILL_UNPRICED, FUTU_FILL_CONFLICT) else {}),
                 updated_at=monotone_updated_at(now),
             )
         )
@@ -1761,20 +1800,43 @@ def _futu_scope_conds(account_env: str, broker_account: str) -> tuple:
     )
 
 
-def futu_unobserved_order_ids(*, broker_account: str, account_env: str, observed: set) -> list[str]:
+def futu_unobserved_order_ids(
+    *, broker_account: str, account_env: str, observed: set, include_not_observed: bool = False
+) -> list[str]:
     """Broker order ids of non-terminal Futu rows in scope that a full pass
-    did not see. Rows already UNKNOWN for FUTU_NOT_OBSERVED are left out:
-    they keep their demand until an observation returns them."""
+    did not see. Rows already UNKNOWN for FUTU_NOT_OBSERVED are included only
+    with `include_not_observed` (the caller's slow recheck cadence)."""
+    conds = [
+        *_futu_scope_conds(account_env, broker_account),
+        order_submissions.c.broker_order_id.is_not(None),
+        order_submissions.c.state.in_(NON_TERMINAL_STATES),
+    ]
+    if not include_not_observed:
+        conds.append(order_submissions.c.reason_code.is_distinct_from(FUTU_NOT_OBSERVED))
     with get_sync_engine().connect() as conn:
-        ids = conn.execute(
-            select(order_submissions.c.broker_order_id).where(
-                *_futu_scope_conds(account_env, broker_account),
-                order_submissions.c.broker_order_id.is_not(None),
-                order_submissions.c.state.in_(NON_TERMINAL_STATES),
-                order_submissions.c.reason_code.is_distinct_from(FUTU_NOT_OBSERVED),
-            )
-        ).scalars()
+        ids = conn.execute(select(order_submissions.c.broker_order_id).where(*conds)).scalars()
         return sorted(oid for oid in ids if oid not in observed)
+
+
+def futu_held_rows(*, broker_account: str, account_env: str, limit: int = 20) -> dict:
+    """Non-terminal Futu rows in scope held by a FUTU_HELD_REASONS code:
+    {reason: {"count", "order_ids"}} (oldest first, at most `limit` ids)."""
+    with get_sync_engine().connect() as conn:
+        rows = conn.execute(
+            select(order_submissions.c.reason_code, order_submissions.c.broker_order_id)
+            .where(
+                *_futu_scope_conds(account_env, broker_account),
+                order_submissions.c.state.in_(NON_TERMINAL_STATES),
+                order_submissions.c.reason_code.in_(FUTU_HELD_REASONS),
+            )
+            .order_by(order_submissions.c.updated_at, order_submissions.c.submission_id)
+        ).all()
+    out = {reason: {"count": 0, "order_ids": []} for reason in FUTU_HELD_REASONS}
+    for reason, oid in rows:
+        out[reason]["count"] += 1
+        if len(out[reason]["order_ids"]) < limit:
+            out[reason]["order_ids"].append(oid)
+    return out
 
 
 def mark_futu_order_unobserved(order_id: str, *, broker_account: str, account_env: str) -> int:
@@ -1799,7 +1861,7 @@ def mark_futu_order_unobserved(order_id: str, *, broker_account: str, account_en
         legs = normalize_legs_payload(row.legs)
         missing = int(legs.get("futu_missing") or 0) + 1
         values: dict = {"legs": {**legs, "futu_missing": missing}}
-        if missing >= FUTU_MISSING_PASSES:
+        if missing >= FUTU_MISSING_PASSES and row.reason_code != FUTU_NOT_OBSERVED:
             values.update(
                 state="UNKNOWN",
                 reason_code=FUTU_NOT_OBSERVED,

@@ -168,8 +168,12 @@ class FutuClient:
         filter_trading_market: str = "US",
         position_ttl_sec: int = DEFAULT_POSITION_TTL_SEC,
         account_ttl_sec: int = DEFAULT_ACCOUNT_TTL_SEC,
+        acc_id: Optional[int] = None,
     ):
         self.host = host
+        # Exact account to select (configured trade scope); None keeps the
+        # legacy "first account of trd_env" selection.
+        self.requested_acc_id = acc_id
         self.port = port
         self.security_firm = security_firm
         self.trd_env = trd_env
@@ -232,6 +236,13 @@ class FutuClient:
 
             env_enum = getattr(TrdEnv, self.trd_env, TrdEnv.REAL)
             matching = data[data["trd_env"] == env_enum]
+            if self.requested_acc_id is not None:
+                # Exact selection: no fallback to another account or env.
+                matching = matching[matching["acc_id"].astype("int64") == int(self.requested_acc_id)]
+                if matching.empty:
+                    raise FutuConnectionError(
+                        f"Configured Futu account ({self.trd_env}) is not listed by OpenD"
+                    )
             if matching.empty:
                 # Spec §10: connect-time fallback — record the actual matched env
                 # so callers don't get a silent lie (self.trd_env stays as the

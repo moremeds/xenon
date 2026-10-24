@@ -367,7 +367,7 @@ def test_external_short_placed_and_filled_between_reads_blocks_next_short(inject
     row = _subs()["7003"]
     assert row.state == "FILLED" and row.filled_qty == 1
     (fill,) = _fills()
-    assert fill.exec_id == f"futu:{ACC}:ord:7003:1" and fill.qty == 1 and fill.submission_id == f"futu-paper-{ACC}-7003"
+    assert fill.exec_id == f"futu:paper:{ACC}:ord:7003:1" and fill.qty == 1 and fill.submission_id == f"futu-paper-{ACC}-7003"
     assert fill.price == Decimal("1.3000") and fill.metadata["time_basis"] == "order_updated_time"
     assert _gate().accept is False
 
@@ -381,7 +381,7 @@ def test_working_order_filled_between_reads_blocks_next_short():
     )
     assert _run(ctx)["complete"] is True
     assert _subs()["7002"].state == "FILLED"
-    assert [f.exec_id for f in _fills()] == [f"futu:{ACC}:ord:7002:1"]
+    assert [f.exec_id for f in _fills()] == [f"futu:paper:{ACC}:ord:7002:1"]
     assert _gate().accept is False
 
 
@@ -541,7 +541,7 @@ def test_overlapping_open_and_history_rows_record_one_fill():
     row = _order("7020", status="FILLED_PART", qty=3.0, dealt=2.0, avg=1.10)
     ctx = FakeTradeCtx(positions=[_pos("US.SPY", 300.0)], open_orders=[row], history=[dict(row)])
     assert _run(ctx)["complete"] is True
-    assert [(f.exec_id, f.qty) for f in _fills()] == [(f"futu:{ACC}:ord:7020:2", 2)]
+    assert [(f.exec_id, f.qty) for f in _fills()] == [(f"futu:paper:{ACC}:ord:7020:2", 2)]
     assert _subs()["7020"].filled_qty == 2
 
 
@@ -585,7 +585,7 @@ def test_cumulative_increase_records_delta_at_notional_price():
         )
     )
     fills = {f.exec_id: f for f in _fills()}
-    step = fills[f"futu:{ACC}:ord:7023:5"]
+    step = fills[f"futu:paper:{ACC}:ord:7023:5"]
     assert step.qty == 3 and step.price == Decimal("1.5000")  # (5*1.30 - 2*1.00) / 3
     row = _subs()["7023"]
     assert (row.filled_qty, row.avg_fill_price, row.state) == (5, Decimal("1.3000"), "FILLED")

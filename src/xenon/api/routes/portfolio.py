@@ -321,6 +321,10 @@ async def _futu_refresh_db_first(scope) -> None:
         logger.warning("futu refresh: sync failed (%s); serving DB snapshot", exc)
 
 
+# FUTU /orders/refresh waits at most this long for the observation pass.
+FUTU_REFRESH_WAIT_S = 10.0
+
+
 @router.post("/orders/refresh")
 async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
     """Sync orders into Postgres, then return the scoped payload.
@@ -357,7 +361,13 @@ async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
         # futu_trades) stays separate (nightly loop, POST /blotter).
         loop = getattr(request.app.state, "futu_observation_loop", None)
         if loop is not None and loop.scope == scope:
-            await loop.refresh()
+            try:
+                # Bounded wait (the web client times out first); the pass
+                # keeps running and the next read sees its result.
+                await asyncio.wait_for(asyncio.shield(loop.refresh()), FUTU_REFRESH_WAIT_S)
+            except TimeoutError:
+                payload = await asyncio.to_thread(orders_payload_for_scope, scope)
+                return {**payload, "refresh": "in_progress"}
         return await asyncio.to_thread(orders_payload_for_scope, scope)
 
     # IB path — mode already verified above; touch the gateway.
