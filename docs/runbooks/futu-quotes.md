@@ -85,9 +85,12 @@ Liveness uses WebSocket protocol ping/pong: ping every 10 s, pong timeout
   moment its subscribe is sent. A successful unsubscribe, or an
   unsubscribe answered "not subscribed", releases it. A definite rejection
   (`quota`, `unknown_symbol`, `not_supported`) in the current session
-  releases only the provisional slot of a fresh admission; it never
-  releases ownership from an earlier attempt (a reconfirm, or a previously
-  uncertain subscribe), which stays held and is retried. An
+  releases only the provisional slot of a fresh admission (an invalid code
+  or unsupported type is then terminal: `rejected/unknown_symbol` or
+  `rejected/not_supported`). It never releases ownership from an earlier
+  attempt (a reconfirm, or a previously uncertain subscribe): that symbol
+  stays held, keeps its verification, and is retried with the normal
+  bounded backoff for every rejection reason. An
   uncertain outcome (timeout, lost or undecodable reply, down error, any
   other provider error) and a late success from an old session keep it
   held but not ready. Disconnects, failed quota refreshes and failed

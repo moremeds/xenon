@@ -1927,7 +1927,9 @@ async def test_unsub_release_drops_buffer_before_resubscribe(outcome):
 # ---------------------------------------------------------------------------
 
 
-async def _held_aapl_then_rejected_reconfirm(clock: Clock, *, quota_fails: bool):
+async def _held_aapl_then_rejected_reconfirm(
+    clock: Clock, *, quota_fails: bool, reject: str = "subscription quota limit exceeded"
+):
     """Cap 1: AAPL admitted; reconnect with OpenD retaining AAPL; the
     reconfirm is rejected "subscription quota limit exceeded"."""
     fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=1, own_used=0, total_used=0)
@@ -1943,7 +1945,7 @@ async def _held_aapl_then_rejected_reconfirm(clock: Clock, *, quota_fails: bool)
         fake.quota_raise = OpenDProviderError("quota unavailable")
     fake.drop()
     await fake.connect()
-    fake.subscribe_errors["US.AAPL"] = "subscription quota limit exceeded"
+    fake.subscribe_errors["US.AAPL"] = reject
     await svc.opend_recovered()
     await svc.drain()
     assert fake.subscribe_calls.count("US.AAPL") == 2  # rejected reconfirm
@@ -1995,3 +1997,78 @@ async def test_rejected_reconfirm_unsubscribed_before_new_admission():
     assert svc.admission.is_ok("MSFT")
     assert fake.subscribed == {"US.MSFT"}
     assert held_at_msft and all("US.AAPL" not in h for h in held_at_msft)
+
+
+# ---------------------------------------------------------------------------
+# Astra round-5 regressions: terminal reasons on retained ownership retry
+# ---------------------------------------------------------------------------
+
+_TERMINAL_REJECTIONS = [
+    pytest.param("invalid code US.AAPL", id="unknown_symbol"),
+    pytest.param("not supported", id="not_supported"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reject", _TERMINAL_REJECTIONS)
+async def test_terminal_rejection_of_reconfirm_still_retries(reject):
+    """R235-5: earlier confirmed ownership, reconfirm answered with an
+    invalid-code / not-supported string — the slot stays held, verify is
+    not made terminal, and the backoff retry recovers AAPL."""
+    clock = Clock(1000.0)
+    fake, svc, ws = await _held_aapl_then_rejected_reconfirm(
+        clock, quota_fails=False, reject=reject
+    )
+    assert svc.admission.state("AAPL").verify == "ok"
+    for _ in range(3):
+        clock.advance(500)
+        await svc.refresh_quota_once()
+        await svc.tick_unsubscribes_once()
+        await svc.drain()
+    assert fake.subscribe_calls.count("US.AAPL") == 3
+    assert svc.admission.is_ok("AAPL")
+    assert svc.admission.own_used() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reject", _TERMINAL_REJECTIONS)
+async def test_terminal_rejection_after_uncertain_attempt_keeps_progress(reject):
+    """R235-5: the first AAPL attempt times out (possible ownership); the
+    retry gets an invalid-code / not-supported answer. AAPL keeps retrying
+    while wanted; once demand releases it, MSFT is admitted."""
+    clock = Clock(1000.0)
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=5, own_used=0, total_used=0)
+    svc = await _settled_service(fake, clock=clock, quota_cap=1)
+    ws = FakeWS()
+    await svc.on_ws_connect(ws)
+    fake.subscribe_errors["US.AAPL"] = "Timeout"  # before OpenD accepted it
+    await _want(svc, ws, 1, ["AAPL"])
+    await svc.drain()
+    assert svc.admission.state("AAPL").subscribed  # uncertain ⇒ held
+
+    fake.subscribe_errors["US.AAPL"] = reject
+    clock.advance(500)
+    await svc.tick_unsubscribes_once()
+    await svc.drain()
+    assert fake.subscribe_calls.count("US.AAPL") == 2
+    await _want(svc, ws, 2, ["AAPL", "MSFT"])
+    await svc.drain()
+
+    for _ in range(3):
+        clock.advance(500)
+        await svc.refresh_quota_once()
+        await svc.tick_unsubscribes_once()
+        await svc.drain()
+    assert fake.subscribe_calls.count("US.AAPL") == 3  # retry continued
+    assert svc.admission.is_ok("AAPL")
+    assert fake.subscribe_calls.count("US.MSFT") == 0  # AAPL owns the slot
+
+    await _want(svc, ws, 3, ["MSFT"])  # demand releases AAPL
+    for _ in range(4):
+        clock.advance(200)
+        await svc.refresh_quota_once()
+        await svc.tick_unsubscribes_once()
+        await svc.drain()
+    assert fake.unsubscribe_calls == ["US.AAPL"]
+    assert svc.admission.is_ok("MSFT")
+    assert fake.subscribed == {"US.MSFT"}

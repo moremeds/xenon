@@ -500,24 +500,27 @@ class Admission:
                 st.unwanted_since = None
             return
         reason = reason or "provider_error"
-        if reason == "unknown_symbol":
-            st.verify = "unknown_symbol"
         st.rejected_reason = reason
         if reason in _DEFINITE_SUB_REJECTIONS and provisional:
-            st.subscribed_at = None  # OpenD refused this fresh admission
+            # OpenD refused this fresh admission: it holds nothing. An
+            # invalid code is terminal for a fresh admission only.
+            st.subscribed_at = None
             st.ready_epoch = None
+            if reason == "unknown_symbol":
+                st.verify = "unknown_symbol"
+            elif reason == "not_supported":
+                st.verify = "not_supported"
+                st.retry_at = float("inf")
+                return
         elif st.subscribed_at is None:
             st.subscribed_at = self.now()  # uncertain ⇒ held
+        # Retained ownership (any reason) and every non-terminal failure:
+        # keep verify as is and retry with the normal bounded backoff, so a
+        # held slot is never stuck while it is still wanted.
         if reason == "quota":
             self.refresh_quota_requested = True
-            st.retry_at = self.now() + self._backoff(st)
-            st.backoff_step += 1
-        elif reason == "not_supported":
-            st.verify = "not_supported"
-            st.retry_at = float("inf")
-        else:  # provider_error / transient
-            st.retry_at = self.now() + self._backoff(st)
-            st.backoff_step += 1
+        st.retry_at = self.now() + self._backoff(st)
+        st.backoff_step += 1
 
     def unsubscribe_result(self, symbol: str, err: Optional[str], kind: Optional[str] = None) -> None:
         """kind: too_early | not_subscribed | provider_error.
