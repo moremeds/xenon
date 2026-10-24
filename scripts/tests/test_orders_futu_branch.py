@@ -217,17 +217,13 @@ def test_get_orders_route_refuses_a_mismatched_tab_scope(monkeypatch):
 
 @pytest.mark.parametrize("db_scope,expected", [(SCOPE, [WORKING_ID]), (OTHER, [])])
 def test_orders_refresh_applies_the_same_scope_rule(monkeypatch, db_scope, expected):
+    """No observation loop running (e.g. OpenD scope not started): refresh
+    returns the persisted ledger under the same scope rule."""
     from xenon.api import server
-    from xenon.api.routes import portfolio as portfolio_routes
 
     _observe()
-    refreshed = []
-
-    async def _no_opend(scope):
-        refreshed.append(scope)
-
-    monkeypatch.setattr(portfolio_routes, "_futu_refresh_db_first", _no_opend)
     monkeypatch.setattr(server, "_is_test_mode", lambda: False)
+    monkeypatch.setattr(server.app.state, "futu_observation_loop", None, raising=False)
 
     resp = _route_client(monkeypatch, db_scope).post("/orders/refresh", params={"broker": "FUTU"})
 
@@ -235,10 +231,8 @@ def test_orders_refresh_applies_the_same_scope_rule(monkeypatch, db_scope, expec
     body = resp.json()
     assert [r["brokerOrderId"] for r in body["open_orders"]] == expected
     assert body.get("scope_reason") == (None if expected else "scope_mismatch")
-    assert refreshed == [db_scope]
 
 
 def test_ib_payload_shape_unchanged():
     body = orders_payload_for_scope(AccountScope(broker="IB", account_env="paper", broker_account="DU0000000"))
     assert set(body) == {"last_sync", "open_orders", "executed_orders", "open_count", "executed_count"}
-

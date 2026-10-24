@@ -32,8 +32,10 @@ from fastapi.testclient import TestClient  # noqa: E402
 from xenon.api.routes import futu as futu_routes  # noqa: E402
 from xenon.db.engine import get_sync_engine  # noqa: E402
 from xenon.db.schema import account_snapshots  # noqa: E402
+from xenon.execution.account_scope import AccountScope  # noqa: E402
 
 ACC = "281756479345015383"
+LIVE = AccountScope(broker="FUTU", account_env="live", broker_account=ACC)
 
 
 @pytest.fixture()
@@ -44,6 +46,10 @@ def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
     monkeypatch.delenv("XENON_READ_ONLY", raising=False)
     monkeypatch.delenv("FUTU_TRADE_ACC_ID", raising=False)
+    # Request scope with OpenD offline: the last-synced FUTU scope (LIVE).
+    from xenon.api import guards
+
+    monkeypatch.setattr(guards, "_futu_scope_from_db", lambda: LIVE)
     # Reset module-global sync state between tests.
     monkeypatch.setattr(futu_routes, "_futu_last_sync_monotonic", None)
     monkeypatch.setattr(futu_routes, "_futu_client", None)
@@ -193,7 +199,11 @@ def test_health_includes_futu_block_with_never_synced(client: TestClient, isolat
     assert futu["observation_loop"] is False
 
 
-def test_health_futu_block_surfaces_last_sync_from_postgres(client: TestClient, isolated_data_dir: Path) -> None:
+def test_health_futu_block_surfaces_last_sync_from_postgres(
+    client: TestClient, isolated_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID", ACC)
+    monkeypatch.setenv("FUTU_TRADE_ENV", "REAL")
     (isolated_data_dir / "futu_portfolio.json").write_text('{"fetched_at": "2020-01-01T00:00:00.000Z"}')
     _store({"fetched_at": "2026-04-07T12:00:00.000Z", "positions": [], "count": 0, "account_summary": None})
 
@@ -310,7 +320,7 @@ def test_maybe_preserve_partial_failure_blocks_degraded_overwrite(
         "warnings": ["row US.ZZZ: parse error"],
     }
 
-    preserved = futu_routes._maybe_preserve_partial_failure(degraded)
+    preserved = futu_routes._maybe_preserve_partial_failure(degraded, LIVE)
     assert preserved is not None
     assert preserved["count"] == 27
 
@@ -327,7 +337,7 @@ def test_maybe_preserve_partial_failure_allows_clean_overwrite(isolated_data_dir
     (e.g. user legitimately closed positions)."""
     _store({"count": 27, "positions": [], "warnings": []})
 
-    assert futu_routes._maybe_preserve_partial_failure({"count": 5, "positions": [], "warnings": []}) is None
+    assert futu_routes._maybe_preserve_partial_failure({"count": 5, "positions": [], "warnings": []}, LIVE) is None
 
 
 def test_maybe_preserve_partial_failure_allows_larger_new_snapshot(isolated_data_dir: Path) -> None:
@@ -335,13 +345,13 @@ def test_maybe_preserve_partial_failure_allows_larger_new_snapshot(isolated_data
     _store({"count": 10, "positions": [], "warnings": []})
 
     new = {"count": 12, "positions": [], "warnings": ["one bad row skipped"]}
-    assert futu_routes._maybe_preserve_partial_failure(new) is None
+    assert futu_routes._maybe_preserve_partial_failure(new, LIVE) is None
 
 
 def test_maybe_preserve_partial_failure_ignores_observation_rows(isolated_data_dir: Path) -> None:
     _store({"count": 30, "positions": [], "observation": {"complete": True}}, env="paper", bankroll="0")
 
-    assert futu_routes._maybe_preserve_partial_failure({"count": 1, "warnings": ["x"]}) is None
+    assert futu_routes._maybe_preserve_partial_failure({"count": 1, "warnings": ["x"]}, LIVE) is None
 
 
 def test_api_package_has_no_futu_portfolio_json_path() -> None:

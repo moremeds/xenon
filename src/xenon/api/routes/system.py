@@ -39,10 +39,12 @@ logger = logging.getLogger("xenon.api")
 def _compute_futu_health() -> dict[str, Any]:
     """Derive the Futu health block from the singleton + Postgres.
 
-    Never probes OpenD (tribunal T11). `last_sync_at` comes from the newest
-    Futu display snapshot (`/futu/sync`), `observation` from the newest
-    observation-pass snapshot of the configured trade scope. Both are
-    `account_snapshots` rows; a DB failure leaves the fields None.
+    Never probes OpenD (tribunal T11). One scope feeds every field: the
+    configured trade scope (`FUTU_TRADE_ACC_ID` + `FUTU_TRADE_ENV`), else the
+    connected client's matched account. `last_sync_at` is that scope's newest
+    display snapshot (`/futu/sync`), `observation` its newest observation
+    pass; never another account's row. A DB failure leaves the fields None.
+    The account number is not reported (`/health` is unauthenticated).
     """
     from xenon.api import server
     from xenon.execution import futu_scope
@@ -50,14 +52,16 @@ def _compute_futu_health() -> dict[str, Any]:
     last_sync_at: Optional[str] = None
     last_sync_age_s: Optional[float] = None
     observation: Optional[dict[str, Any]] = None
+    scope, _reason = futu_scope.configured_scope()
+    if scope is None:
+        scope = futu_routes.client_scope(futu_routes._futu_client)
     try:
-        display = futu_routes.latest_display_snapshot()
-        last_sync_at = (display or {}).get("fetched_at")
-        if last_sync_at:
-            dt = datetime.fromisoformat(str(last_sync_at).replace("Z", "+00:00"))
-            last_sync_age_s = (datetime.now(timezone.utc) - dt).total_seconds()
-        scope, _reason = futu_scope.configured_scope()
         if scope is not None:
+            display = futu_routes.latest_display_snapshot(scope)
+            last_sync_at = (display or {}).get("fetched_at")
+            if last_sync_at:
+                dt = datetime.fromisoformat(str(last_sync_at).replace("Z", "+00:00"))
+                last_sync_age_s = (datetime.now(timezone.utc) - dt).total_seconds()
             with get_sync_engine().connect() as conn:
                 obs = conn.execute(
                     select(account_snapshots.c.payload["observation"])
@@ -83,6 +87,7 @@ def _compute_futu_health() -> dict[str, Any]:
         "last_sync_age_s": last_sync_age_s,
         "observation_loop": loop is not None and loop.running,
         "observation": observation,
+        "scope_env": scope.account_env if scope is not None else None,
     }
 
 

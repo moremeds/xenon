@@ -222,8 +222,39 @@ def _instrument(code: Any) -> dict | None:
     return None
 
 
-def _is_us(code: Any) -> bool:
-    return isinstance(code, str) and code.strip().upper().startswith("US.")
+# Futu code prefixes outside the US market (SDK 10.3 `Market`), and the
+# market labels Futu reports in `position_market` / `order_market`.
+_FOREIGN_CODE_PREFIXES = frozenset({"HK", "SH", "SZ", "SG", "JP", "AU", "MY", "CA", "FX"})
+
+
+def _market_class(row: dict, market_field: str) -> str | None:
+    """'US', 'FOREIGN', or None when the row cannot be classified.
+
+    Only a row positively outside the US is FOREIGN: a known non-US code
+    prefix whose market field (when present) does not say US. A missing or
+    unknown code, or a code that contradicts the market field, is None."""
+    code = _text(row.get("code"))
+    prefix = code.split(".", 1)[0].upper() if code and "." in code else None
+    market = _text(row.get(market_field))
+    market = market.upper() if market else None
+    if prefix == "US":
+        return "US" if market in (None, "US") else None
+    if prefix in _FOREIGN_CODE_PREFIXES:
+        return "FOREIGN" if market != "US" else None
+    return None
+
+
+def _split_markets(rows: list[dict], market_field: str, *, keep_unkeyed: bool) -> tuple[list[dict], bool]:
+    """(US rows, every row classified). FOREIGN rows are left out. With
+    `keep_unkeyed`, a row without order_id is kept so keying fails closed."""
+    kept, ok = [], True
+    for row in rows:
+        cls = _market_class(row, market_field)
+        if cls == "US" or (keep_unkeyed and _text(row.get("order_id")) is None):
+            kept.append(row)
+        elif cls is None:
+            ok = False
+    return kept, ok
 
 
 def _merge_orders(open_rows: list[dict], history_rows: list[dict]) -> tuple[dict[str, dict], bool]:
@@ -306,6 +337,9 @@ def _order_observation(
         right=inst.get("right"),
         expiry=inst.get("exp"),
         con_id=meta["con_id"] if meta else None,
+        order_type=_text(row.get("order_type")),
+        tif=_text(row.get("time_in_force")),
+        aux_price=_decimal(row.get("aux_price")),
         fill_metadata={
             "futu_code": _text(row.get("code")),
             "futu_order_id": _text(row.get("order_id")),
@@ -375,13 +409,17 @@ def _option_specs(rows: Iterable[dict]) -> list[dict]:
     return out
 
 
-def _publish(scope: AccountScope, payload: dict) -> bool:
-    """Insert the FUTU snapshot unless a newer pass already published."""
+def _publish(scope: AccountScope, payload: dict, may_publish: Callable[[], bool] | None = None) -> bool:
+    """Insert the FUTU snapshot unless a newer pass already published or the
+    pass was retired (`may_publish()` false, checked under the scope lock)."""
     orders_store.ensure_writable()
     scope_d = scope.as_dict()
     with get_sync_engine().begin() as conn:
         if gate4.is_stale_publication(conn, scope_d, payload["observation"]):
             log.info("futu observation: stale pass %s not published", payload["observation"].get("pass_seq"))
+            return False
+        if may_publish is not None and not may_publish():
+            log.warning("futu observation: retired pass %s not published", payload["observation"].get("pass_seq"))
             return False
         conn.execute(
             insert(account_snapshots).values(
@@ -446,7 +484,12 @@ def _audit_open_orders(parsed: dict, scope: AccountScope) -> list[dict]:
 
 
 def run_pass(
-    scope: AccountScope, ctx: Any, *, resolve_meta: MetaResolver | None = None, audit: bool = True
+    scope: AccountScope,
+    ctx: Any,
+    *,
+    resolve_meta: MetaResolver | None = None,
+    audit: bool = True,
+    may_publish: Callable[[], bool] | None = None,
 ) -> dict:
     """One observation pass for `scope` on the Futu trade context `ctx`.
 
@@ -454,6 +497,8 @@ def run_pass(
     (`contract_meta` shape); without it every option leg stays unresolved.
     With `audit`, a published `complete:true` pass also runs the shadow
     naked-short audit (log + service_health only; it never cancels).
+    `may_publish()` false (a pass the loop retired after a timeout or stop)
+    means nothing is published.
     Returns {"published", "complete", "reads", "observation", "orders", "fills", "audit"}.
     """
     result: dict = {
@@ -500,9 +545,10 @@ def run_pass(
     )
     reads["history_orders"] = history_rows is not None
 
-    us_positions = [r for r in positions or [] if _is_us(r.get("code"))]
-    us_open = [r for r in open_rows or [] if _is_us(r.get("code")) or _text(r.get("order_id")) is None]
-    us_history = [r for r in history_rows or [] if _is_us(r.get("code")) or _text(r.get("order_id")) is None]
+    us_positions, pos_ok = _split_markets(positions or [], "position_market", keep_unkeyed=False)
+    us_open, open_ok = _split_markets(open_rows or [], "order_market", keep_unkeyed=True)
+    us_history, hist_ok = _split_markets(history_rows or [], "order_market", keep_unkeyed=True)
+    reads["rows_classified"] = pos_ok and open_ok and hist_ok
     metas = _MetaCache(resolve_meta)
     metas.prefetch(_option_specs([*us_positions, *us_open, *us_history]))
 
@@ -525,6 +571,14 @@ def run_pass(
         result["fills"] += 1 if out.get("fill") else 0
         if out.get("fill_skipped"):
             log.warning("futu observation: order %s fill not recorded (%s)", obs.order_id, out["fill_skipped"])
+            persisted = False
+        if out.get("identity_mismatch"):
+            log.warning(
+                "futu observation: order %s not bound to %s (%s)",
+                obs.order_id,
+                out.get("submission_id"),
+                out["identity_mismatch"],
+            )
             persisted = False
     reads["persisted"] = persisted
 
@@ -553,7 +607,7 @@ def run_pass(
     }
     result["observation"] = observation
     try:
-        result["published"] = _publish(scope, payload)
+        result["published"] = _publish(scope, payload, may_publish)
     except Exception as exc:  # noqa: BLE001 — never leave an older stamp valid
         log.warning("futu observation: publish failed (%s)", exc, exc_info=True)
         _invalidate(scope, "futu_publish_failed")
@@ -635,10 +689,14 @@ def futu_client_connector(scope: AccountScope) -> Connector:
 class ObservationLoop:
     """Runs `run_pass` for one scope on a single-worker executor.
 
-    Reads only. The trade context is opened lazily on the worker thread and
-    reopened after a failed pass. An OpenD that cannot be reached invalidates
-    the Gate-4 view (no pass, so no stamp is renewed); the read routes keep
-    serving the persisted rows.
+    Reads only. The worker thread owns the trade context: it opens it
+    lazily, reopens it after a failed pass, and closes it when its pass was
+    retired or the loop stopped. A pass is retired when its wait times out
+    or the loop stops: the scope's Gate-4 view is invalidated at once, and
+    the retired pass can no longer publish (`may_publish` is checked under
+    the scope lock) nor keep a late connection. An OpenD that cannot be
+    reached also invalidates the view; the read routes keep serving the
+    persisted rows.
     """
 
     def __init__(
@@ -658,8 +716,14 @@ class ObservationLoop:
         self._interval_s = interval_s
         self._pass_timeout_s = pass_timeout_s
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="xenon-futu-observe")
+        # Worker-thread state: only `_pass_blocking` / `_retire_ctx` touch it.
         self._ctx: Any = None
         self._close: Callable[[], None] | None = None
+        # Pass generation: a pass may publish only while its generation is
+        # current and the loop is not stopping.
+        self._gen = 0
+        self._gen_lock = threading.Lock()
+        self._stopping = threading.Event()
         self._inflight: concurrent.futures.Future | None = None
         self._stop = asyncio.Event()
         self._task: asyncio.Task | None = None
@@ -680,41 +744,74 @@ class ObservationLoop:
             except TimeoutError:
                 pass
 
+    def _current(self, gen: int) -> bool:
+        with self._gen_lock:
+            return gen == self._gen and not self._stopping.is_set()
+
+    def _retire_pass(self) -> None:
+        with self._gen_lock:
+            self._gen += 1
+
     async def tick(self) -> dict | None:
-        """One pass on the worker thread; None when skipped or timed out."""
+        """One pass on the worker thread; None when skipped, stopped or timed out."""
+        if self._stopping.is_set():
+            return None
         if self._inflight is not None and not self._inflight.done():
             log.warning("futu observation: previous pass still running — tick skipped")
             return None
-        fut = self._executor.submit(self._pass_blocking)
+        with self._gen_lock:
+            gen = self._gen
+        fut = self._executor.submit(self._pass_blocking, gen)
         self._inflight = fut
         try:
-            result = await asyncio.wait_for(asyncio.wrap_future(fut), self._pass_timeout_s)
+            result = await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(fut)), self._pass_timeout_s)
         except TimeoutError:
-            log.warning("futu observation: pass exceeded %.0fs", self._pass_timeout_s)
+            log.warning("futu observation: pass exceeded %.0fs — retired, view invalidated", self._pass_timeout_s)
+            self._retire_pass()
+            await asyncio.to_thread(_invalidate, self.scope, "futu_observation_timeout")
             return None
         self.last_result = result
         return result
 
-    def _pass_blocking(self) -> dict:
+    async def refresh(self) -> dict | None:
+        """Run one pass now, or join the pass already running (manual refresh)."""
+        fut = self._inflight
+        if fut is not None and not fut.done():
+            try:
+                return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(fut)), self._pass_timeout_s)
+            except TimeoutError:
+                return None
+        return await self.tick()
+
+    def _pass_blocking(self, gen: int) -> dict:
+        if not self._current(gen):
+            return {"published": False, "complete": False, "error": "retired"}
         if self._ctx is None:
             try:
-                self._ctx, self._close = self._connect()
+                ctx, close = self._connect()
             except Exception as exc:  # noqa: BLE001 — OpenD down: keep serving persisted rows
                 log.warning("futu observation: OpenD connect failed (%s)", exc)
                 _invalidate(self.scope, "futu_opend_unreachable")
                 return {"published": False, "complete": False, "error": "connect_failed"}
+            self._ctx, self._close = ctx, close
+            if not self._current(gen):  # stopped or timed out during connect
+                self._retire_ctx()
+                return {"published": False, "complete": False, "error": "retired"}
         try:
-            result = self._run(self.scope, self._ctx, resolve_meta=self._resolve_meta)
+            result = self._run(
+                self.scope, self._ctx, resolve_meta=self._resolve_meta, may_publish=lambda: self._current(gen)
+            )
         except Exception as exc:  # noqa: BLE001 — the loop must survive any pass bug
             log.warning("futu observation: pass failed (%s)", exc, exc_info=True)
-            self._reset()
+            self._retire_ctx()
             _invalidate(self.scope, "futu_observation_failed")
             return {"published": False, "complete": False, "error": type(exc).__name__}
-        if (result.get("reads") or {}).get("account") is not True:
-            self._reset()  # reconnect on the next tick
+        if not self._current(gen) or (result.get("reads") or {}).get("account") is not True:
+            self._retire_ctx()  # retired, stopping, or reconnect on the next tick
         return result
 
-    def _reset(self) -> None:
+    def _retire_ctx(self) -> None:
+        """Close the worker's context (worker thread only)."""
         close, self._ctx, self._close = self._close, None, None
         if close is not None:
             try:
@@ -722,9 +819,11 @@ class ObservationLoop:
             except Exception as exc:  # noqa: BLE001
                 log.warning("futu observation: context close failed (%s)", exc)
 
-    async def stop(self) -> None:
-        """Stop the loop. Never waits for an in-flight pass: the context is
-        closed on a daemon thread because the SDK's close() can block."""
+    async def stop(self, wait_s: float = 0.5) -> None:
+        """Stop the loop. A running pass is retired (it cannot publish); the
+        worker closes the context after it, waited for at most `wait_s`."""
+        self._stopping.set()
+        self._retire_pass()
         self._stop.set()
         if self._task is not None:
             self._task.cancel()
@@ -732,10 +831,16 @@ class ObservationLoop:
                 await self._task
             except BaseException:  # noqa: BLE001 — CancelledError or a late pass error
                 pass
-        self._executor.shutdown(wait=False, cancel_futures=True)
-        close, self._ctx, self._close = self._close, None, None
-        if close is not None:
-            threading.Thread(target=close, name="xenon-futu-observe-close", daemon=True).start()
+        try:
+            cleanup = self._executor.submit(self._retire_ctx)
+        except RuntimeError:  # already shut down
+            cleanup = None
+        self._executor.shutdown(wait=False)
+        if cleanup is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(cleanup)), wait_s)
+            except TimeoutError:
+                log.warning("futu observation: pass still running at stop; it closes its context when it ends")
 
 
 def start_observation_loop(

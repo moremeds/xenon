@@ -1403,7 +1403,42 @@ class FutuOrderObservation:
     right: str | None = None
     expiry: str | None = None
     con_id: int | None = None
+    # Observed order semantics (Futu `order_type`, `time_in_force`,
+    # `aux_price` = trigger price), kept for the read path.
+    order_type: str | None = None
+    tif: str | None = None
+    aux_price: Decimal | None = None
     fill_metadata: dict | None = None
+
+
+def _futu_order_info(obs: FutuOrderObservation) -> dict | None:
+    """Observed order type and trigger price, stored in the legs payload
+    (`futu_order`); None when the row reported no order type."""
+    if obs.order_type is None:
+        return None
+    return {"order_type": obs.order_type, "aux_price": str(obs.aux_price) if obs.aux_price is not None else None}
+
+
+def _futu_identity_mismatch(row, obs: FutuOrderObservation) -> str | None:
+    """Which immutable identity field of `row` the observation contradicts
+    (symbol, security type, side, option right / expiry / strike, qualified
+    con_id when both are known), or None when it is the same order."""
+    if str(row.ticker or "").upper() != obs.ticker.upper():
+        return "symbol"
+    if row.security_type != obs.security_type:
+        return "security_type"
+    if row.action != obs.action:
+        return "side"
+    if obs.security_type == "OPT":
+        if (row.right or None) != obs.right:
+            return "right"
+        if (row.expiry.strftime("%Y%m%d") if row.expiry else None) != obs.expiry:
+            return "expiry"
+        if row.strike is None or obs.strike is None or abs(float(row.strike) - float(obs.strike)) > 1e-6:
+            return "strike"
+        if row.con_id is not None and obs.con_id is not None and int(row.con_id) != int(obs.con_id):
+            return "con_id"
+    return None
 
 
 def _futu_state_values(row, obs: FutuOrderObservation, *, fresh: bool, own: bool) -> dict:
@@ -1423,17 +1458,26 @@ def _futu_state_values(row, obs: FutuOrderObservation, *, fresh: bool, own: bool
         if fresh or not (to_terminal or from_terminal):
             values["state"] = obs.state
     legs = normalize_legs_payload(row.legs)
+    info = _futu_order_info(obs)
     if own:
+        new_legs = dict(legs)
         if obs.quantity != int(row.quantity or 0) and obs.quantity != legs.get("observed_qty"):
-            legs["observed_qty"] = obs.quantity
-            values["legs"] = legs
+            new_legs["observed_qty"] = obs.quantity
+        if info is not None:
+            new_legs["futu_order"] = info
+        if new_legs != legs:
+            values["legs"] = new_legs
         return values
     quantity = obs.quantity if fresh else max(obs.quantity, int(row.quantity or 0))
     if quantity != int(row.quantity or 0):
         values["quantity"] = quantity
     if fresh and obs.limit_price is not None and obs.limit_price != row.limit_price:
         values["limit_price"] = obs.limit_price
+    if obs.tif is not None and obs.tif != row.tif:
+        values["tif"] = obs.tif
     merged = merge_observed_legs(row.legs, obs.legs)
+    if info is not None:
+        merged["futu_order"] = info
     if merged != legs:
         values["legs"] = merged
     return values
@@ -1459,8 +1503,14 @@ def mirror_futu_order(
     written (qty = delta, price from the cumulative notional change,
     exec_id = futu_exec_id(...)) and the high-water advanced, in the same
     transaction. An unchanged or lower cumulative writes nothing. A delta
-    without `dealt_avg_price` writes nothing and is reported as
-    `fill_skipped`, so the caller can mark its pass incomplete.
+    without `dealt_avg_price`, or whose cumulative notional did not grow,
+    writes nothing and is reported as `fill_skipped`, so the caller can mark
+    its pass incomplete. Deltas use the precise cumulative notional kept in
+    the legs payload (`futu_fill`), not the 4-place display average.
+
+    A row whose immutable identity (symbol, sec type, side, option fields)
+    contradicts the observation is not bound or changed:
+    `identity_mismatch` names the field.
     """
     ensure_writable()
     broker = "FUTU"
@@ -1478,17 +1528,30 @@ def mirror_futu_order(
             return conn.execute(select(order_submissions).where(*conds, *scope_conds).with_for_update()).first()
 
         row = _row(order_submissions.c.broker_order_id == obs.order_id)
+        bind = False
         if row is None:
             sid = submission_id_from_order_ref(obs.remark)
             if sid is not None:
                 row = _row(order_submissions.c.submission_id == sid, order_submissions.c.broker_order_id.is_(None))
-                if row is not None:
-                    conn.execute(
-                        update(order_submissions)
-                        .where(order_submissions.c.submission_id == row.submission_id)
-                        .values(broker_order_id=obs.order_id)
-                    )
+                bind = row is not None
+        if row is not None:
+            # A remark (or a stored broker id) is not proof of contract
+            # identity: a contradicting observation binds nothing, writes
+            # nothing and keeps the reservation; the caller marks its pass
+            # incomplete, so Gate 4 fails closed on the missing demand.
+            mismatch = _futu_identity_mismatch(row, obs)
+            if mismatch is not None:
+                out["submission_id"] = row.submission_id
+                out["identity_mismatch"] = mismatch
+                return out
+            if bind:
+                conn.execute(
+                    update(order_submissions)
+                    .where(order_submissions.c.submission_id == row.submission_id)
+                    .values(broker_order_id=obs.order_id)
+                )
         if row is None:
+            info = _futu_order_info(obs)
             sid = f"{FUTU_SUBMISSION_PREFIX}{obs.order_id}"
             conn.execute(
                 pg_insert(order_submissions)
@@ -1515,7 +1578,8 @@ def mirror_futu_order(
                     right=obs.right,
                     expiry=datetime.strptime(obs.expiry, "%Y%m%d").date() if obs.expiry else None,
                     con_id=obs.con_id,
-                    legs=obs.legs,
+                    legs={**obs.legs, "futu_order": info} if info is not None else obs.legs,
+                    **({"tif": obs.tif} if obs.tif is not None else {}),
                 )
                 .on_conflict_do_nothing()
             )
@@ -1543,12 +1607,33 @@ def mirror_futu_order(
         if obs.dealt_avg_price is None:
             out["fill_skipped"] = "no_dealt_avg_price"
             return out
+        # Precise cumulative notional high-water (legs payload `futu_fill`,
+        # same row lock and transaction). `avg_fill_price` is rounded to 4
+        # places for display and is used only for a row that has no stored
+        # notional yet (filled before this state existed).
         avg = Decimal(str(obs.dealt_avg_price))
-        old_avg = Decimal(str(row.avg_fill_price)) if row.avg_fill_price is not None else avg
-        price = (Decimal(obs.dealt_qty) * avg - Decimal(stored) * old_avg) / Decimal(delta)
-        basis = "cumulative_notional_delta"
+        current_legs = normalize_legs_payload(
+            conn.execute(
+                select(order_submissions.c.legs).where(order_submissions.c.submission_id == row.submission_id)
+            ).scalar()
+        )
+        hw = current_legs.get("futu_fill") or {}
+        if stored == 0:
+            prev_notional = Decimal(0)
+        elif hw.get("cum_qty") == stored and hw.get("cum_notional") is not None:
+            prev_notional = Decimal(str(hw["cum_notional"]))
+        elif row.avg_fill_price is not None:
+            prev_notional = Decimal(stored) * Decimal(str(row.avg_fill_price))
+        else:
+            out["fill_skipped"] = "no_prior_notional"
+            return out
+        notional = Decimal(obs.dealt_qty) * avg
+        price = (notional - prev_notional) / Decimal(delta)
         if price <= 0:
-            price, basis = avg, "cumulative_avg"
+            # Never fabricate a delta price from the cumulative average.
+            out["fill_skipped"] = "notional_inconsistent"
+            return out
+        basis = "cumulative_notional_delta"
         price = price.quantize(_MONEY_4)
         exec_id = futu_exec_id(broker_account, obs.order_id, obs.dealt_qty)
         metadata = {
@@ -1583,6 +1668,7 @@ def mirror_futu_order(
             .values(
                 filled_qty=obs.dealt_qty,
                 avg_fill_price=avg.quantize(_MONEY_4),
+                legs={**current_legs, "futu_fill": {"cum_qty": obs.dealt_qty, "cum_notional": str(notional)}},
                 updated_at=monotone_updated_at(now),
             )
         )

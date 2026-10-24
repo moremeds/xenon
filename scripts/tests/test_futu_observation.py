@@ -492,8 +492,8 @@ def test_contradictory_position_side_makes_pass_incomplete():
 
 def test_non_us_rows_are_left_out():
     ctx = FakeTradeCtx(
-        positions=[_pos("US.SPY", 100.0), _pos("HK.00700", 100.0)],
-        open_orders=[_order("7009", code="HK.00700", side="SELL", qty=100.0)],
+        positions=[_pos("US.SPY", 100.0), {**_pos("HK.00700", 100.0), "position_market": "HK"}],
+        open_orders=[{**_order("7009", code="HK.00700", side="SELL", qty=100.0), "order_market": "HK"}],
     )
     assert _run(ctx)["complete"] is True
     assert [p["ticker"] for p in _latest_payload()["positions"]] == ["SPY"]
@@ -612,6 +612,9 @@ def test_remark_binds_xenon_row_instead_of_new_external_row():
                 security_type="OPT",
                 action="SELL",
                 quantity=1,
+                right="C",
+                expiry=datetime.strptime(EXP, "%Y%m%d").date(),
+                strike=500,
                 state="PENDING",
                 submitted_at=now,
                 updated_at=now - timedelta(seconds=5),

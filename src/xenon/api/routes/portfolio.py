@@ -327,9 +327,10 @@ async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
 
     IB: subprocess pull (auto-allocated clientId 20-49, gateway auto-restart on
     ECONNREFUSED), gated on IB mode verification.
-    FUTU: read-only pull from OpenD into futu_orders/trades/closed_trades + journal
-    via sync_futu_orders (DB-first; no-ops under XENON_READ_ONLY=1). The GET read
-    path stays Postgres-only.
+    FUTU: one observation pass (run or joined) for the configured scope when
+    the request scope matches it, then the ledger payload (empty with
+    `scope_mismatch` otherwise). Reads only; the GET read path stays
+    Postgres-only.
     """
     from xenon.api import server
 
@@ -350,7 +351,13 @@ async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
         return {"status": "ok", "orders": []}
 
     if scope.broker == "FUTU":
-        await _futu_refresh_db_first(scope)
+        # The FUTU read path is the observation ledger, so refresh runs (or
+        # joins) one observation pass of the configured scope, only when the
+        # request scope is exactly that scope. History sync (futu_orders /
+        # futu_trades) stays separate (nightly loop, POST /blotter).
+        loop = getattr(request.app.state, "futu_observation_loop", None)
+        if loop is not None and loop.scope == scope:
+            await loop.refresh()
         return orders_payload_for_scope(scope)
 
     # IB path — mode already verified above; touch the gateway.

@@ -187,9 +187,25 @@ def _scope_fields(scope: AccountScope) -> dict[str, str]:
     return {"broker": scope.broker, "accountEnv": scope.account_env, "brokerAccount": scope.broker_account}
 
 
+# Futu order types (SDK `OrderType`): NORMAL / MARKET map to the IB labels,
+# every other type is passed through as Futu's own label.
+_FUTU_ORDER_TYPE = {"NORMAL": "LMT", "MARKET": "MKT"}
+
+
 def _futu_open_order(row: dict[str, Any], scope: AccountScope) -> dict[str, Any]:
     out = _open_order(row)
-    out.update(orderId=0, permId=0, brokerOrderId=_str_or_none(row.get("broker_order_id")), **_scope_fields(scope))
+    info = (row.get("legs") or {}).get("futu_order") if isinstance(row.get("legs"), dict) else None
+    order_type = (info or {}).get("order_type")
+    out.update(
+        orderId=0,
+        permId=0,
+        brokerOrderId=_str_or_none(row.get("broker_order_id")),
+        # Observed type and trigger price; never inferred from the limit price.
+        orderType=_FUTU_ORDER_TYPE.get(order_type, order_type) if order_type else "UNKNOWN",
+        auxPrice=_float_or_none((info or {}).get("aux_price")),
+        tif=str(row.get("tif") or "DAY"),
+        **_scope_fields(scope),
+    )
     return out
 
 
