@@ -72,7 +72,7 @@ container via `environment:`, and `env_file: ./.env` gives it to api/realtime/mi
 Generate two distinct values with `openssl rand -hex 32`. `XENON_AUTH_ALLOW_DEV_OPEN`
 is NEVER set in prod. After editing, recreate the containers (env_file changes need a recreate,
 not a restart) with the controlled sequence: pause Watchtower, `docker-compose stop -t 60 api realtime`,
-the socket check (§ Standard release flow, step 7), then `docker-compose up -d --pull never api web realtime`
+the socket check (§ Standard release flow, step 7), then `docker-compose up -d --pull never api web realtime futu-quotes`
 and step 10 for Watchtower. Confirm the api startup log shows
 `auth: ENFORCED`.
 
@@ -237,7 +237,7 @@ plugin). Every remote command needs `PATH=/opt/homebrew/bin:$PATH`.
    Watchtower, which would replace the aliased images with whatever registry `:latest` is (step 10):
 
    ```bash
-   ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && docker-compose up -d --pull never api web realtime'
+   ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && docker-compose up -d --pull never api web realtime futu-quotes'
    ```
 
    A transient `[health] realtime /status unreachable` traceback in the api log right after
@@ -328,7 +328,7 @@ v0.0.3 target use `v0.0.3`, see "Tag convention").
    ```
 
 3. `docker-compose stop -t 60 api realtime`, run the stale-socket check (step 7 of the
-   release flow), then `docker-compose up -d --pull never api web realtime`. Name the
+   release flow), then `docker-compose up -d --pull never api web realtime futu-quotes`. Name the
    services: a bare `up -d` also recreates Watchtower, which would pull the bad `:latest` again.
 4. Resume Watchtower (`docker start xenon-watchtower-1`) only after the registry `:latest`
    is no longer the bad release (publish a fixed release first).
