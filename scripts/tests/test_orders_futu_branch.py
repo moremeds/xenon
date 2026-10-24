@@ -67,7 +67,7 @@ def test_futu_open_orders_come_from_the_ledger_with_string_ids():
             update(order_submissions).where(order_submissions.c.broker_order_id == WORKING_ID).values(modify_sequence=3)
         )
 
-    body = orders_payload_for_scope(OTHER)  # request scope is not the trade scope
+    body = orders_payload_for_scope(SCOPE)
 
     assert body["scope"] == {"broker": "FUTU", "accountEnv": "paper", "brokerAccount": ACC}
     assert body["open_count"] == 1
@@ -86,7 +86,7 @@ def test_futu_open_orders_come_from_the_ledger_with_string_ids():
 def test_futu_executed_orders_come_from_order_fills():
     _observe()
 
-    body = orders_payload_for_scope(OTHER)
+    body = orders_payload_for_scope(SCOPE)
 
     by_order = {r["brokerOrderId"]: r for r in body["executed_orders"]}
     assert set(by_order) == {WORKING_ID, FILLED_ID}
@@ -159,7 +159,7 @@ def test_get_orders_route_serves_ledger_while_opend_offline(monkeypatch):
     _observe()
     offline = type("Offline", (), {"is_connected": lambda self: False})()
     monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: offline)
-    monkeypatch.setattr(guards, "_futu_scope_from_db", lambda: OTHER)
+    monkeypatch.setattr(guards, "_futu_scope_from_db", lambda: SCOPE)
 
     resp = TestClient(server.app).get("/orders", params={"broker": "FUTU"})
 
@@ -167,6 +167,75 @@ def test_get_orders_route_serves_ledger_while_opend_offline(monkeypatch):
     body = resp.json()
     assert [r["brokerOrderId"] for r in body["open_orders"]] == [WORKING_ID]
     assert body["scope"]["brokerAccount"] == ACC
+
+
+
+@pytest.mark.parametrize(
+    "request_scope",
+    [
+        AccountScope(broker="FUTU", account_env="live", broker_account=ACC),  # REAL tab, SIMULATE configured
+        OTHER,  # another account
+    ],
+)
+def test_request_scope_other_than_configured_gets_no_rows(request_scope):
+    """Paper and live never blend: the configured scope's orders are served
+    only under exactly that scope."""
+    _observe()
+
+    body = orders_payload_for_scope(request_scope)
+
+    assert body["open_orders"] == [] and body["executed_orders"] == []
+    assert body["open_count"] == 0 and body["executed_count"] == 0
+    assert body["scope"] is None and body["scope_reason"] == "scope_mismatch"
+    assert body["request_scope"] == {
+        "broker": "FUTU",
+        "accountEnv": request_scope.account_env,
+        "brokerAccount": request_scope.broker_account,
+    }
+    assert body["configured_scope"] == {"broker": "FUTU", "accountEnv": "paper", "brokerAccount": ACC}
+
+
+def _route_client(monkeypatch, db_scope):
+    from fastapi.testclient import TestClient
+
+    from xenon.api import guards, server
+    from xenon.api.routes import futu as futu_routes
+
+    offline = type("Offline", (), {"is_connected": lambda self: False})()
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: offline)
+    monkeypatch.setattr(guards, "_futu_scope_from_db", lambda: db_scope)
+    return TestClient(server.app)
+
+
+def test_get_orders_route_refuses_a_mismatched_tab_scope(monkeypatch):
+    _observe()
+
+    body = _route_client(monkeypatch, OTHER).get("/orders", params={"broker": "FUTU"}).json()
+
+    assert body["open_orders"] == [] and body["scope_reason"] == "scope_mismatch"
+
+
+@pytest.mark.parametrize("db_scope,expected", [(SCOPE, [WORKING_ID]), (OTHER, [])])
+def test_orders_refresh_applies_the_same_scope_rule(monkeypatch, db_scope, expected):
+    from xenon.api import server
+    from xenon.api.routes import portfolio as portfolio_routes
+
+    _observe()
+    refreshed = []
+
+    async def _no_opend(scope):
+        refreshed.append(scope)
+
+    monkeypatch.setattr(portfolio_routes, "_futu_refresh_db_first", _no_opend)
+    monkeypatch.setattr(server, "_is_test_mode", lambda: False)
+
+    resp = _route_client(monkeypatch, db_scope).post("/orders/refresh", params={"broker": "FUTU"})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [r["brokerOrderId"] for r in body["open_orders"]] == expected
+    assert body.get("scope_reason") == (None if expected else "scope_mismatch")
+    assert refreshed == [db_scope]
 
 
 def test_ib_payload_shape_unchanged():

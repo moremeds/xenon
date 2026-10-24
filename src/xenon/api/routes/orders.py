@@ -209,24 +209,41 @@ def _str_or_none(value: Any) -> str | None:
     return None if value is None else str(value)
 
 
-def _futu_ledger_payload(*, limit: int) -> dict[str, Any]:
+def _futu_empty(**fields: Any) -> dict[str, Any]:
+    return {
+        "last_sync": datetime.now(timezone.utc).isoformat(),
+        "open_orders": [],
+        "executed_orders": [],
+        "open_count": 0,
+        "executed_count": 0,
+        "scope": None,
+        **fields,
+    }
+
+
+def _futu_ledger_payload(request_scope: AccountScope, *, limit: int) -> dict[str, Any]:
     """FUTU orders for the configured trade scope (`FUTU_TRADE_ACC_ID` +
     `FUTU_TRADE_ENV`), from Postgres only, so it keeps serving while OpenD is
-    offline. No configured scope → empty lists plus the reason; there is no
-    latest-account fallback."""
+    offline. Served only when the request scope (the tab's account) equals the
+    configured scope exactly; otherwise empty lists with
+    `scope_reason: "scope_mismatch"` and both scopes, so one account's orders
+    never show under another account. No configured scope → empty lists plus
+    the reason; there is no latest-account fallback."""
     from xenon.execution import futu_scope
 
     scope, reason = futu_scope.configured_scope()
     if scope is None:
-        return {
-            "last_sync": datetime.now(timezone.utc).isoformat(),
-            "open_orders": [],
-            "executed_orders": [],
-            "open_count": 0,
-            "executed_count": 0,
-            "scope": None,
-            "scope_reason": reason,
-        }
+        return _futu_empty(scope_reason=reason)
+    if (request_scope.broker, request_scope.account_env, request_scope.broker_account) != (
+        scope.broker,
+        scope.account_env,
+        scope.broker_account,
+    ):
+        return _futu_empty(
+            scope_reason="scope_mismatch",
+            request_scope=_scope_fields(request_scope),
+            configured_scope=_scope_fields(scope),
+        )
     payload = _ledger_payload(scope, limit=limit, open_states=FUTU_OPEN_STATES)
     payload["open_orders"] = [_futu_open_order(r, scope) for r in payload.pop("_open_rows")]
     payload["executed_orders"] = [_futu_executed_order(r, scope) for r in payload.pop("_fill_rows")]
@@ -288,7 +305,7 @@ def _ledger_payload(scope: AccountScope, *, limit: int, open_states: set[str]) -
 
 def orders_payload_for_scope(scope: AccountScope, *, limit: int = 200) -> dict[str, Any]:
     if scope.broker == "FUTU":
-        return _futu_ledger_payload(limit=limit)
+        return _futu_ledger_payload(scope, limit=limit)
     payload = _ledger_payload(scope, limit=limit, open_states=ACTIVE_STATES)
     payload["open_orders"] = [_open_order(row) for row in payload.pop("_open_rows")]
     payload["executed_orders"] = [_executed_order(row) for row in payload.pop("_fill_rows")]
