@@ -30,7 +30,7 @@ PROD_COMPOSE = REPO_ROOT / "deploy" / "compose.prod.yml"
 DEV_COMPOSE = REPO_ROOT / "docker-compose.yml"
 JOBS_DIR = REPO_ROOT / "deploy" / "jobs"
 
-EXPECTED_SERVICES = {"migrator", "api", "web", "realtime", "watchtower"}
+EXPECTED_SERVICES = {"migrator", "api", "web", "realtime", "futu-quotes", "watchtower"}
 SECRET_NAME = re.compile(r"(TOKEN|PASS|SECRET|_PAT|_KEY|NOTIFICATION_URL|WEBHOOK)", re.IGNORECASE)
 ENV_LINE = re.compile(r"^\s+([A-Z][A-Z0-9_]*):\s*(.*?)\s*$")
 IMAGE_LINE = re.compile(r"^  ([a-z][a-z0-9_-]*):\s*$")
@@ -83,6 +83,7 @@ def test_xenon_services_use_ghcr_and_watchtower_is_pinned() -> None:
     images = _service_images(_text())
     for name in ("migrator", "api", "web", "realtime"):
         assert images[name].startswith(f"ghcr.io/moremeds/xenon-{name}:"), images[name]
+    assert images["futu-quotes"] == images["api"]  # same image, different command
     assert re.fullmatch(r"containrrr/watchtower:\d+\.\d+\.\d+", images["watchtower"])
 
 
@@ -114,7 +115,7 @@ def test_watchtower_webhook_is_interpolated() -> None:
 
 def test_only_opted_in_services_carry_watchtower_label() -> None:
     text = _text()
-    assert text.count('com.centurylinklabs.watchtower.enable: "true"') == 3
+    assert text.count('com.centurylinklabs.watchtower.enable: "true"') == 4
     assert text.count('com.centurylinklabs.watchtower.enable: "false"') == 1  # watchtower itself
     assert 'profiles: ["migrate"]' in text
 
@@ -130,6 +131,13 @@ def test_cross_container_urls_and_web_healthcheck() -> None:
     assert rt_env["TICKET_VALIDATE_URL"] == "http://api:8321/ws-ticket/validate"
     assert services["api"]["environment"]["IB_REALTIME_STATUS_URL"] == "http://realtime:8765/status"
     assert services["web"]["healthcheck"]["test"][-1] == "http://127.0.0.1:3000/"
+    assert rt_env["FUTU_QUOTES_URL"] == "ws://futu-quotes:8767"
+
+
+def test_futu_quotes_has_no_secrets_and_no_host_port() -> None:
+    fq = yaml.safe_load(_text())["services"]["futu-quotes"]
+    assert "env_file" not in fq and "volumes" not in fq and "ports" not in fq
+    assert fq["environment"]["FUTU_OPEND_HOST"] == "host.docker.internal"
 
 
 def test_dev_compose_header_points_to_prod_truth() -> None:
