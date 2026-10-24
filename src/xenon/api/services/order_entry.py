@@ -8,12 +8,14 @@ read at call time.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
 import time
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi import HTTPException
@@ -801,9 +803,11 @@ def _resolve_scope_kwargs() -> dict[str, str]:
     return {"broker": "IB", "account_env": "legacy_unknown", "broker_account": "legacy_unknown"}
 
 
-async def place(body: dict):
+async def place(body: dict, *, broker: str | None = None, account_env: str | None = None):
     from xenon.api import server
 
+    if _order_broker(broker) != "IB":
+        return await _futu_place(body, _order_broker(broker), account_env)
     denial = ensure_order_allowed("order placement", server.app.state)
     if denial is not None:
         return denial
@@ -826,9 +830,10 @@ async def place(body: dict):
     return await _place_reserved(body, outcome.submission_id, scope)
 
 
-async def _prepare_place(body: dict):
+async def _prepare_place(body: dict, scope: dict | None = None):
     """Pre-reservation place checks → JSONResponse refusal, or
-    (cid, request row, Gate-4 candidate, legs payload, scope)."""
+    (cid, request row, Gate-4 candidate, legs payload, scope). `scope`: the
+    FUTU request scope; None → the IB scope from app.state."""
     # RegimeGate (VCG-CRI signal layer) was removed in the pure-portfolio
     # pivot (#104). Order entry no longer gates on regime tiers and there is
     # no override audit.
@@ -849,7 +854,7 @@ async def _prepare_place(body: dict):
             status_code=400,
             content={"detail": "client_attempt_id is required"},
         )
-    scope = _resolve_scope_kwargs()
+    scope = scope or _resolve_scope_kwargs()
     security_type = "STK" if body.get("type") == "stock" else "BAG" if body.get("type") == "combo" else "OPT"
     ticker = str(body.get("symbol", "")).upper()
     try:
@@ -974,14 +979,12 @@ def _reservation_refusal(outcome, cid: str, *, replacement: bool) -> JSONRespons
     return None
 
 
-async def _place_reserved(body: dict, submission_id: str, scope: dict):
-    """Quote gate → broker place → verdict for a row already reserved PENDING."""
-    from xenon.api import server
-
-    # F3: quote-token + tick-grid + limit-band + market-hours. Runs AFTER
-    # the reservation so a Gate-4 coverage reason always wins over a quote
-    # failure; a quote rejection marks the row REJECTED so the reservation
-    # releases its cover instead of leaking a PENDING row.
+async def _quote_gate(body: dict, submission_id: str) -> JSONResponse | None:
+    """F3: quote-token + tick-grid + limit-band + market-hours (IB quotes,
+    for IB and FUTU orders alike). Runs AFTER the reservation so a Gate-4
+    coverage reason always wins over a quote failure; a quote rejection marks
+    the row REJECTED so the reservation releases its cover instead of
+    leaking a PENDING row. None = pass."""
     if body.get("type") != "combo":
         qv, quote_status = await _validate_non_combo_quote(body)
         _override_detail = None
@@ -1013,6 +1016,16 @@ async def _place_reserved(body: dict, submission_id: str, scope: dict):
 
     if _override_detail is not None:
         orders_store.record_event(submission_id, "PREFLIGHT_ACK_LIMIT", _override_detail)
+    return None
+
+
+async def _place_reserved(body: dict, submission_id: str, scope: dict):
+    """Quote gate → broker place → verdict for a row already reserved PENDING."""
+    from xenon.api import server
+
+    refusal = await _quote_gate(body, submission_id)
+    if refusal is not None:
+        return refusal
 
     if server._is_test_mode():
         order_id, perm_id = server._next_test_order_ids()
@@ -1390,9 +1403,11 @@ def _record_manage_event(
         )
 
 
-async def cancel(body: dict):
+async def cancel(body: dict, *, broker: str | None = None, account_env: str | None = None):
     from xenon.api import server
 
+    if _order_broker(broker) != "IB":
+        return await _futu_cancel(body, _order_broker(broker), account_env)
     denial = ensure_order_allowed("order cancellation", server.app.state)
     if denial is not None:
         return denial
@@ -1606,9 +1621,14 @@ _REPLACE_UNKNOWN_COPY = (
 )
 
 
-async def replace(body: dict):
+async def replace(body: dict, *, broker: str | None = None, account_env: str | None = None):
     from xenon.api import server
 
+    if _order_broker(broker) != "IB":
+        # Never dispatched for FUTU (capability false): refused, never sent to IB.
+        return ensure_order_allowed(
+            "order replacement", SimpleNamespace(broker=_order_broker(broker)), account_env=account_env
+        ) or _futu_not_dispatched("order replacement")
     denial = ensure_order_allowed("order replacement", server.app.state)
     if denial is not None:
         return denial
@@ -1767,9 +1787,11 @@ def _confirmed_int(confirmed, requested) -> int | None:
     return None
 
 
-async def modify(body: dict):
+async def modify(body: dict, *, broker: str | None = None, account_env: str | None = None):
     from xenon.api import server
 
+    if _order_broker(broker) != "IB":
+        return await _futu_modify(body, _order_broker(broker), account_env)
     denial = ensure_order_allowed("order modification", server.app.state)
     if denial is not None:
         return denial
@@ -2024,3 +2046,734 @@ async def modify(body: dict):
 # The order owner's wait for one place: readiness round trip + qualify + ack
 # wait (5 s combo) + queueing behind another order action.
 _PLACE_TIMEOUT_S = 30
+
+
+# ---------------------------------------------------------------------------
+# FUTU dispatch (X3c): place_single / cancel / modify on the Futu order worker
+# ---------------------------------------------------------------------------
+#
+# Order of checks, as for IB: read-only → capability (env enabled + account
+# configured) → scope-change veto (all in `ensure_order_allowed`) → Gate 4
+# (naked-short / coverage, FUTU request scope) → IB quote gate (place) → the
+# worker, which verifies the live OpenD account (`verify_live`) before every
+# core. A FUTU request never falls back to IB. The adapter never writes
+# order_fills: every row change after a send comes from fresh account-scoped
+# evidence through the observation mirror (`orders_store.mirror_futu_order`).
+# Uncertain send = UNKNOWN; there is no automatic re-send.
+
+FUTU_NOT_SENT = "FUTU_NOT_SENT"
+FUTU_SEND_WINDOW_CLOSED = "FUTU_SEND_WINDOW_CLOSED"
+FUTU_WORKER_MISSING = "FUTU_WORKER_STOPPED"
+
+
+def _order_broker(broker: str | None) -> str:
+    """The request's broker: the `broker` query value, else app.state.broker."""
+    from xenon.api import server
+
+    return str(broker or getattr(server.app.state, "broker", "IB") or "IB").upper()
+
+
+def _futu_not_dispatched(kind: str) -> JSONResponse:
+    message = f"FUTU is read-only for {kind}"
+    return JSONResponse(
+        status_code=403,
+        content={"detail": message, "reason_code": ReasonCode.READ_ONLY_BROKER.value, "reason_detail": message},
+    )
+
+
+def _futu_guard(kind: str, broker: str, op: str | None, account_env: str | None):
+    """→ (scope, None) or (None, refusal). Unknown brokers are refused here too."""
+    from xenon.execution import futu_scope
+
+    denial = ensure_order_allowed(kind, SimpleNamespace(broker=broker), op, account_env=account_env)
+    if denial is not None:
+        return None, denial
+    scope, _ = futu_scope.configured_scope(account_env) if broker == "FUTU" else (None, None)
+    if scope is None:  # pragma: no cover — the capability proved the account
+        return None, _futu_not_dispatched(kind)
+    return scope, None
+
+
+def futu_trading_status() -> dict[str, bool]:
+    """/health `futu.trading`: per env, would a Futu place pass the guard?
+    True only when not read-only, the Futu order worker runs, the env is in
+    XENON_FUTU_TRADING and has a configured account (`broker_capabilities.evaluate`), no
+    FUTU_SCOPE_CHANGE_PENDING veto applies, and for live FUTU_TRADE_PWD_MD5
+    is well-formed (format only, no unlock call). No account numbers."""
+    from xenon.api import guards
+    from xenon.execution import broker_capabilities, futu_orders, futu_scope
+
+    out: dict[str, bool] = {}
+    for env in futu_scope.ACCOUNT_ENVS:
+        worker = _futu_worker()
+        ok = (
+            not guards.is_read_only()
+            and worker is not None
+            and not worker.stopped
+            and broker_capabilities.evaluate("FUTU", "place_single", env)[0]
+        )
+        try:
+            ok = ok and not guards.futu_scope_change_pending(env)
+            if ok and env == "live":
+                futu_orders.trade_secret(os.environ)
+        except futu_orders.FutuOrderRefused:
+            ok = False
+        except Exception as exc:  # noqa: BLE001 — health renders without the DB; unknown = off
+            logger.debug("futu trading status (%s): %s", env, type(exc).__name__)
+            ok = False
+        out[env] = bool(ok)
+    return out
+
+
+def _futu_worker():
+    from xenon.api import server
+
+    return getattr(server.app.state, "futu_order_worker", None)
+
+
+def _futu_worker_missing() -> dict:
+    return {
+        "status": "error",
+        "message": "Futu order worker is not running; nothing was sent",
+        "classification": BROKER_DISCONNECTED,
+        "amend_outcome": "not_sent",
+        "reason_code": FUTU_WORKER_MISSING,
+    }
+
+
+def _futu_refused_reply(exc) -> dict:
+    """Adapter refusal before any send → a not-sent reply."""
+    return {
+        "status": "error",
+        "message": str(exc),
+        "classification": "futu_refused",
+        "amend_outcome": "not_sent",
+        "reason_code": exc.reason_code,
+        "http_status": exc.http_status,
+    }
+
+
+def _futu_uncertain_reply(message: str | None, reason_code: str) -> dict:
+    return {
+        "status": "error",
+        "message": message or "Futu did not confirm the request",
+        "classification": "connection",
+        "amend_outcome": "unconfirmed",
+        "reason_code": reason_code,
+    }
+
+
+def _futu_fresh(ctx, order_id: str, scope) -> tuple[datetime, Any]:
+    """(read start, evidence | None): a fresh account-scoped query; a failed
+    read is no evidence."""
+    from xenon.execution import futu_orders
+
+    read_at = datetime.now(timezone.utc)
+    try:
+        ev = futu_orders.query_order(ctx, order_id=order_id, account_env=scope.account_env, acc_id=scope.broker_account)
+    except futu_orders.FutuReadFailed as exc:
+        logger.warning("futu orders: evidence read for %s failed (%s)", order_id, exc)
+        ev = None
+    return read_at, ev
+
+
+def _futu_mirror(scope, row: dict | None, read_at: datetime | None) -> dict | None:
+    """Apply one fresh order row through the observation mirror (binds an own
+    row by remark, state, fills). None when there is nothing to apply, the
+    row cannot be parsed, or its identity contradicts the stored row."""
+    from xenon.api.services import futu_observation
+
+    if not row or read_at is None:
+        return None
+    obs = futu_observation.observation_from_row(row, scope, read_at)
+    if obs is None:
+        logger.warning("futu orders: evidence row for %s cannot be parsed", row.get("order_id"))
+        return None
+    try:
+        out = orders_store.mirror_futu_order(
+            obs, broker_account=scope.broker_account, account_env=scope.account_env, observed_at=read_at
+        )
+    except Exception:  # noqa: BLE001 — the row keeps its state; the observation pass retries
+        logger.warning("futu orders: mirror of order %s failed", obs.order_id, exc_info=True)
+        return None
+    if out.get("identity_mismatch"):
+        logger.warning("futu orders: order %s not bound (%s)", obs.order_id, out["identity_mismatch"])
+        return None
+    return out
+
+
+def _futu_event(submission_id: str | None, kind: str, detail: dict) -> None:
+    if not submission_id:
+        return
+    try:
+        orders_store.record_event(submission_id, kind, detail)
+    except Exception:  # pragma: no cover — event writes are best-effort
+        logger.warning("Failed to record %s event for submission %s", kind, submission_id, exc_info=True)
+
+
+def _futu_spec(body: dict):
+    from xenon.execution import futu_orders
+
+    sec = {"stock": "STK", "option": "OPT"}.get(body.get("type"))
+    if sec is None:
+        raise futu_orders.FutuOrderRefused(futu_orders.INVALID_ORDER, "Futu orders are single stock or option orders")
+    quantity = body.get("quantity")
+    if isinstance(quantity, bool) or not isinstance(quantity, int):
+        raise futu_orders.FutuOrderRefused(futu_orders.INVALID_ORDER, "quantity must be a whole number")
+    return futu_orders.FutuOrderSpec(
+        sec_type=sec,
+        symbol=str(body.get("symbol", "")).upper(),
+        action=str(body.get("action", "")).upper(),
+        quantity=quantity,
+        limit_price=Decimal(str(body.get("limitPrice"))),
+        tif=body.get("tif") or "DAY",
+        expiry=_normalize_gate_expiry(body.get("expiry")) if sec == "OPT" else None,
+        right=((body.get("right") or "").upper() or None) if sec == "OPT" else None,
+        strike=Decimal(str(body["strike"])) if sec == "OPT" and body.get("strike") is not None else None,
+    )
+
+
+def _futu_refusal_response(exc) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.http_status,
+        content={"detail": str(exc), "reason_code": exc.reason_code, "reason_detail": str(exc)},
+    )
+
+
+async def _futu_place(body: dict, broker: str, account_env: str | None):
+    from xenon.execution import futu_orders
+
+    op = "combo" if body.get("type") == "combo" else "place_single"
+    scope, refusal = _futu_guard("order placement", broker, op, account_env)
+    if refusal is not None:
+        return refusal
+    prep = await _prepare_place(body, scope.as_dict())
+    if isinstance(prep, JSONResponse):
+        return prep
+    cid, req_row, candidate, legs_payload, scope_d = prep
+    # Refuse what the adapter would refuse before a row is reserved.
+    try:
+        spec = _futu_spec(body)
+        code = futu_orders.futu_code_for(spec)
+        futu_orders.checked_price(spec, spec.limit_price)
+    except futu_orders.FutuOrderRefused as exc:
+        return _futu_refusal_response(exc)
+    except (ValueError, TypeError, InvalidOperation) as exc:
+        return _preflight_block_response(_invalid_order_body_response(exc))
+    outcome = gate4.reserve_with_coverage(
+        "local",
+        cid,
+        req_row,
+        candidate=candidate,
+        legs_payload={**legs_payload, "futu_code": code},
+        scope=scope_d,
+        override_audit=None,
+    )
+    refusal = _reservation_refusal(outcome, cid, replacement=False)
+    if refusal is not None:
+        return refusal
+    submission_id = outcome.submission_id
+    refusal = await _quote_gate(body, submission_id)
+    if refusal is not None:
+        return refusal
+    return await _futu_place_reserved(spec, code, submission_id, scope)
+
+
+async def _futu_place_reserved(spec, code: str, submission_id: str, scope):
+    from xenon.execution import futu_orders
+
+    env, acc = scope.account_env, scope.broker_account
+
+    def core(ctx, mark_sent) -> dict:
+        try:
+            res = futu_orders.place_single(
+                ctx, spec, submission_id=submission_id, account_env=env, acc_id=acc, mark_sent=mark_sent
+            )
+        except futu_orders.FutuOrderRefused as exc:
+            return _futu_refused_reply(exc)
+        if res.outcome == "accepted":
+            read_at, ev = _futu_fresh(ctx, res.order_id, scope)
+            return {
+                "status": "ok",
+                "order_id": res.order_id,
+                "futu_status": res.futu_status,
+                "row": ev.row if ev is not None else None,
+                "read_at": read_at,
+            }
+        # Possibly sent, not confirmed: look for the order by its exact
+        # remark in this account; no match → UNKNOWN. Never re-send.
+        read_at = datetime.now(timezone.utc)
+        try:
+            found = futu_orders.find_by_remark(
+                ctx,
+                remark=futu_orders.remark_for(submission_id),
+                futu_code=res.futu_code or code,
+                account_env=env,
+                acc_id=acc,
+            )
+        except futu_orders.FutuReadFailed as exc:
+            logger.warning("futu place %s: remark recovery read failed (%s)", submission_id, exc)
+            found = None
+        if found is not None and found.order is not None:
+            ev = found.order
+            return {
+                "status": "ok",
+                "order_id": ev.order_id,
+                "futu_status": ev.futu_status,
+                "row": ev.row,
+                "read_at": read_at,
+                "recovered": True,
+            }
+        reply = _futu_uncertain_reply(res.message, res.reason_code or futu_orders.SEND_UNCERTAIN)
+        reply["recovery"] = found.status if found is not None else "read_failed"
+        return reply
+
+    worker = _futu_worker()
+    if worker is None:
+        return _futu_finish_place(submission_id, scope, _futu_worker_missing())
+    settled: dict = {}
+
+    def settle(reply: dict) -> None:
+        settled["response"] = _futu_finish_place(submission_id, scope, reply)
+
+    await worker.run(core, scope=scope, timeout=_PLACE_TIMEOUT_S, settle=settle)
+    if "response" in settled:
+        return settled["response"]
+    logger.warning("futu place: deadline after start, outcome pending on the worker: submission=%s", submission_id)
+    return _place_outcome_unknown(submission_id, {})
+
+
+def _futu_finish_place(submission_id: str, scope, reply: dict) -> Any:
+    """Persist one Futu place outcome (exactly once, on the worker for a
+    started job): proven not sent → FAILED; possibly sent → UNKNOWN (non-OK
+    after the mark is UNKNOWN, never a reject); accepted → the row is bound
+    to the Futu order id from fresh evidence, else UNKNOWN until the
+    observation pass binds it by remark."""
+    if reply.get("amend_outcome") == "not_sent":
+        reason = reply.get("reason_code") or FUTU_NOT_SENT
+        applied = orders_store.mark_terminal(
+            submission_id=submission_id,
+            state="FAILED",
+            reason_code=reason,
+            filled_qty=0,
+            avg_fill_price=None,
+            expected_states=_PLACE_FINAL_FROM,
+        )
+        if not applied:
+            return JSONResponse(status_code=502, content={**_PLACE_UNKNOWN_BODY, "submission_id": submission_id})
+        return JSONResponse(
+            status_code=int(reply.get("http_status") or 503),
+            content={"detail": reply.get("message"), "reason_code": reason, "submission_id": submission_id},
+        )
+    if reply.get("status") != "ok":
+        logger.warning(
+            "futu place: possibly sent, unconfirmed: submission=%s (%s)", submission_id, reply.get("message")
+        )
+        _futu_event(
+            submission_id, "FUTU_PLACE_UNCERTAIN", {"message": reply.get("message"), "recovery": reply.get("recovery")}
+        )
+        return _place_outcome_unknown(submission_id, {}, from_states=_PLACE_FINAL_FROM)
+    out = _futu_mirror(scope, reply.get("row"), reply.get("read_at"))
+    order_id = str(reply.get("order_id"))
+    _futu_event(
+        submission_id,
+        "FUTU_PLACE_ACCEPTED",
+        {
+            "order_id": order_id,
+            "recovered": bool(reply.get("recovered")),
+            "bound": bool(out and out.get("submission_id") == submission_id),
+        },
+    )
+    if out is None or out.get("submission_id") != submission_id:
+        logger.warning("futu place: order %s accepted, not bound to %s yet", order_id, submission_id)
+        bound = 0
+        if not reply.get("row"):
+            # No fresh read: keep Futu's own accepted id so the order is
+            # manageable before the remark bind (conditional write).
+            try:
+                bound = orders_store.bind_futu_order_id(
+                    submission_id, order_id, broker_account=scope.broker_account, account_env=scope.account_env
+                )
+            except Exception:  # noqa: BLE001 — the row stays UNKNOWN; observation binds by remark
+                logger.warning("futu place: storing order id %s failed", order_id, exc_info=True)
+        unknown = _place_outcome_unknown(submission_id, {}, from_states=_PLACE_FINAL_FROM)
+        if not bound:
+            return unknown
+        return JSONResponse(status_code=502, content={**_json_body(unknown), "brokerOrderId": order_id})
+    return {
+        "status": "ok",
+        "broker": "FUTU",
+        "accountEnv": scope.account_env,
+        "brokerOrderId": order_id,
+        "orderId": 0,
+        "permId": 0,
+        "initialStatus": reply.get("futu_status"),
+        "state": _futu_row_state(submission_id),
+        "submission_id": submission_id,
+        "message": "Order accepted by Futu",
+    }
+
+
+def _futu_row_state(submission_id: str) -> str | None:
+    from xenon.db.schema import order_submissions
+
+    with get_sync_engine().connect() as conn:
+        return conn.execute(
+            select(order_submissions.c.state).where(order_submissions.c.submission_id == submission_id)
+        ).scalar()
+
+
+def _futu_target(body: dict, scope) -> tuple[dict | None, JSONResponse | None]:
+    """The non-terminal FUTU row named by `brokerOrderId` (the Futu order id,
+    a string), looked up inside the request scope only."""
+    from xenon.db.schema import order_submissions
+
+    order_id = str(body.get("brokerOrderId") or "").strip()
+    if not order_id.isdigit():
+        return None, order_error(
+            400,
+            ReasonCode.ORDER_IDENTIFIER_REQUIRED.value,
+            {"message": "A Futu cancel or modify needs brokerOrderId (the Futu order id).", "http_status": 400},
+        )
+    with get_sync_engine().connect() as conn:
+        row = conn.execute(
+            select(order_submissions).where(
+                order_submissions.c.broker == "FUTU",
+                order_submissions.c.account_env == scope.account_env,
+                order_submissions.c.broker_account == scope.broker_account,
+                order_submissions.c.broker_order_id == order_id,
+                order_submissions.c.state.in_(orders_store.NON_TERMINAL_STATES),
+            )
+        ).first()
+    if row is None:
+        return None, order_error(
+            404,
+            ReasonCode.ORDER_NOT_FOUND.value,
+            {"message": f"No working Futu order {order_id} in this {scope.account_env} account", "http_status": 404},
+        )
+    return dict(row._mapping), None
+
+
+def _futu_manage_error(reply: dict, kind: str, **extra) -> JSONResponse:
+    if reply.get("amend_outcome") == "not_sent":
+        reason = reply.get("reason_code") or FUTU_NOT_SENT
+        status = int(reply.get("http_status") or 503)
+        message = reply.get("message")
+    else:
+        reason = reply.get("reason_code") or "FUTU_SEND_UNCERTAIN"
+        status = 503
+        message = (
+            f"The {kind} may have reached Futu but is not confirmed. The order keeps its reservation "
+            "until Futu reports it again. Do not resend."
+        )
+    return order_error(
+        status,
+        reason,
+        {"message": message, "amend_outcome": reply.get("amend_outcome"), "http_status": status, **extra},
+    )
+
+
+async def _futu_cancel(body: dict, broker: str, account_env: str | None):
+    from xenon.execution import futu_orders
+
+    scope, refusal = _futu_guard("order cancellation", broker, "cancel", account_env)
+    if refusal is not None:
+        return refusal
+    row, refusal = _futu_target(body, scope)
+    if refusal is not None:
+        return refusal
+    order_id, submission_id = row["broker_order_id"], row["submission_id"]
+
+    def core(ctx, mark_sent) -> dict:
+        try:
+            res = futu_orders.cancel(
+                ctx,
+                order_id=order_id,
+                account_env=scope.account_env,
+                acc_id=scope.broker_account,
+                mark_sent=mark_sent,
+            )
+        except futu_orders.FutuOrderRefused as exc:
+            return _futu_refused_reply(exc)
+        if res.outcome != "sent":
+            return _futu_uncertain_reply(res.message, res.reason_code or futu_orders.SEND_UNCERTAIN)
+        read_at, ev = _futu_fresh(ctx, order_id, scope)
+        return {"status": "ok", "row": ev.row if ev is not None else None, "read_at": read_at}
+
+    def finish(reply: dict) -> Any:
+        _futu_event(
+            submission_id,
+            "CANCEL",
+            {
+                "status": reply.get("status"),
+                "message": reply.get("message"),
+                "amend_outcome": reply.get("amend_outcome"),
+            },
+        )
+        if reply.get("status") != "ok":
+            return _futu_manage_error(reply, "cancel")
+        # The demand stays until fresh evidence shows the order terminal.
+        _futu_mirror(scope, reply.get("row"), reply.get("read_at"))
+        state = _futu_row_state(submission_id)
+        confirmed = state == "CANCELLED"
+        if confirmed:
+            message = "Cancel confirmed by Futu"
+        elif state in futu_orders.TERMINAL_STATES:
+            message = f"Futu reports the order {state}; it was not cancelled"
+        else:
+            message = "Cancel sent; Futu has not reported the order cancelled yet"
+        return {"status": "ok", "brokerOrderId": order_id, "state": state, "confirmed": confirmed, "message": message}
+
+    return await _futu_run(core, finish, scope, "cancel")
+
+
+async def _futu_run(core, finish, scope, kind: str, **extra) -> Any:
+    """Run one cancel / modify core on the worker; `finish` settles exactly once."""
+    worker = _futu_worker()
+    if worker is None:
+        return finish(_futu_worker_missing())
+    settled: dict = {}
+
+    def settle(reply: dict) -> None:
+        settled["response"] = finish(reply)
+
+    await worker.run(core, scope=scope, timeout=_ORDER_ACTION_TIMEOUT_S, settle=settle)
+    if "response" in settled:
+        return settled["response"]
+    return _futu_manage_error({"amend_outcome": "unconfirmed"}, kind, **extra)
+
+
+def _futu_apply_sequence(submission_id: str, sequence: int) -> tuple[bool, int]:
+    """modifySequence gate for one FUTU row (the IB gate keys on ib_order_id):
+    advance only to a larger sequence. → (applied, current)."""
+    from sqlalchemy import update
+
+    from xenon.db.schema import order_submissions
+
+    orders_store.ensure_writable()
+    with get_sync_engine().begin() as conn:
+        done = conn.execute(
+            update(order_submissions)
+            .where(order_submissions.c.submission_id == submission_id, order_submissions.c.modify_sequence < sequence)
+            .values(modify_sequence=sequence, updated_at=orders_store.monotone_updated_at(datetime.now(timezone.utc)))
+            .returning(order_submissions.c.modify_sequence)
+        ).first()
+        if done is not None:
+            return True, sequence
+        current = conn.execute(
+            select(order_submissions.c.modify_sequence).where(order_submissions.c.submission_id == submission_id)
+        ).scalar()
+        return False, int(current or 0)
+
+
+class _SendWindowClosed(Exception):
+    pass
+
+
+FUTU_ORDER_UNVERIFIED = "FUTU_ORDER_UNVERIFIED"
+FUTU_ORDER_NOT_WORKING = "FUTU_ORDER_NOT_WORKING"
+
+
+def _futu_unsent(message: str, reason_code: str, http_status: int, exc: Exception | None = None) -> dict:
+    """A refusal on the worker before any send (nothing was sent)."""
+    if exc is not None:
+        logger.warning("futu modify: %s (%s)", message, exc)
+    return {
+        "status": "error",
+        "message": message,
+        "classification": "futu_refused",
+        "amend_outcome": "not_sent",
+        "reason_code": reason_code,
+        "http_status": http_status,
+    }
+
+
+async def _futu_modify(body: dict, broker: str, account_env: str | None):
+    from xenon.execution import futu_orders
+
+    scope, refusal = _futu_guard("order modification", broker, "modify", account_env)
+    if refusal is not None:
+        return refusal
+    try:
+        sequence = int(body["modifySequence"])
+    except (KeyError, TypeError, ValueError):
+        return order_error(
+            400,
+            ReasonCode.MODIFY_SEQUENCE_REQUIRED.value,
+            {"message": "modifySequence is required and must be an integer", "http_status": 400},
+        )
+    row, refusal = _futu_target(body, scope)
+    if refusal is not None:
+        return refusal
+    order_id, submission_id = row["broker_order_id"], row["submission_id"]
+    new_price, new_quantity = body.get("newPrice"), body.get("newQuantity")
+    try:
+        if new_price is None and new_quantity is None:
+            raise ValueError("newPrice or newQuantity is required")
+        if new_quantity is not None and (isinstance(new_quantity, bool) or int(new_quantity) != new_quantity):
+            raise ValueError("newQuantity must be a whole number")
+        if new_quantity is not None and int(new_quantity) < 1:
+            raise ValueError("newQuantity must be at least 1")
+        expiry = row.get("expiry")
+        # Identity from the row; quantity / price are set on the worker from
+        # the request, else from a fresh read of the order (never the row).
+        base_spec = futu_orders.FutuOrderSpec(
+            sec_type=row["security_type"],
+            symbol=row["ticker"],
+            action=row["action"],
+            quantity=1,
+            limit_price=Decimal(1),
+            tif=row.get("tif") or "DAY",
+            expiry=expiry.strftime("%Y%m%d") if expiry is not None else None,
+            right=row.get("right"),
+            strike=Decimal(str(row["strike"])) if row.get("strike") is not None else None,
+        )
+        req_price = futu_orders.checked_price(base_spec, Decimal(str(new_price))) if new_price is not None else None
+    except futu_orders.FutuOrderRefused as exc:
+        return order_error(exc.http_status, exc.reason_code, {"message": str(exc), "http_status": exc.http_status})
+    except (ValueError, TypeError, InvalidOperation) as exc:
+        return order_error(400, ReasonCode.INVALID_ORDER_BODY.value, {"message": str(exc), "http_status": 400})
+    applied, current = _futu_apply_sequence(submission_id, sequence)
+    if not applied:
+        return order_error(
+            409,
+            ReasonCode.MODIFY_STALE.value,
+            {
+                "message": f"modifySequence {sequence} is stale; current is {current}",
+                "applied": current,
+                "http_status": 409,
+            },
+        )
+    scope_d = scope.as_dict()
+    qty_amend = int(new_quantity) if new_quantity is not None else None
+    gen: dict = {}  # the amend generation this core opened (core and finish run on the worker)
+
+    def core(ctx, mark_sent) -> dict:
+        def mark_in_window() -> None:
+            # Send-by fence right before the mutation: a late job sends nothing.
+            if datetime.now(timezone.utc) >= gen["send_by"]:
+                raise _SendWindowClosed()
+            mark_sent()
+
+        # Fresh read of this order before the send: Futu modify sends both
+        # quantity and price, so an omitted field takes the broker's current
+        # value (the user may have changed it in the Futu app). No usable
+        # read → nothing is sent.
+        try:
+            cur = futu_orders.query_order(
+                ctx, order_id=order_id, account_env=scope.account_env, acc_id=scope.broker_account
+            )
+        except futu_orders.FutuReadFailed as exc:
+            return _futu_unsent("Futu order read failed; nothing was sent", FUTU_ORDER_UNVERIFIED, 503, exc)
+        cur_price = futu_orders.tick_price(base_spec, cur.price) if cur is not None else None
+        if cur is None or cur.qty is None or cur.qty != cur.qty.to_integral_value() or cur_price is None:
+            return _futu_unsent("Futu did not report this order; nothing was sent", FUTU_ORDER_UNVERIFIED, 503)
+        if cur.state in futu_orders.TERMINAL_STATES:
+            return _futu_unsent(f"Futu reports the order {cur.state}; nothing was sent", FUTU_ORDER_NOT_WORKING, 409)
+        quantity = qty_amend if qty_amend is not None else int(cur.qty)
+        price = req_price if req_price is not None else cur_price
+        # Gate 4 reserves the full outgoing quantity under the scope lock,
+        # also for a price-only modify: pending_amend_qty pins max(old, new)
+        # until settle, so an observation cannot lower the reservation
+        # below what this send carries.
+        opened = gate4.begin_modify(submission_id, quantity, scope_d)
+        if not opened.accept:
+            if gate4.MODIFY_PENDING_REASON in opened.reasons:
+                return _futu_unsent(
+                    "An earlier change to this order is not confirmed by Futu yet. Cancel the order, "
+                    "or resolve the change first (see the Futu runbook).",
+                    ReasonCode.MODIFY_PENDING.value,
+                    409,
+                )
+            v = _gate4_reject_verdict(opened.reasons, opened.uncovered, opened.short_stock, opened.split_required)
+            return _futu_unsent(
+                v.reason_detail or "Modify blocked by coverage gate",
+                v.reason_code.value if v.reason_code else ReasonCode.GATE4_UNRESOLVED.value,
+                400,
+            )
+        gen.update(amend_id=opened.amend_id, send_by=opened.send_by)
+        try:
+            res = futu_orders.modify(
+                ctx,
+                dataclasses.replace(base_spec, quantity=quantity, limit_price=price),
+                order_id=order_id,
+                account_env=scope.account_env,
+                acc_id=scope.broker_account,
+                mark_sent=mark_in_window,
+            )
+        except futu_orders.FutuOrderRefused as exc:
+            return _futu_refused_reply(exc)
+        except _SendWindowClosed:
+            return {
+                "status": "error",
+                "message": "Send window closed; nothing was sent",
+                "http_status": 503,
+                "classification": "send_window_closed",
+                "amend_outcome": "not_sent",
+                "reason_code": FUTU_SEND_WINDOW_CLOSED,
+            }
+        if res.outcome != "sent":
+            return _futu_uncertain_reply(res.message, res.reason_code or futu_orders.SEND_UNCERTAIN)
+        read_at, ev = _futu_fresh(ctx, order_id, scope)
+        return {
+            "status": "ok",
+            "row": ev.row if ev is not None else None,
+            "read_at": read_at,
+            "qty": ev.qty if ev is not None else None,
+            "price": ev.price if ev is not None else None,
+            "sent_qty": quantity,
+            "sent_price": price,
+        }
+
+    def finish(reply: dict) -> Any:
+        _futu_event(
+            submission_id,
+            "MODIFY",
+            {
+                "status": reply.get("status"),
+                "message": reply.get("message"),
+                "amend_outcome": reply.get("amend_outcome"),
+                "applied_sequence": sequence,
+            },
+        )
+        if reply.get("status") != "ok":
+            # Proven unsent releases the amend; anything else keeps the
+            # larger reservation (gate4.settle_modify "uncertain").
+            if gen.get("amend_id") is not None:
+                gate4.settle_modify(
+                    submission_id,
+                    gen["amend_id"],
+                    "rejected" if reply.get("amend_outcome") == "not_sent" else "uncertain",
+                    scope_d,
+                )
+            return _futu_manage_error(reply, "modify", applied_sequence=sequence)
+        got_qty, sent_qty, sent_price = reply.get("qty"), reply["sent_qty"], reply["sent_price"]
+        # Same tick on the price grid (a sub-dollar stock tick is 0.0001), never a tolerance.
+        confirmed = (
+            got_qty is not None
+            and got_qty == sent_qty
+            and futu_orders.tick_price(base_spec, reply.get("price")) == sent_price
+        )
+        # Settle only on fresh evidence of the new terms; otherwise the
+        # amend stays uncertain and keeps max(old, outgoing) until an
+        # operator resolves it (runbook § 5).
+        if confirmed:
+            gate4.settle_modify(
+                submission_id, gen.get("amend_id"), "confirmed", scope_d, new_qty=sent_qty, new_limit_price=sent_price
+            )
+        else:
+            gate4.settle_modify(submission_id, gen.get("amend_id"), "uncertain", scope_d)
+        _futu_mirror(scope, reply.get("row"), reply.get("read_at"))
+        return {
+            "status": "ok",
+            "brokerOrderId": order_id,
+            "confirmed": confirmed,
+            "confirmedQuantity": int(sent_qty) if confirmed else None,
+            "confirmedPrice": str(sent_price) if confirmed else None,
+            "applied_sequence": sequence,
+            "message": "Modify confirmed by Futu"
+            if confirmed
+            else "Modify sent; Futu has not reported the new terms yet",
+        }
+
+    return await _futu_run(core, finish, scope, "modify", applied_sequence=sequence)

@@ -1,12 +1,14 @@
-"""Selected Futu trade scope: the one account Futu orders may act on.
+"""Configured Futu trade scopes: the accounts Futu orders may act on.
 
-`configured_scope()` reads the durable selection from env:
-`FUTU_TRADE_ACC_ID` (exact canonical digits, nonzero, kept as a string) and
-`FUTU_TRADE_ENV` (SIMULATE → paper, REAL → live). It is independent of the
+One optional account per environment (§11, SIMULATE / REAL switch):
+`FUTU_TRADE_ACC_ID_SIMULATE` (paper) and `FUTU_TRADE_ACC_ID_REAL` (live),
+each exact canonical digits, nonzero, kept as a string. The request picks the
+environment with the query parameter `account_env` (`paper` | `live`); the
+client never sends an account id. The selection is independent of the
 capability flag `XENON_FUTU_TRADING`, so reads and reconciliation keep a scope
 while trading is off or OpenD is offline.
 
-`verify_live()` checks that scope against `OpenSecTradeContext.get_acc_list()`
+`verify_live()` checks a scope against `OpenSecTradeContext.get_acc_list()`
 rows (futu-api 10.3: `acc_id` int, `trd_env` 'REAL'/'SIMULATE',
 `trdmarket_auth` list of market strings, `acc_status` 'ACTIVE'/'DISABLED').
 Exact acc_id + trd_env + US market authority + ACTIVE. There is no
@@ -20,12 +22,13 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from xenon.execution.account_scope import AccountScope, env_from_trd_env
+from xenon.execution.account_scope import AccountScope
 
-ACC_ID_MISSING = "FUTU_TRADE_ACC_ID_MISSING"
+ACCOUNT_ENVS = ("paper", "live")  # SIMULATE first
+ACC_ID_ENV = {"paper": "FUTU_TRADE_ACC_ID_SIMULATE", "live": "FUTU_TRADE_ACC_ID_REAL"}
+
+NOT_CONFIGURED = "not_configured"
 ACC_ID_INVALID = "FUTU_TRADE_ACC_ID_INVALID"
-TRD_ENV_MISSING = "FUTU_TRADE_ENV_MISSING"
-TRD_ENV_INVALID = "FUTU_TRADE_ENV_INVALID"
 SCOPE_INVALID = "FUTU_SCOPE_INVALID"
 ACCOUNT_ABSENT = "FUTU_ACCOUNT_ABSENT"
 ACCOUNT_AMBIGUOUS = "FUTU_ACCOUNT_AMBIGUOUS"
@@ -37,21 +40,31 @@ _ACC_ID_RE = re.compile(r"[1-9][0-9]*")
 _ENV_TO_TRD = {"paper": "SIMULATE", "live": "REAL"}
 
 
-def configured_scope() -> tuple[AccountScope | None, str | None]:
-    """Return `(scope, None)` or `(None, reason)` from FUTU_TRADE_ACC_ID + FUTU_TRADE_ENV."""
-    acc_id = os.environ.get("FUTU_TRADE_ACC_ID", "")
+def parse_account_env(value: Any) -> str | None:
+    """`paper` / `live`, else None (missing or invalid)."""
+    return value if isinstance(value, str) and value in ACC_ID_ENV else None
+
+
+def configured_scope(account_env: str | None) -> tuple[AccountScope | None, str | None]:
+    """Return `(scope, None)` or `(None, reason)` for one environment."""
+    if parse_account_env(account_env) is None:
+        return None, SCOPE_INVALID
+    acc_id = os.environ.get(ACC_ID_ENV[account_env], "")
     if not acc_id:
-        return None, ACC_ID_MISSING
+        return None, NOT_CONFIGURED
     if not _ACC_ID_RE.fullmatch(acc_id):
         return None, ACC_ID_INVALID
-    trd_env = os.environ.get("FUTU_TRADE_ENV", "")
-    if not trd_env:
-        return None, TRD_ENV_MISSING
-    try:
-        account_env = env_from_trd_env(trd_env)
-    except ValueError:
-        return None, TRD_ENV_INVALID
     return AccountScope(broker="FUTU", account_env=account_env, broker_account=acc_id), None
+
+
+def configured_scopes() -> dict[str, AccountScope]:
+    """`{account_env: scope}` for every configured environment, paper first."""
+    return {env: scope for env in ACCOUNT_ENVS if (scope := configured_scope(env)[0]) is not None}
+
+
+def default_read_env() -> str:
+    """Read env when the request names none: paper when SIMULATE is configured, else live."""
+    return "paper" if configured_scope("paper")[0] is not None else "live"
 
 
 def trd_env_for(scope: AccountScope) -> str:

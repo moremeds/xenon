@@ -1,4 +1,4 @@
-"""Selected Futu trade scope (X3a): configured_scope() + verify_live().
+"""Configured Futu trade scopes (X3a, §11): configured_scope(env) + verify_live().
 
 Rows mirror futu-api 10.3.6308 `OpenSecTradeContext.get_acc_list()`:
 `acc_id` int, `trd_env` 'REAL'/'SIMULATE', `trdmarket_auth` list of market
@@ -18,7 +18,7 @@ OTHER = "281756479345015999"
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    for name in ("XENON_FUTU_TRADING", "FUTU_TRADE_ACC_ID", "FUTU_TRADE_ENV"):
+    for name in ("XENON_FUTU_TRADING", "FUTU_TRADE_ACC_ID_SIMULATE", "FUTU_TRADE_ACC_ID_REAL"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -39,49 +39,61 @@ def _scope(env="paper", acc=ACC):
 # ── configured_scope ────────────────────────────────────────────
 
 
-@pytest.mark.parametrize(("trd_env", "account_env"), [("SIMULATE", "paper"), ("REAL", "live")])
-def test_configured_scope_maps_simulate_and_real(monkeypatch, trd_env, account_env):
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", ACC)
-    monkeypatch.setenv("FUTU_TRADE_ENV", trd_env)
-    scope, reason = futu_scope.configured_scope()
+@pytest.mark.parametrize(
+    ("var", "account_env"), [("FUTU_TRADE_ACC_ID_SIMULATE", "paper"), ("FUTU_TRADE_ACC_ID_REAL", "live")]
+)
+def test_configured_scope_per_env(monkeypatch, var, account_env):
+    monkeypatch.setenv(var, ACC)
+    scope, reason = futu_scope.configured_scope(account_env)
     assert reason is None
     assert scope == AccountScope(broker="FUTU", account_env=account_env, broker_account=ACC)
     assert isinstance(scope.broker_account, str)
+    other = "live" if account_env == "paper" else "paper"
+    assert futu_scope.configured_scope(other) == (None, futu_scope.NOT_CONFIGURED)
+    assert futu_scope.configured_scopes() == {account_env: scope}
 
 
-@pytest.mark.parametrize("trading", [None, "0", "1"])
+def test_both_envs_configured_paper_first_and_default_read_env(monkeypatch):
+    assert futu_scope.default_read_env() == "live"  # nothing configured
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_REAL", OTHER)
+    assert futu_scope.default_read_env() == "live"
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_SIMULATE", ACC)
+    assert list(futu_scope.configured_scopes()) == ["paper", "live"]
+    assert futu_scope.default_read_env() == "paper"
+
+
+@pytest.mark.parametrize("trading", [None, "0", "1", "simulate"])
 def test_configured_scope_ignores_trading_flag(monkeypatch, trading):
     if trading is not None:
         monkeypatch.setenv("XENON_FUTU_TRADING", trading)
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", ACC)
-    monkeypatch.setenv("FUTU_TRADE_ENV", "SIMULATE")
-    assert futu_scope.configured_scope() == (_scope(), None)
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_SIMULATE", ACC)
+    assert futu_scope.configured_scope("paper") == (_scope(), None)
 
 
 def test_configured_scope_missing_acc_id(monkeypatch):
+    assert futu_scope.configured_scope("paper") == (None, futu_scope.NOT_CONFIGURED)
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_SIMULATE", "")
+    assert futu_scope.configured_scope("paper") == (None, futu_scope.NOT_CONFIGURED)
+
+
+def test_old_variables_configure_nothing(monkeypatch):
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID", ACC)
     monkeypatch.setenv("FUTU_TRADE_ENV", "SIMULATE")
-    assert futu_scope.configured_scope() == (None, futu_scope.ACC_ID_MISSING)
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", "")
-    assert futu_scope.configured_scope() == (None, futu_scope.ACC_ID_MISSING)
+    assert futu_scope.configured_scopes() == {}
 
 
 @pytest.mark.parametrize("acc", ["0", "000", "0123", "-5", "12a", " 123", "123 ", "123\n", "1.0", "１２３"])
 def test_configured_scope_rejects_non_exact_acc_id(monkeypatch, acc):
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", acc)
-    monkeypatch.setenv("FUTU_TRADE_ENV", "SIMULATE")
-    assert futu_scope.configured_scope() == (None, futu_scope.ACC_ID_INVALID)
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_SIMULATE", acc)
+    assert futu_scope.configured_scope("paper") == (None, futu_scope.ACC_ID_INVALID)
 
 
-def test_configured_scope_missing_env(monkeypatch):
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", ACC)
-    assert futu_scope.configured_scope() == (None, futu_scope.TRD_ENV_MISSING)
-
-
-@pytest.mark.parametrize("env", ["simulate", "real", "PAPER", "live", " REAL", "SIM"])
-def test_configured_scope_rejects_unknown_env(monkeypatch, env):
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", ACC)
-    monkeypatch.setenv("FUTU_TRADE_ENV", env)
-    assert futu_scope.configured_scope() == (None, futu_scope.TRD_ENV_INVALID)
+@pytest.mark.parametrize("env", [None, "", "simulate", "real", "PAPER", "SIMULATE", " live", "sim"])
+def test_parse_account_env_accepts_only_paper_and_live(monkeypatch, env):
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_SIMULATE", ACC)
+    assert futu_scope.parse_account_env(env) is None
+    assert futu_scope.configured_scope(env) == (None, futu_scope.SCOPE_INVALID)
+    assert futu_scope.parse_account_env("paper") == "paper" and futu_scope.parse_account_env("live") == "live"
 
 
 # ── verify_live ─────────────────────────────────────────────────

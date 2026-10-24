@@ -27,7 +27,7 @@ from xenon.api.routes import futu as futu_routes
 def client(tmp_path, monkeypatch) -> TestClient:
     """TestClient with a clean DATA_DIR + reset Futu singleton."""
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(futu_routes, "_futu_last_sync_monotonic", None)
+    monkeypatch.setattr(futu_routes, "_futu_last_sync", {})
     monkeypatch.setattr(futu_routes, "_futu_client", None)
     monkeypatch.setattr(futu_routes, "_futu_lock", None)
     # Provide a sentinel db_engine so the route's None-check passes — we
@@ -142,7 +142,7 @@ def test_performance_nav_conflict_returns_409(client: TestClient) -> None:
 # ──────────────────────────────────────────────────────────────────────
 
 
-def test_performance_futu_when_opend_unreachable_returns_503(client: TestClient) -> None:
+def test_performance_futu_when_opend_unreachable_reads_the_not_configured_scope(client: TestClient) -> None:
     from xenon.clients.futu_exceptions import FutuConnectionError
 
     fake_client = MagicMock()
@@ -153,12 +153,21 @@ def test_performance_futu_when_opend_unreachable_returns_503(client: TestClient)
         # No synced Futu data — isolate from whatever the dev DB happens to hold.
         patch("xenon.api.guards._futu_scope_from_db", return_value=None),
     ):
-        resp = client.get("/performance?broker=FUTU")
-    assert resp.status_code == 503
+        captured: dict[str, AccountScope] = {}
+
+        async def _fake(engine, scope, *, ib_pool=None, period="YTD"):
+            captured["scope"] = scope
+            return {"status": "ok", "summary": {}, "series": [], "warnings": [], "scope": scope.as_dict()}
+
+        with patch("xenon.api.routes.performance.cached_compute", new=_fake):
+            resp = client.get("/performance?broker=FUTU")
     # Read-path scope resolution is non-blocking: it never calls connect() (the
     # Futu SDK retries a down OpenD forever). With is_connected()=False and no
-    # synced Futu data it 503s with this message — not "OpenD unreachable".
-    assert "not connected" in resp.json()["detail"].lower()
+    # synced Futu data the request env (§11 default: live) has no account, so
+    # the read uses the not-configured scope: empty, never another account.
+    assert resp.status_code == 200
+    assert captured["scope"] == AccountScope(broker="FUTU", account_env="live", broker_account="")
+    fake_client.connect.assert_not_called()
 
 
 def test_performance_futu_resolves_scope_from_matched_account(client: TestClient) -> None:
@@ -200,7 +209,7 @@ def test_performance_futu_simulate_maps_to_paper(client: TestClient) -> None:
         patch("xenon.api.routes.futu._get_futu_client", return_value=fake_client),
         patch("xenon.api.routes.performance.cached_compute", new=_fake),
     ):
-        resp = client.get("/performance?broker=FUTU")
+        resp = client.get("/performance?broker=FUTU&account_env=paper")
     assert resp.status_code == 200
     # Correction #18: SIMULATE → "paper" (aligned with IB convention)
     assert captured["scope"].account_env == "paper"

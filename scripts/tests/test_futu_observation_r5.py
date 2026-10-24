@@ -61,8 +61,7 @@ def test_refused_account_closes_each_context_and_keeps_no_stale_account():
 
 @pytest.mark.committed_db
 def test_held_row_rechecks_are_capped_and_rotate(monkeypatch):
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", ACC)
-    monkeypatch.setenv("FUTU_TRADE_ENV", "SIMULATE")
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_SIMULATE", ACC)
     monkeypatch.setattr(fo, "_FULL_PASSES", {}, raising=False)
     monkeypatch.setattr(fo, "NOT_OBSERVED_RECHECK_PASSES", 1, raising=False)  # every full pass rechecks
     monkeypatch.setattr(fo, "NOT_OBSERVED_RECHECK_MAX", 3, raising=False)

@@ -7,6 +7,7 @@ fastapi. Only routes/lifespan code touches this module.
 
 from __future__ import annotations
 
+import logging
 import os
 
 from fastapi import HTTPException, Request
@@ -16,6 +17,8 @@ from xenon.api import trading_mode
 from xenon.execution import broker_capabilities
 from xenon.execution.account_scope import AccountScope, resolve_from_app_state
 from xenon.execution.preflight import ReasonCode
+
+logger = logging.getLogger(__name__)
 
 
 def is_read_only() -> bool:
@@ -127,20 +130,109 @@ def _broker_403(broker: str, kind: str, cause: str) -> JSONResponse:
     )
 
 
-def broker_capability_denial(broker: str, op: str | None, kind: str) -> JSONResponse | None:
+def broker_capability_denial(
+    broker: str, op: str | None, kind: str, account_env: str | None = None
+) -> JSONResponse | None:
     """Capability check for one broker operation (`broker_capabilities`).
 
     `XENON_READ_ONLY=1` wins first (403 `READ_ONLY_MODE`). A denied
     capability → 403 JSONResponse with top-level `reason_code`
     `READ_ONLY_BROKER`. Returns None when the operation is allowed.
+    `account_env` is the FUTU request scope's environment.
     """
     if is_read_only():
         return read_only_403()
-    ok, _, cause = broker_capabilities.evaluate(broker, op)
+    ok, _, cause = broker_capabilities.evaluate(broker, op, account_env)
     return None if ok else _broker_403(str(broker or "").upper(), kind, cause)
 
 
-def ensure_order_allowed(kind: str, state, op: str | None = None) -> JSONResponse | None:
+# -- FUTU request scope (§11 A2, A3) ------------------------------------------
+
+FUTU_SCOPE_REQUIRED = "FUTU_SCOPE_REQUIRED"
+FUTU_SCOPE_INVALID = "FUTU_SCOPE_INVALID"
+FUTU_SCOPE_CHANGE_PENDING = "FUTU_SCOPE_CHANGE_PENDING"
+# broker_account of a FUTU read scope whose env has no account: every scoped
+# query then matches nothing, so reads return empty lists.
+FUTU_NOT_CONFIGURED_ACCOUNT = ""
+
+
+class FutuScopeRefused(Exception):
+    """Raised by FUTU scope dependencies; server.py maps it to a JSONResponse
+    with a top-level `reason_code`."""
+
+    def __init__(self, status_code: int, reason_code: str, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code, self.reason_code, self.detail = status_code, reason_code, detail
+
+    def response(self) -> JSONResponse:
+        return JSONResponse(
+            status_code=self.status_code, content={"detail": self.detail, "reason_code": self.reason_code}
+        )
+
+
+def futu_not_configured(scope: AccountScope) -> bool:
+    return scope.broker == "FUTU" and scope.broker_account == FUTU_NOT_CONFIGURED_ACCOUNT
+
+
+def futu_read_env(request: Request) -> str:
+    """`account_env` from the query (the only wire name, GET and POST alike).
+    Missing → the default read env; invalid → 400 `FUTU_SCOPE_INVALID`."""
+    from xenon.execution import futu_scope
+
+    raw = request.query_params.get("account_env")
+    if raw is None:
+        return futu_scope.default_read_env()
+    env = futu_scope.parse_account_env(raw)
+    if env is None:
+        raise FutuScopeRefused(400, FUTU_SCOPE_INVALID, "account_env must be paper or live")
+    return env
+
+
+def _futu_scope_required() -> JSONResponse:
+    return FutuScopeRefused(400, FUTU_SCOPE_REQUIRED, "Futu order requests need ?account_env=paper|live").response()
+
+
+_pending_logged: set[tuple] = set()
+
+
+def futu_scope_change_pending(account_env: str) -> list[tuple[str, str]]:
+    """Stored FUTU scopes of `account_env` with unresolved rows that are not
+    the configured account of that env (§11 A2). Empty → no veto. Toggling
+    between the two configured scopes never produces an entry."""
+    from xenon.execution import futu_scope, orders_store
+
+    configured, _ = futu_scope.configured_scope(account_env)
+    current = configured.broker_account if configured is not None else None
+    return [s for s in orders_store.futu_unresolved_scopes() if s[0] == account_env and s[1] != current]
+
+
+def _futu_change_pending_denial(account_env: str, kind: str) -> JSONResponse | None:
+    stale = futu_scope_change_pending(account_env)
+    if not stale:
+        return None
+    key = (account_env, tuple(stale))
+    if key not in _pending_logged:
+        _pending_logged.add(key)
+        logger.error(
+            "FUTU_SCOPE_CHANGE_PENDING: %d stored %s Futu scope(s) other than the configured account still "
+            "have unresolved orders; Futu %s for %s is refused until they are resolved or reconciled",
+            len(stale),
+            account_env,
+            kind,
+            account_env,
+        )
+    message = (
+        f"Futu {account_env} account changed while orders of the previous account are unresolved; resolve them first"
+    )
+    return JSONResponse(
+        status_code=403,
+        content={"detail": message, "reason_code": FUTU_SCOPE_CHANGE_PENDING, "reason_detail": message},
+    )
+
+
+def ensure_order_allowed(
+    kind: str, state, op: str | None = None, *, account_env: str | None = None
+) -> JSONResponse | None:
     """Single guard for every order-mutating path.
 
     Called at the top of each order write entry point (HTTP routes and the
@@ -150,9 +242,12 @@ def ensure_order_allowed(kind: str, state, op: str | None = None) -> JSONRespons
     1. `XENON_READ_ONLY=1` → 403 `READ_ONLY_MODE` JSONResponse.
     2. Non-IB `app.state.broker` → capability check
        (`broker_capability_denial`; `op` defaults to the operation `kind`
-       names) → 403 `READ_ONLY_BROKER` JSONResponse. No Futu dispatch
-       exists in the order cores yet, so a non-IB broker is refused even
-       when its capability allows the operation. Broker denial precedes
+       names) → 403 `READ_ONLY_BROKER` JSONResponse. FUTU first needs the
+       request's `account_env` (missing / invalid → 400
+       `FUTU_SCOPE_REQUIRED`), and after the capability the per-env scope
+       change veto (403 `FUTU_SCOPE_CHANGE_PENDING`, §11 A2). An allowed
+       FUTU operation (place_single, cancel, modify) returns None: the core
+       dispatches it to the Futu order worker. Broker denial precedes
        the mode check: FUTU carries no IB trading mode to verify (see
        test_place_quote_gate.py
        `test_futu_scope_rejects_before_ib_mode_verification`).
@@ -168,8 +263,16 @@ def ensure_order_allowed(kind: str, state, op: str | None = None) -> JSONRespons
         return read_only_403()
     broker = str(getattr(state, "broker", "IB") or "IB").upper()
     if broker != "IB":
-        denial = broker_capability_denial(broker, op or _op_for_kind(kind), kind)
-        return denial or _broker_403(broker, kind, "order dispatch for this broker is not wired")
+        from xenon.execution import futu_scope
+
+        operation = op or _op_for_kind(kind)
+        supported = broker_capabilities.CAPABILITIES.get("FUTU", {}).get(operation or "", False)
+        if broker == "FUTU" and supported and futu_scope.parse_account_env(account_env) is None:
+            return _futu_scope_required()  # a never-supported op keeps its 403 below
+        denial = broker_capability_denial(broker, operation, kind, account_env)
+        if denial is None and broker == "FUTU":
+            denial = _futu_change_pending_denial(account_env, kind)
+        return denial
     _check_mode_verified(state)
     return None
 
@@ -276,32 +379,42 @@ def get_broker_scope(request: Request, broker: str | None = None) -> AccountScop
     # last-synced scope from Postgres (DB-first). The connect happens on the write
     # path (orders_refresh / blotter sync), bounded + off the event loop.
     # Importing here avoids a circular import with server.py / routes.
+    return futu_request_scope(request)
+
+
+def futu_request_scope(request: Request) -> AccountScope:
+    """FUTU read scope of the request (§11): `account_env` from the query
+    (missing → default, invalid → 400), then the configured account of that
+    env. An env without an account → the not-configured scope (empty reads).
+    Only when no Futu account is configured at all does the legacy scope
+    apply (the connected client's matched account, else the last-synced one),
+    and only when it is of the requested env."""
     from xenon.api.routes import futu as futu_routes
     from xenon.execution import futu_scope
     from xenon.execution.account_scope import env_from_trd_env
 
-    # A configured trade scope (FUTU_TRADE_ACC_ID + FUTU_TRADE_ENV) is the
-    # authoritative FUTU read scope: no OpenD needed, never another account's
-    # cached rows. The singleton / DB fallback below applies only without it.
-    configured, _ = futu_scope.configured_scope()
+    env = futu_read_env(request)
+    configured, _ = futu_scope.configured_scope(env)
     if configured is not None:
         return configured
+    not_configured = AccountScope(broker="FUTU", account_env=env, broker_account=FUTU_NOT_CONFIGURED_ACCOUNT)
+    if futu_scope.configured_scopes():
+        return not_configured
 
+    legacy: AccountScope | None = None
     client = futu_routes._get_futu_client()
     if client.is_connected():
         trd_env = client.trd_env_of_matched_account()
         acc_id = getattr(client, "_acc_id", None)
         if trd_env is not None and acc_id is not None:
             try:
-                env = env_from_trd_env(trd_env)
+                legacy = AccountScope(broker="FUTU", account_env=env_from_trd_env(trd_env), broker_account=str(acc_id))
             except ValueError as exc:
                 raise HTTPException(status_code=502, detail=str(exc))
-            return AccountScope(broker="FUTU", account_env=env, broker_account=str(acc_id))
-    # Not connected (or not matched yet) → DB-first fallback, no blocking connect.
-    db_scope = _futu_scope_from_db()
-    if db_scope is not None:
-        return db_scope
-    raise HTTPException(status_code=503, detail="Futu not connected and no synced Futu data yet")
+    if legacy is None:
+        # Not connected (or not matched yet) → DB-first fallback, no blocking connect.
+        legacy = _futu_scope_from_db()
+    return legacy if legacy is not None and legacy.account_env == env else not_configured
 
 
 # Backwards-compatible alias (the performance route imported the old name).
