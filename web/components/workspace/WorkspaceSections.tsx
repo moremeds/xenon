@@ -139,7 +139,13 @@ export default function WorkspaceSections({
       return <JournalSections activeAccount={activeAccount} />;
     case "ticker-detail":
       return tickerParam ? (
-        <TickerWorkspace ticker={tickerParam} theme={theme ?? "dark"} />
+        <TickerWorkspace
+          ticker={tickerParam}
+          theme={theme ?? "dark"}
+          // Futu: no IB execution surface; the scoped Futu ticket is the only
+          // Futu place entry.
+          ibExecution={activeAccount !== "futu"}
+        />
       ) : null;
     default:
       return (

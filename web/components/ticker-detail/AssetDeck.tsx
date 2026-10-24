@@ -11,6 +11,7 @@ import NewsTab from "./NewsTab";
 import RatingsTab from "./RatingsTab";
 import SeasonalityTab from "./SeasonalityTab";
 import CompanyTab from "./CompanyTab";
+import { FUTU_NO_IB_EXECUTION_COPY } from "@/lib/futuOpenOrder";
 
 const DECK_TITLE: Record<DeckKey, string> = {
   c: "Chain",
@@ -54,6 +55,8 @@ type AssetDeckProps = {
    *  mobile entry to the ticket that lives in the desktop act column. */
   openOrders?: OpenOrder[];
   tickerPriceData?: PriceData | null;
+  /** False when the active account is Futu: no IB ticket / order builder. */
+  ibExecution?: boolean;
 };
 
 export default function AssetDeck({
@@ -67,6 +70,7 @@ export default function AssetDeck({
   quotePriceData,
   openOrders,
   tickerPriceData,
+  ibExecution = true,
 }: AssetDeckProps) {
   // Single-key deck open + Esc close. Guarded so the keys never fire while the
   // user is typing in the order ticket fields (Qty / Limit / TIF).
@@ -121,6 +125,7 @@ export default function AssetDeck({
             tickerPriceData={prices[ticker] ?? null}
             focusPosition={position ?? null}
             focusPositionRequested={position != null}
+            orderEntry={ibExecution}
           />
         )}
         {activeDeck === "p" &&
@@ -129,7 +134,10 @@ export default function AssetDeck({
           ) : (
             <div className="asset-deck-empty">No position</div>
           ))}
-        {activeDeck === "o" && (
+        {activeDeck === "o" && !ibExecution && (
+          <div className="asset-deck-empty">{FUTU_NO_IB_EXECUTION_COPY}</div>
+        )}
+        {activeDeck === "o" && ibExecution && (
           <OrderTab
             ticker={ticker}
             position={position}

@@ -366,30 +366,37 @@ vi.mock("@/components/ModifyOrderModal", () => ({
 }));
 
 describe("PR240 F4 dialog scope", () => {
-  it("drops live cancel dialog after switching to readonly paper", async () => {
-    const f = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
+  it("opens a live cancel dialog with trading enabled, then drops it on env switch without sending", async () => {
+    vi.useRealTimers();
+    // Health must enable trading, else the dialog never opens and the test is vacuous.
+    const f = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ futu: { trading: { live: true, paper: true } } }),
+    });
     vi.stubGlobal("fetch", f);
     setFutuAccountEnv("live");
     const order = { ...futuOrder };
     const snap = snapshot([order]);
-    const tree = (orders: unknown, enabled: boolean) => (
+    const r = render(
       <OrderActionsProvider>
         <OrdersSections
-          orders={orders as never}
+          orders={snap as never}
           activeAccount="futu"
-          futuOrderActionsEnabled={enabled}
+          futuOrderActionsEnabled={true}
         />
-      </OrderActionsProvider>
+      </OrderActionsProvider>,
     );
-    const r = render(tree(snap, true));
+    await act(async () => {});
     fireEvent.click(r.getByRole("button", { name: "CANCEL" }));
-    act(() => setFutuAccountEnv("paper"));
-    r.rerender(tree({ ...snap, open_orders: [], open_count: 0 }, false));
+    expect(
+      r.getByRole("button", { name: "Confirm retained cancel" }),
+    ).toBeTruthy();
+    await act(async () => {
+      setFutuAccountEnv("paper");
+    });
     expect(
       r.queryByRole("button", { name: "Confirm retained cancel" }),
     ).toBeNull();
-    expect(
-      f.mock.calls.some((c) => String(c[0]).includes("/api/orders/cancel")),
-    ).toBe(false);
+    expect(f.mock.calls.every((c) => c[0] === "/api/health")).toBe(true);
   });
 });

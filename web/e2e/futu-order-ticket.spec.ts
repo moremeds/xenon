@@ -466,6 +466,29 @@ test.describe("Futu order ticket", () => {
     ).toBe(false);
   });
 
+  test("Futu ticker navigation shows no IB order ticket", async ({ page }) => {
+    const { captured } = await installOrderFlowMocks(page, {
+      paper: true,
+      live: false,
+    });
+    await openFutuTab(page);
+    await expect(page.locator(".position-order-btn").first()).toBeVisible();
+    await page.locator(".ticker-link", { hasText: "AAPL" }).first().click();
+    await expect(page).toHaveURL(/\/AAPL/);
+    await expect(page.getByTestId("ticker-no-ib-execution")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Place Order" })).toHaveCount(
+      0,
+    );
+    await page.screenshot({
+      path: path.join(
+        SCREEN_DIR,
+        "futu-order-ticket-2026-10-25-ticker-no-ib.png",
+      ),
+      fullPage: true,
+    });
+    expect(captured.some((c) => c.url.includes("/place"))).toBe(false);
+  });
+
   test("REAL with trading.live=false: no order action buttons", async ({
     page,
   }) => {

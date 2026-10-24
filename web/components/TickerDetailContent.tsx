@@ -37,6 +37,8 @@ export type TickerDetailContentProps = {
   depths: Record<string, DepthBook>;
   tape: Record<string, Trade[]>;
   theme: "dark" | "light";
+  /** False when the active account is Futu: hide every IB order surface. */
+  ibExecution?: boolean;
 };
 
 export default function TickerDetailContent({
@@ -52,6 +54,7 @@ export default function TickerDetailContent({
   depths,
   tape,
   theme,
+  ibExecution = true,
 }: TickerDetailContentProps) {
   const { setFocusedBookKey } = useTickerDetail();
   const position: PortfolioPosition | null = useMemo(() => {
@@ -164,6 +167,7 @@ export default function TickerDetailContent({
       theme={theme}
       activeDeck={activeDeck}
       onDeckChange={onDeckChange}
+      ibExecution={ibExecution}
     />
   );
 }

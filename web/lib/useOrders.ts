@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { futuScopeQuery, useFutuAccountEnv } from "./futuAccountEnv";
 import { errorFromResponseBody } from "./order/responseError";
+import { useOrderActionsOptional } from "./OrderActionsContext";
 import type { OrdersData } from "./types";
 
 const SYNC_INTERVAL_MS = 30_000;
@@ -29,6 +30,10 @@ export function useOrders(
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const didInitialSync = useRef(false);
   const futuEnv = useFutuAccountEnv();
+  // Same-scope snapshots reconcile uncertain Futu cancel/modify locks.
+  const observeSnapshot = useOrderActionsOptional()?.observeOrdersSnapshot;
+  const observeRef = useRef(observeSnapshot);
+  observeRef.current = observeSnapshot;
   const q = useMemo(
     () => (broker === "FUTU" ? futuScopeQuery(futuEnv) : ""),
     [broker, futuEnv],
@@ -53,6 +58,7 @@ export function useOrders(
       }
       const json = (await res.json()) as OrdersData;
       if (scopeRef.current !== reqScope) return;
+      observeRef.current?.(reqScope, json);
       setData(json);
       setLastSync(json.last_sync || null);
       setError(null);
@@ -86,6 +92,7 @@ export function useOrders(
         if (!res.ok) throw new Error("Failed to fetch orders");
         const json = (await res.json()) as OrdersData;
         if (scopeRef.current !== reqScope) return;
+        observeRef.current?.(reqScope, json);
         setData(json);
         setLastSync(json.last_sync || null);
         setError(null);

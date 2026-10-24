@@ -49,7 +49,11 @@ import {
   type PositionFillGroup,
 } from "./fillGrouping";
 import { HistoricalTradesSection } from "./HistoricalTradesSection";
-import { futuManageableOpenOrder, isFutuOpenOrder } from "@/lib/futuOpenOrder";
+import {
+  FUTU_MANAGEMENT_UNCONFIRMED_COPY,
+  futuManageableOpenOrder,
+  isFutuOpenOrder,
+} from "@/lib/futuOpenOrder";
 import { useFutuAccountEnv } from "@/lib/futuAccountEnv";
 import {
   orderActionScope,
@@ -152,11 +156,12 @@ export function OrdersSections({
     const result = await requestCancel(cancelTarget);
     setActionLoading(false);
     // B4 — keep modal open on failure so the user sees the FAILED pill on the
-    // row and the toast. Only dismiss on a clean 2xx.
-    if (result.ok) {
+    // row and the toast. Dismiss on a clean 2xx, or when the outcome is
+    // uncertain (the row then shows the unconfirmed state, no resend).
+    if (result.ok || isFutuManagementLocked(cancelTarget)) {
       setCancelTarget(null);
     }
-  }, [cancelTarget, requestCancel, canManageOrder]);
+  }, [cancelTarget, requestCancel, canManageOrder, isFutuManagementLocked]);
 
   const handleModify = useCallback(
     async (request: ModifyOrderRequest) => {
@@ -172,11 +177,11 @@ export function OrdersSections({
           : request,
       );
       setActionLoading(false);
-      if (result.ok) {
+      if (result.ok || isFutuManagementLocked(modifyTarget.requestOrder)) {
         setModifyTarget(null);
       }
     },
-    [modifyTarget, requestModify, canManageOrder],
+    [modifyTarget, requestModify, canManageOrder, isFutuManagementLocked],
   );
 
   const handleCancelCombo = useCallback(
@@ -589,6 +594,10 @@ export function OrdersSections({
                           </span>
                         ) : isPending ? (
                           <span className="cancel-pending-label">PENDING</span>
+                        ) : isFutuManagementLocked(o.order) ? (
+                          <span className="cancel-pending-label">
+                            {FUTU_MANAGEMENT_UNCONFIRMED_COPY}
+                          </span>
                         ) : (
                           <>
                             <button

@@ -17,6 +17,7 @@ import ActHeldSummary from "./ActHeldSummary";
 import CockpitHeader from "./CockpitHeader";
 import GlyphRail from "./GlyphRail";
 import AssetDeck from "./AssetDeck";
+import { FUTU_NO_IB_EXECUTION_COPY } from "@/lib/futuOpenOrder";
 
 export type AssetCockpitProps = {
   ticker: string;
@@ -40,6 +41,8 @@ export type AssetCockpitProps = {
   theme: "dark" | "light";
   activeDeck: DeckKey | null;
   onDeckChange: (deck: DeckKey | null) => void;
+  /** False when the active account is Futu: no IB ticket / order builder. */
+  ibExecution?: boolean;
 };
 
 export default function AssetCockpit({
@@ -58,6 +61,7 @@ export default function AssetCockpit({
   tape,
   activeDeck,
   onDeckChange,
+  ibExecution = true,
 }: AssetCockpitProps) {
   const live =
     (quotePriceData?.bid != null && quotePriceData?.ask != null) ||
@@ -125,14 +129,20 @@ export default function AssetCockpit({
       {!mobile && (
         <div className="act-region">
           <div className="act-ticket">
-            <OrderTab
-              ticker={ticker}
-              position={position}
-              portfolio={portfolio}
-              prices={prices}
-              openOrders={tickerOrders}
-              tickerPriceData={priceData}
-            />
+            {ibExecution ? (
+              <OrderTab
+                ticker={ticker}
+                position={position}
+                portfolio={portfolio}
+                prices={prices}
+                openOrders={tickerOrders}
+                tickerPriceData={priceData}
+              />
+            ) : (
+              <div className="act-flat" data-testid="ticker-no-ib-execution">
+                <span>{FUTU_NO_IB_EXECUTION_COPY}</span>
+              </div>
+            )}
           </div>
           <div className="act-position">
             {position ? (
@@ -167,6 +177,7 @@ export default function AssetCockpit({
         quotePriceData={quotePriceData}
         openOrders={tickerOrders}
         tickerPriceData={priceData}
+        ibExecution={ibExecution}
       />
 
       <GlyphRail

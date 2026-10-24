@@ -79,6 +79,42 @@ export const FUTU_MODIFY_SENT_UNCONFIRMED_COPY =
 export const FUTU_MANAGEMENT_UNCONFIRMED_COPY =
   "unconfirmed — check the Futu app";
 
+/** Row terms recorded when a Futu cancel/modify outcome became uncertain. */
+export type FutuManagementLock = {
+  env: FutuAccountEnv;
+  brokerOrderId: string;
+  modifySequence: number | null;
+  price: number | null;
+  qty: number;
+};
+
+const TERMINAL_ORDER_STATUS =
+  /^(filled|filled_all|cancelled|cancelled_all|cancelled_part|apicancelled|inactive|rejected|failed|disabled|deleted)$/i;
+
+/** True while `row` still shows the terms recorded in `lock` and is working.
+ *  A terminal row or changed modifySequence / price / qty releases the lock. */
+export function futuLockStillHolds(
+  lock: FutuManagementLock,
+  row: OpenOrder,
+): boolean {
+  if (row.brokerOrderId !== lock.brokerOrderId) return false;
+  const statuses = [row.status, row.futuStatus];
+  if (
+    statuses.some((s) => typeof s === "string" && TERMINAL_ORDER_STATUS.test(s))
+  ) {
+    return false;
+  }
+  return (
+    (row.modifySequence ?? null) === lock.modifySequence &&
+    (row.limitPrice ?? null) === lock.price &&
+    row.totalQuantity === lock.qty
+  );
+}
+
+/** Shown in place of the IB ticket while the Futu account is active. */
+export const FUTU_NO_IB_EXECUTION_COPY =
+  "IB order entry is off for the Futu account. Use the position ticket on the Futu tab.";
+
 export function futuManagementLockKey(
   env: FutuAccountEnv,
   brokerOrderId: string,
