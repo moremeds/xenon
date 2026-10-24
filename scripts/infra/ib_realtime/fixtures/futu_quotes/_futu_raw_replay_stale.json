@@ -1,0 +1,17 @@
+{
+  "sequence": [
+    {
+      "code": "US.AAPL",
+      "data_date": "2026-10-23",
+      "data_time": "10:30:05",
+      "last_price": 101.25
+    },
+    {
+      "code": "US.AAPL",
+      "data_date": "2026-10-23",
+      "data_time": "10:29:50",
+      "last_price": 101.0
+    }
+  ],
+  "expect_forwarded": 1
+}

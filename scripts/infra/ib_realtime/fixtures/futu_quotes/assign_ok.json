@@ -1,0 +1,16 @@
+{
+  "type": "assign",
+  "gen": 7,
+  "ok": [
+    "AAPL",
+    "BRK.B",
+    "HYG"
+  ],
+  "pending": [],
+  "rejected": [
+    {
+      "symbol": "ZZZZ",
+      "reason": "unknown_symbol"
+    }
+  ]
+}

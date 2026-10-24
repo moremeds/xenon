@@ -1,0 +1,8 @@
+{
+  "code": "US.HYG",
+  "data_date": "2026-11-02",
+  "data_time": "09:30:01",
+  "last_price": 80.1,
+  "expect_timestamp": "2026-11-02T14:30:01Z",
+  "expect_note": "ET is UTC-5 after the 2026-11-01 fall-back"
+}

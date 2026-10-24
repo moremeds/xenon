@@ -1,0 +1,30 @@
+{
+  "type": "batch",
+  "updates": {
+    "AAPL": {
+      "symbol": "AAPL",
+      "last": 101.25,
+      "lastIsCalculated": false,
+      "bid": null,
+      "ask": null,
+      "bidSize": null,
+      "askSize": null,
+      "volume": 1200,
+      "high": 101.5,
+      "low": 99.8,
+      "open": 100.0,
+      "close": 100.5,
+      "week52High": null,
+      "week52Low": null,
+      "avgVolume": null,
+      "delta": null,
+      "gamma": null,
+      "theta": null,
+      "vega": null,
+      "impliedVol": null,
+      "undPrice": null,
+      "timestamp": "2026-10-23T14:30:05Z",
+      "source": "futu"
+    }
+  }
+}
