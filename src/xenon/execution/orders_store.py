@@ -15,7 +15,7 @@ import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -1439,6 +1439,14 @@ def _futu_order_info(obs: FutuOrderObservation) -> dict | None:
     }
 
 
+def _strike_at_column(value) -> Decimal:
+    """A strike at `order_submissions.strike` precision (Numeric(12, 2)).
+    Postgres rounds numeric ties away from zero (500.125 -> 500.13); for the
+    positive strikes here that is Decimal ROUND_HALF_UP. Without this a
+    3-decimal Futu strike would contradict its own stored row every pass."""
+    return Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
 def _futu_identity_mismatch(row, obs: FutuOrderObservation) -> str | None:
     """Which immutable identity field of `row` the observation contradicts
     (symbol, security type, side, option right / expiry / strike, qualified
@@ -1454,7 +1462,7 @@ def _futu_identity_mismatch(row, obs: FutuOrderObservation) -> str | None:
             return "right"
         if (row.expiry.strftime("%Y%m%d") if row.expiry else None) != obs.expiry:
             return "expiry"
-        if row.strike is None or obs.strike is None or abs(float(row.strike) - float(obs.strike)) > 1e-6:
+        if row.strike is None or obs.strike is None or _strike_at_column(row.strike) != _strike_at_column(obs.strike):
             return "strike"
         if row.con_id is not None and obs.con_id is not None and int(row.con_id) != int(obs.con_id):
             return "con_id"

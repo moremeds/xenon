@@ -444,20 +444,36 @@ def test_f11_multiplier_only_from_qualified_metadata(code, metas, expected):
 
 
 # ---------------------------------------------------------------------------
-# Strike precision (open risk from R1): strike column is Numeric(12, 2)
+# Strike precision: compare at the column precision (Numeric(12, 2))
 # ---------------------------------------------------------------------------
 
 
-def test_strike_with_three_decimals_fails_closed_on_the_next_pass():
-    """Pins current behaviour, not a goal: a 3-decimal strike (Futu
-    "C500125" = 500.125) is stored rounded to 500.13, so the next pass sees
-    an identity mismatch. The row is never rebound or rewritten and the pass
-    is incomplete (Gate 4 fails closed) while that order is observed."""
+def test_strike_with_three_decimals_matches_its_stored_row():
+    """Futu "C500125" = 500.125. The stored value is read back from Postgres
+    (not assumed): numeric rounds the tie away from zero to 500.13. Later
+    passes compare at that precision, so the same order is no identity
+    mismatch and the pass stays complete."""
     odd = f"US.SPY{SPY_META['exp'][2:]}C500125"
     ctx = FakeTradeCtx(positions=[_pos("US.SPY", 100.0)], open_orders=[_order("7601", code=odd)])
     assert _run(ctx)["complete"] is True
-    assert _subs()["7601"].strike == Decimal("500.13")
+    stored = _subs()["7601"].strike
+    assert stored == Decimal("500.13")
+    assert orders_store._strike_at_column(500.125) == stored
 
+    ctx.open_orders = [_order("7601", code=odd, status="FILLED_ALL", dealt=1.0, avg=1.20)]
     result = _run(ctx)
 
-    assert result["complete"] is False and result["reads"]["persisted"] is False
+    assert result["complete"] is True and result["reads"]["persisted"] is True
+    row = _subs()["7601"]
+    assert (row.state, row.filled_qty) == ("FILLED", 1)
+
+
+def test_strike_a_cent_apart_is_still_a_mismatch():
+    obs = _obs("7602")  # strike 500.00
+    now = datetime.now(timezone.utc)
+    orders_store.mirror_futu_order(obs, broker_account=ACC, account_env="paper", observed_at=now)
+    other = _obs("7602", code=f"US.SPY{SPY_META['exp'][2:]}C500010", metas=())  # 500.01
+
+    out = orders_store.mirror_futu_order(other, broker_account=ACC, account_env="paper", observed_at=now)
+
+    assert out["identity_mismatch"] == "strike"
