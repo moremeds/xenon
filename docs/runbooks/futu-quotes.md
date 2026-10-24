@@ -68,21 +68,44 @@ Liveness uses WebSocket protocol ping/pong: ping every 10 s, pong timeout
   desired set, ≥60 s after subscribe plus a further 60 s grace; "too early"
   provider rejections are retried. Re-adds inside the grace window cancel
   the unsubscribe.
-- Operation fencing: every provider call is reserved per symbol
-  (`subscribing`/`unsub_inflight`), re-validated under the serialized
-  adapter lock immediately before the SDK call, and bound to the OpenD
-  session epoch at issue — results from a dead session are discarded and
-  never certify the replacement session. A failed unsubscribe never frees
-  the local record (the provider may still hold and count it); retries are
-  bounded-escalated. On reconnect, desired symbols believed subscribed are
-  *reconfirmed* idempotently without reserving a second quota unit, while
-  genuinely new admissions still respect the ceiling.
-- Buffered quotes are dropped the moment a symbol leaves `ok`, and the
-  whole coalesce window is cleared on relay-owner replacement and on OpenD
-  loss — a stale tick can never reach a new owner or a re-added symbol.
-- Snapshot verification batches fall back to per-code calls when the batch
-  call fails: OpenD reports whole-call errors only, so one invalid code
-  cannot reject its batch-mates.
+- Operation fencing: every provider operation (snapshot verify, subscribe,
+  unsubscribe, session poll, quota poll) runs on **one worker, one at a
+  time**, in queue order. Each op carries the OpenD session epoch and a
+  per-symbol reservation taken when the evaluation emitted it. Right before
+  the SDK call the worker re-checks the epoch, the reservation and the
+  symbol's current state; for an unsubscribe that includes the current
+  60 s lifetime, grace and retry deadlines, so a re-add followed by a new
+  removal waits a full new grace. A declined op sends nothing. After the
+  call, a result from an older epoch or a superseded reservation is
+  discarded and changes no state; a down error from an old-session op does
+  not mark the current session down. An old-session SDK call that is
+  already in flight still holds the queue until it returns (bounded by the
+  SDK call timeout).
+- Ownership: a subscription is counted against the ceiling from its
+  successful subscribe until an unsubscribe succeeds or OpenD says it is
+  not subscribed. Disconnects, failed quota refreshes and failed
+  unsubscribes do not release it; failed unsubscribes retry with bounded
+  backoff. After a reconnect a counted, wanted symbol is not `ok` until a
+  subscribe succeeds in the new session (reconfirm). The reconfirm uses
+  no second quota unit, retries with backoff until it succeeds or the
+  symbol is released, and its slot is never given to a new symbol.
+- SDK callbacks: each OpenD context carries a generation and each quote
+  push carries the context's link counter, read on the SDK thread. Pushes
+  and disconnect/reconnect callbacks from a closed or replaced context are
+  dropped, and so is a push read before a later disconnect/reconnect of
+  the same context. Push and disconnect callbacks run on different SDK
+  threads, so this fence cannot order them exactly; a push that passes it
+  while OpenD is down, or before the reconfirm, is dropped by the `ok`
+  check.
+- Buffered quotes are dropped at the transition that removes them from
+  `ok`: a `want` that removes the symbol, relay-owner replacement or close,
+  session close, and OpenD loss or reconnect. The flush also re-checks
+  `ok`.
+- Snapshot verification: a failed multi-code batch call is retried one
+  code at a time (OpenD reports whole-call errors only, so one invalid code
+  cannot reject its batch-mates). Only a definite not-found gives
+  `rejected/unknown_symbol`; a generic provider or transient error leaves
+  the symbol `pending/backoff` and retries (5 s doubling to 120 s).
 
 ## Quota
 
@@ -134,6 +157,7 @@ and confirm ticks flow for a liquid symbol.
 | All symbols `pending/session`             | `market_us` is not MORNING/AFTERNOON, or `get_global_state` is failing (OpenD up but degraded)   |
 | All symbols `pending/opend_down`          | OpenD socket dead — look for `OpenD connection lost`; supervisor reconnects automatically        |
 | Symbols `rejected/quota`                  | `health.quota` block + the `query_subscription` snippet above; raise `FUTU_QUOTE_QUOTA` only if provider headroom exists |
-| Symbol `rejected/unknown_symbol`          | Futu code spelling (`US.<ticker>`); class-share spellings the provider cannot parse land here permanently |
+| Symbol `rejected/unknown_symbol`          | OpenD said the code does not exist: Futu code spelling (`US.<ticker>`); class-share spellings the provider cannot parse land here permanently |
+| Symbol stays `pending/backoff`            | Snapshot verify keeps failing with a generic/transient provider error; check OpenD logs and rate limits |
 | Relay sees stale/delayed ticks            | `batch` cadence is 100 ms; check `timestamp` (source ET time) vs receive time                    |
 | No frames at all                          | WebSocket ping/pong — service pings every 10 s, drops silent conns after 20 s                    |

@@ -3,7 +3,13 @@
 Wraps ``OpenQuoteContext`` + ``StockQuoteHandlerBase`` + ``query_subscription``
 + ``get_global_state``, all behind one serialized asyncio facade. The sync
 Futu SDK calls run via ``asyncio.to_thread``; a single lock keeps OpenD round
-trips sequential.
+trips sequential (the service also issues them from one worker).
+
+SDK callbacks (quote pushes, disconnect, reconnect) are fenced by origin:
+each context carries a generation, and each push carries the context's
+link counter read on the SDK thread. Callbacks from a closed/replaced
+context, and pushes received before a later disconnect/reconnect of the
+same context, are dropped on the loop thread.
 
 The service only consumes the ``OpenDLike`` protocol, so tests inject a fake
 with the same async surface and no network.
@@ -33,12 +39,6 @@ except ImportError:  # pragma: no cover — futu-api missing
     SubType = None  # type: ignore[assignment]
 
 logger = logging.getLogger("xenon.futu_quotes.opend")
-
-
-class OpAborted(Exception):
-    """A queued provider call was declined by its ``pre`` re-check while
-    waiting for the serialized adapter lock (stale epoch / unwanted /
-    already resolved). Not a provider result — nothing was sent."""
 
 
 class OpenDError(Exception):
@@ -150,13 +150,9 @@ class OpenDLike(Protocol):
 
     async def get_market_snapshot(self, codes: list[str]) -> list[dict]: ...
 
-    async def subscribe(
-        self, codes: list[str], *, pre: Optional[Callable[[], bool]] = None
-    ) -> dict[str, Optional[str]]: ...
+    async def subscribe(self, codes: list[str]) -> dict[str, Optional[str]]: ...
 
-    async def unsubscribe(
-        self, codes: list[str], *, pre: Optional[Callable[[], bool]] = None
-    ) -> dict[str, Optional[str]]: ...
+    async def unsubscribe(self, codes: list[str]) -> dict[str, Optional[str]]: ...
 
     async def query_subscription(self) -> dict: ...
 
@@ -164,60 +160,73 @@ class OpenDLike(Protocol):
 
 
 class _QuoteContext(OpenQuoteContext if OpenQuoteContext is not None else object):  # type: ignore[misc]
-    """OpenQuoteContext with asyncio-disconnect/reconnect hooks."""
+    """OpenQuoteContext whose callbacks carry their origin to the loop.
 
-    def __init__(self, *args: Any, loop: asyncio.AbstractEventLoop, **kwargs: Any) -> None:
+    ``_fq_gen`` names this context; ``_fq_link`` counts its socket
+    transitions (bumped on the SDK thread at every disconnect/recovery).
+    """
+
+    def __init__(
+        self, *args: Any, loop: asyncio.AbstractEventLoop, sink: "FutuOpenD", gen: int, **kwargs: Any
+    ) -> None:
         # Attributes first: the base __init__ opens the socket, so a very
         # early disconnect could reach on_disconnect before they exist.
         self._fq_loop = loop
-        self._fq_on_disconnect: Optional[Callable[[], None]] = None
-        self._fq_on_reconnect: Optional[Callable[[], None]] = None
+        self._fq_sink = sink
+        self._fq_gen = gen
+        self._fq_link = 0
+        # The base __init__ calls on_api_socket_reconnected on the FIRST
+        # connect too; that is not a recovery (the supervisor handles it).
+        self._fq_ready = False
         super().__init__(*args, **kwargs)
+        self._fq_ready = True
 
     def on_disconnect(self, conn_id: int, reason: Any, msg: str) -> None:  # noqa: D102
+        self._fq_link += 1
         try:
             super().on_disconnect(conn_id, reason, msg)
         except Exception:  # pragma: no cover - SDK internals
             pass
-        cb = self._fq_on_disconnect
-        if cb is not None:
-            self._fq_loop.call_soon_threadsafe(cb)
+        self._fq_loop.call_soon_threadsafe(self._fq_sink._deliver_lifecycle, self._fq_gen, False)
 
     def on_api_socket_reconnected(self) -> tuple:  # noqa: D102
         # The base returns (ret, msg) — OpenContextBase._init_connect_sync
         # unpacks it even on the first connect. Preserve the contract; only
-        # a successful SDK resubscribe counts as recovery for us.
+        # a successful SDK resubscribe after a real reconnect is a recovery.
         try:
             ret, msg = super().on_api_socket_reconnected()
         except Exception as exc:  # pragma: no cover - SDK internals
             logger.exception("OpenD reconnect resubscribe raised")
             return RET_ERROR, f"xenon reconnect callback: {exc}"
         if ret == RET_OK:
-            cb = self._fq_on_reconnect
-            if cb is not None:
-                self._fq_loop.call_soon_threadsafe(cb)
+            if self._fq_ready:
+                self._fq_link += 1
+                self._fq_loop.call_soon_threadsafe(
+                    self._fq_sink._deliver_lifecycle, self._fq_gen, True
+                )
         else:
             logger.warning("OpenD reconnect resubscribe failed: %s", msg)
         return ret, msg
 
 
 class _StockQuoteHandler(StockQuoteHandlerBase):  # type: ignore[misc]
-    """Forwards parsed QUOTE push frames to the asyncio loop."""
+    """Forwards parsed QUOTE push frames, tagged with their origin."""
 
-    def __init__(self, loop: asyncio.AbstractEventLoop, on_rows: Callable[[list[dict]], None]) -> None:
+    def __init__(self, ctx: _QuoteContext) -> None:
         super().__init__()
-        self._loop = loop
-        self._on_rows = on_rows
+        self._ctx = ctx
 
     def on_recv_rsp(self, rsp_pb: Any) -> tuple:
         ret, content = super().on_recv_rsp(rsp_pb)
         if ret == RET_OK and content is not None:
+            ctx = self._ctx
+            origin = (ctx._fq_gen, ctx._fq_link)  # read on the SDK thread
             try:
                 rows = content.to_dict(orient="records")
             except Exception:  # pragma: no cover - defensive
                 logger.exception("quote push frame not a DataFrame")
                 return ret, content
-            self._loop.call_soon_threadsafe(self._on_rows, rows)
+            ctx._fq_loop.call_soon_threadsafe(ctx._fq_sink._deliver_rows, origin, rows)
         return ret, content
 
 
@@ -232,6 +241,9 @@ class FutuOpenD:
         self.on_disconnected: Optional[Callable[[], None]] = None
         self.on_reconnected: Optional[Callable[[], None]] = None
         self._ctx: Any = None
+        # Generation of the live context; bumped on every connect and close
+        # so callbacks from a replaced context are dropped.
+        self._gen = 0
         self._lock = asyncio.Lock()
 
     async def probe(self) -> None:
@@ -245,13 +257,12 @@ class FutuOpenD:
             raise OpenDDownError("futu-api is not installed")
         await self.probe()
         loop = asyncio.get_running_loop()
+        self._gen += 1
+        gen = self._gen
 
         def _open() -> Any:
-            ctx = _QuoteContext(host=self.host, port=self.port, loop=loop)
-            ctx._fq_on_disconnect = self._emit_disconnected
-            ctx._fq_on_reconnect = self._emit_reconnected
-            if self.on_quote_rows is not None:
-                ctx.set_handler(_StockQuoteHandler(loop, self.on_quote_rows))
+            ctx = _QuoteContext(host=self.host, port=self.port, loop=loop, sink=self, gen=gen)
+            ctx.set_handler(_StockQuoteHandler(ctx))
             ctx.start()
             return ctx
 
@@ -265,6 +276,7 @@ class FutuOpenD:
         logger.info("futu-quotes connected to OpenD %s:%s", self.host, self.port)
 
     async def close(self) -> None:
+        self._gen += 1  # fence callbacks from the closing context
         ctx, self._ctx = self._ctx, None
         if ctx is not None:
             try:
@@ -272,15 +284,24 @@ class FutuOpenD:
             except Exception:  # pragma: no cover - best effort
                 pass
 
-    def _emit_disconnected(self) -> None:
-        cb = self.on_disconnected
+    def _deliver_lifecycle(self, gen: int, up: bool) -> None:
+        """Loop thread: drop lifecycle callbacks of a replaced context."""
+        if gen != self._gen:
+            return
+        cb = self.on_reconnected if up else self.on_disconnected
         if cb is not None:
             cb()
 
-    def _emit_reconnected(self) -> None:
-        cb = self.on_reconnected
+    def _deliver_rows(self, origin: tuple[int, int], rows: list[dict]) -> None:
+        """Loop thread: drop pushes from a replaced context or from before a
+        later disconnect/reconnect of the live one."""
+        gen, link = origin
+        ctx = self._ctx
+        if gen != self._gen or ctx is None or link != ctx._fq_link:
+            return
+        cb = self.on_quote_rows
         if cb is not None:
-            cb()
+            cb(rows)
 
     async def _call(self, fn: Callable[[], Any]) -> Any:
         """Run a blocking SDK call serialized under one lock."""
@@ -289,7 +310,7 @@ class FutuOpenD:
         async with self._lock:
             try:
                 return await asyncio.to_thread(fn)
-            except (OpAborted, OpenDError):
+            except OpenDError:
                 raise
             except Exception as exc:
                 raise _classify_call_error(str(exc)) from exc
@@ -305,20 +326,12 @@ class FutuOpenD:
 
         return await self._call(_run)
 
-    async def subscribe(
-        self, codes: list[str], *, pre: Optional[Callable[[], bool]] = None
-    ) -> dict[str, Optional[str]]:
-        """Per-code subscribe; returns ``{code: None | error_message}``.
-
-        ``pre`` re-runs inside the serialized lock right before the SDK
-        call; a False verdict aborts that code with ``OpAborted``.
-        """
+    async def subscribe(self, codes: list[str]) -> dict[str, Optional[str]]:
+        """Per-code subscribe; returns ``{code: None | error_message}``."""
         out: dict[str, Optional[str]] = {}
         for code in codes:
 
             def _run(code: str = code) -> Optional[str]:
-                if pre is not None and not pre():
-                    raise OpAborted(f"subscribe pre-check declined {code}")
                 ret, msg = self._ctx.subscribe([code], [SubType.QUOTE])
                 return None if ret == RET_OK else str(msg)
 
@@ -328,15 +341,11 @@ class FutuOpenD:
                 out[code] = str(exc) or exc.__class__.__name__
         return out
 
-    async def unsubscribe(
-        self, codes: list[str], *, pre: Optional[Callable[[], bool]] = None
-    ) -> dict[str, Optional[str]]:
+    async def unsubscribe(self, codes: list[str]) -> dict[str, Optional[str]]:
         out: dict[str, Optional[str]] = {}
         for code in codes:
 
             def _run(code: str = code) -> Optional[str]:
-                if pre is not None and not pre():
-                    raise OpAborted(f"unsubscribe pre-check declined {code}")
                 ret, msg = self._ctx.unsubscribe([code], [SubType.QUOTE])
                 return None if ret == RET_OK else str(msg)
 

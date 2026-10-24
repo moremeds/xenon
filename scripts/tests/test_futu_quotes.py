@@ -21,8 +21,9 @@ from xenon.futu_quotes.admission import (
     futu_code,
     ticker_of,
 )
+from xenon.futu_quotes import opend as opend_mod
 from xenon.futu_quotes.opend import (
-    OpAborted,
+    OpenDDownError,
     OpenDNotFoundError,
     OpenDProviderError,
     classify_subscribe_error,
@@ -224,7 +225,6 @@ def test_admission_session_closed_pending():
     ad.set_session_open(False)
     ad.set_desired(1, ["AAPL"])
     ad.verify_result("AAPL", "ok")
-    ad.state("AAPL").verify_inflight = False
     res = ad.evaluate()
     assert res.partition["pending"] == [{"symbol": "AAPL", "reason": "session"}]
 
@@ -234,7 +234,6 @@ def test_admission_opend_down_pending():
     ad = _admission(clock)
     ad.set_desired(1, ["AAPL"])
     ad.verify_result("AAPL", "ok")
-    ad.state("AAPL").verify_inflight = False
     ad.mark_disconnected()
     res = ad.evaluate()
     assert res.partition["pending"] == [{"symbol": "AAPL", "reason": "opend_down"}]
@@ -247,7 +246,6 @@ def test_admission_quota_ceiling_partition():
     ad.set_desired(7, ["AAPL", "BRK.B", "HYG"])
     for s in ("AAPL", "BRK.B", "HYG"):
         ad.verify_result(s, "ok")
-        ad.state(s).verify_inflight = False
     res = ad.evaluate()
     # AAPL wins the single slot; the rest are rejected for quota.
     assert res.actions.subscribe == ["AAPL"]
@@ -260,7 +258,6 @@ def test_admission_provider_rejection_records_backoff():
     ad = _admission(clock)
     ad.set_desired(1, ["HYG"])
     ad.verify_result("HYG", "ok")
-    ad.state("HYG").verify_inflight = False
     ad.evaluate()
     ad.subscribe_result("HYG", "subscription quota limit exceeded", "quota")
     assert ad.refresh_quota_requested
@@ -280,7 +277,6 @@ def test_admission_provider_error_backoff_then_retry():
     ad = _admission(clock)
     ad.set_desired(1, ["HYG"])
     ad.verify_result("HYG", "ok")
-    ad.state("HYG").verify_inflight = False
     ad.evaluate()
     ad.subscribe_result("HYG", "socket reset", "provider_error")
     res = ad.evaluate()
@@ -300,7 +296,6 @@ def test_admission_60s_unsubscribe_rule():
     ad.set_desired(1, ["AAPL", "MSFT"])
     for s in ("AAPL", "MSFT"):
         ad.verify_result(s, "ok")
-        ad.state(s).verify_inflight = False
     ad.evaluate()
     ad.subscribe_result("AAPL", None)
     ad.subscribe_result("MSFT", None)
@@ -334,7 +329,6 @@ def test_admission_readd_within_grace_cancels_unsub():
     ad.set_desired(1, ["AAPL", "MSFT"])
     for s in ("AAPL", "MSFT"):
         ad.verify_result(s, "ok")
-        ad.state(s).verify_inflight = False
     ad.evaluate()
     ad.subscribe_result("AAPL", None)
     ad.subscribe_result("MSFT", None)
@@ -352,7 +346,6 @@ def test_admission_release_desired_grace():
     ad = _admission(clock)
     ad.set_desired(1, ["AAPL"])
     ad.verify_result("AAPL", "ok")
-    ad.state("AAPL").verify_inflight = False
     ad.evaluate()
     ad.subscribe_result("AAPL", None)
     clock.advance(200)  # sub is old
@@ -369,7 +362,6 @@ def test_admission_mark_connected_resubscribes_desired():
     ad = _admission(clock)
     ad.set_desired(1, ["AAPL"])
     ad.verify_result("AAPL", "ok")
-    ad.state("AAPL").verify_inflight = False
     ad.evaluate()
     ad.subscribe_result("AAPL", None)
     ad.mark_disconnected()
@@ -385,7 +377,6 @@ def test_admission_is_ok_fencing():
     ad = _admission(clock)
     ad.set_desired(1, ["AAPL"])
     ad.verify_result("AAPL", "ok")
-    ad.state("AAPL").verify_inflight = False
     ad.evaluate()
     assert not ad.is_ok("AAPL")
     ad.subscribe_result("AAPL", None)
@@ -510,8 +501,12 @@ class FakeOpenD:
         self.subscribe_raise: dict[str, Exception] = {}
         self.unsubscribe_errors: list[str] = []
         self.unsubscribe_raise: Exception | None = None
-        self.unsub_defer: asyncio.Event | None = None
-        self.unsubscribe_started = 0
+        # Entry hooks: ``hooks[method](n, codes)`` is awaited at the START of
+        # the n-th call (1-based) of ``method`` — before anything else, so a
+        # parked hook models a call queued in front of the SDK. ``entered``
+        # counts calls that reached the fake.
+        self.hooks: dict = {}
+        self.entered: dict[str, int] = {}
         self.snapshot_errors: dict[str, Exception] = {}
         self.quota_raise: Exception | None = None
         self.defer_all = False
@@ -533,7 +528,24 @@ class FakeOpenD:
     async def close(self) -> None:
         self.connected = False
 
+    async def _enter(self, method: str, codes=()) -> None:
+        n = self.entered[method] = self.entered.get(method, 0) + 1
+        hook = self.hooks.get(method)
+        if hook is not None:
+            await hook(n, list(codes))
+
+    def gate(self, method: str) -> asyncio.Event:
+        """Park every call of ``method`` at entry until the event is set."""
+        ev = asyncio.Event()
+
+        async def _hook(n, codes):
+            await ev.wait()
+
+        self.hooks[method] = _hook
+        return ev
+
     async def get_market_snapshot(self, codes: list[str]) -> list[dict]:
+        await self._enter("get_market_snapshot", codes)
         self._require_conn()
         self.snapshot_calls += 1
         for c in codes:
@@ -542,11 +554,14 @@ class FakeOpenD:
         return [self.snapshots[c] for c in codes if c in self.snapshots and self.snapshots[c]]
 
     async def subscribe(self, codes: list[str], *, pre=None) -> dict:
+        # ``pre`` is accepted only so the red run against the pre-fix
+        # service (which passed one) exercises the same schedule.
+        await self._enter("subscribe", codes)
         self._require_conn()
         out: dict = {}
         for c in codes:
             if pre is not None and not pre():
-                raise OpAborted(f"fake pre declined {c}")
+                raise getattr(opend_mod, "OpAborted")(f"fake pre declined {c}")
             self.subscribe_calls.append(c)
             if self.defer_all or c in self._defer_results or self._defer_queues.get(c):
                 loop = asyncio.get_running_loop()
@@ -584,14 +599,12 @@ class FakeOpenD:
             self._defer_results[code] = err
 
     async def unsubscribe(self, codes: list[str], *, pre=None) -> dict:
+        await self._enter("unsubscribe", codes)
         self._require_conn()
-        self.unsubscribe_started += 1
-        if self.unsub_defer is not None:
-            await self.unsub_defer.wait()
         out: dict = {}
         for c in codes:
             if pre is not None and not pre():
-                raise OpAborted(f"fake pre declined {c}")
+                raise getattr(opend_mod, "OpAborted")(f"fake pre declined {c}")
             self.unsubscribe_calls.append(c)
             if self.unsubscribe_raise is not None:
                 raise self.unsubscribe_raise
@@ -606,6 +619,7 @@ class FakeOpenD:
         return out
 
     async def query_subscription(self) -> dict:
+        await self._enter("query_subscription")
         self._require_conn()
         self.quota_calls += 1
         if self.quota_raise is not None:
@@ -618,6 +632,7 @@ class FakeOpenD:
         }
 
     async def get_global_state(self) -> dict:
+        await self._enter("get_global_state")
         self._require_conn()
         return {"market_us": self.market_us}
 
@@ -782,18 +797,17 @@ async def test_stale_subscribe_completion_after_newer_gen():
     await svc.on_ws_connect(ws)
     await _want(svc, ws, 1, ["AAPL", "MSFT"])
 
-    for _ in range(200):
-        if {"US.AAPL", "US.MSFT"} <= set(fake.subscribe_calls):
-            break
-        await asyncio.sleep(0)
-    assert "US.MSFT" in fake.subscribe_calls
+    # Ops are serialized: MSFT's call starts once AAPL's returns.
+    await _until(lambda: "US.AAPL" in fake.subscribe_calls)
+    fake.complete_subscribe("US.AAPL")
+    await _until(lambda: "US.MSFT" in fake.subscribe_calls)
 
     await _want(svc, ws, 2, ["AAPL"])  # MSFT unwanted while subscribe in flight
     await asyncio.sleep(0)
 
-    fake.complete_subscribe("US.AAPL")
     fake.complete_subscribe("US.MSFT")  # late completion: really did subscribe
     await svc.drain()
+    assert svc.admission.state("MSFT").subscribed  # held → released via grace
 
     last = ws.last("assign")
     assert last is not None
@@ -1127,11 +1141,19 @@ async def test_sdk_reconnect_callback_preserves_tuple_contract(monkeypatch):
 
     from xenon.futu_quotes.opend import _QuoteContext
 
+    fired: list[bool] = []
+
+    class _Sink:
+        def _deliver_lifecycle(self, gen: int, up: bool) -> None:
+            if up:
+                fired.append(True)
+
     ctx = _QuoteContext.__new__(_QuoteContext)
     ctx._fq_loop = asyncio.get_running_loop()
-    ctx._fq_on_disconnect = None
-    fired: list[bool] = []
-    ctx._fq_on_reconnect = lambda: fired.append(True)
+    ctx._fq_sink = _Sink()
+    ctx._fq_gen = 1
+    ctx._fq_link = 0
+    ctx._fq_ready = True  # past the base __init__ (first connect)
     ctx._lock = threading.RLock()
     ctx._status = ContextStatus.START
     ctx._connect_sync = lambda: RET_OK
@@ -1162,11 +1184,19 @@ async def test_sdk_reconnect_callback_preserves_tuple_contract(monkeypatch):
     assert fired == []
 
 
+async def _until(pred, rounds: int = 400) -> None:
+    for _ in range(rounds):
+        if pred():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition not reached")
+
+
 @pytest.mark.asyncio
 async def test_due_unsub_runs_once_and_readd_aborts():
-    """R235-2: a due unsubscribe is reserved before spawn — exactly one
-    provider call across many eval passes; re-adding the symbol while the
-    call is queued aborts it before it reaches the provider."""
+    """R235-2: a due unsubscribe is reserved before it is queued — exactly
+    one provider call across many eval passes; re-adding the symbol while
+    the op waits for the worker declines it before it reaches the provider."""
     clock = Clock(1000.0)
     fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS)
     svc = await _settled_service(fake, clock=clock)
@@ -1176,30 +1206,24 @@ async def test_due_unsub_runs_once_and_readd_aborts():
     await svc.drain()
     assert "US.MSFT" in fake.subscribed
 
-    fake.unsub_defer = asyncio.Event()
     clock.advance(200)
     await _want(svc, ws, 2, ["AAPL"])  # MSFT unwanted at t=1200
-    clock.advance(61)                # past max(sub+60, unwanted+60) = 1260
-    await svc.tick_unsubscribes_once()
-    for _ in range(200):
-        if fake.unsubscribe_started:
-            break
-        await asyncio.sleep(0)
-    assert fake.unsubscribe_started == 1
-
-    # More eval passes must not fan out extra calls.
+    await svc.drain()
+    clock.advance(61)                 # past max(sub+60, unwanted+60) = 1260
+    held = fake.gate("get_global_state")  # worker busy in front of the op
+    poll = asyncio.create_task(svc.poll_session_once())
+    await _until(lambda: fake.entered.get("get_global_state", 0) >= 2)
     for _ in range(5):
         await svc.tick_unsubscribes_once()
-        await svc.drain()
-    assert fake.unsubscribe_started == 1
-    assert fake.unsubscribe_calls == []  # still queued behind the lock
+        await svc.drain(timeout=0.05)
+    assert svc.admission.state("MSFT").op == "unsubscribe"  # one reservation
+    assert fake.entered.get("unsubscribe", 0) == 0
 
-    # Re-add while the call is queued → the pre-check aborts it.
-    await _want(svc, ws, 3, ["AAPL", "MSFT"])
-    fake.unsub_defer.set()
+    await _want(svc, ws, 3, ["AAPL", "MSFT"])  # re-add while queued
+    held.set()
+    await poll
     await svc.drain()
-    assert fake.unsubscribe_started == 1
-    assert fake.unsubscribe_calls == []
+    assert fake.entered.get("unsubscribe", 0) == 0
     assert "US.MSFT" in fake.subscribed
     assert svc.admission.is_ok("MSFT")
 
@@ -1303,16 +1327,14 @@ async def test_stale_session_subscribe_cannot_certify_new_session():
 
     fake.drop()  # session A dies while call A is pending
     await fake.connect()
-    await svc.opend_recovered()  # session B
-    for _ in range(200):
-        if fake.subscribe_calls.count("US.AAPL") >= 2:
-            break
-        await asyncio.sleep(0)
-    assert svc.admission.epoch > epoch_a
-    assert fake.subscribe_calls.count("US.AAPL") == 2
-
-    fake.complete_subscribe("US.AAPL", None)  # resolves oldest = session-A call
+    rec = asyncio.create_task(svc.opend_recovered())  # session B
     await asyncio.sleep(0)
+    assert svc.admission.epoch > epoch_a
+    # Ops are serialized: session B's work waits for call A to return.
+    fake.complete_subscribe("US.AAPL", None)  # session-A call succeeds late
+    await rec
+    await _until(lambda: fake.subscribe_calls.count("US.AAPL") >= 2)
+    assert not svc.admission.is_ok("AAPL")  # A's success certified nothing
     fake.complete_subscribe("US.AAPL", "quota burst")  # session-B call rejected
     await svc.drain()
 
@@ -1416,7 +1438,7 @@ async def test_snapshot_batch_failure_isolates_bad_code():
     """R235-7: a whole-call snapshot failure for one bad code must not
     reject its batch-mates — valid symbols still verify and subscribe."""
     fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS)
-    fake.snapshot_errors["US.INVALID"] = OpenDProviderError("invalid code US.INVALID")
+    fake.snapshot_errors["US.INVALID"] = OpenDNotFoundError("invalid code US.INVALID")
     fake.snapshots["US.INVALID"] = _snapshot_row("US.INVALID")
     svc = await _settled_service(fake)
     ws = FakeWS()
@@ -1431,3 +1453,333 @@ async def test_snapshot_batch_failure_isolates_bad_code():
     assert "US.AAPL" in fake.subscribed
     # Batch fast path preserved: one failing batch call, then per-code calls.
     assert fake.snapshot_calls >= 3
+
+
+# ---------------------------------------------------------------------------
+# Astra round-2 regressions (exact failing schedules from the review)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_queued_unsub_honours_renewed_grace():
+    """R235-2: a queued unsubscribe re-checks the CURRENT deadlines. A
+    re-add followed by another removal restarts the 60 s grace."""
+    clock = Clock(1000.0)
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS)
+    svc = await _settled_service(fake, clock=clock)
+    ws = FakeWS()
+    await svc.on_ws_connect(ws)
+    await _want(svc, ws, 1, ["AAPL", "MSFT"])
+    await svc.drain()
+    clock.advance(200)
+    await _want(svc, ws, 2, ["AAPL"])  # MSFT unwanted at t=1200
+    await svc.drain()
+    clock.advance(61)  # t=1261: due
+
+    worker_gate = fake.gate("get_global_state")  # worker busy in front of the op
+    unsub_gate = fake.gate("unsubscribe")  # pre-fix code: op parked before its pre-check
+    poll = asyncio.create_task(svc.poll_session_once())
+    await _until(lambda: fake.entered.get("get_global_state", 0) >= 2)
+    await svc.tick_unsubscribes_once()
+    await svc.drain(timeout=0.05)
+
+    await _want(svc, ws, 3, ["AAPL", "MSFT"])  # re-add ...
+    await _want(svc, ws, 4, ["AAPL"])  # ... and remove again at t=1261
+    worker_gate.set()
+    unsub_gate.set()
+    await poll
+    await svc.drain()
+    assert fake.unsubscribe_calls == []  # 0 s after the latest removal
+    assert "US.MSFT" in fake.subscribed
+
+    clock.advance(59)  # t=1320: still inside the renewed grace
+    await svc.tick_unsubscribes_once()
+    await svc.drain()
+    assert fake.unsubscribe_calls == []
+    clock.advance(2)  # t=1322 > 1261 + 60
+    await svc.tick_unsubscribes_once()
+    await svc.drain()
+    assert fake.unsubscribe_calls == ["US.MSFT"]
+    assert not svc.admission.state("MSFT").subscribed
+
+
+@pytest.mark.asyncio
+async def test_stale_split_verify_cannot_overwrite_current_session():
+    """R235-4: a session-A split-verify call that completes after a
+    reconnect must not overwrite the session-B verification."""
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS)
+    release_a = asyncio.Event()
+
+    async def snap_hook(n, codes):
+        if n == 1:
+            raise OpenDProviderError("batch failed")  # session-A batch → split
+        if n == 2:
+            await release_a.wait()  # session-A singleton parked
+            raise OpenDNotFoundError("late session-A not found")
+
+    fake.hooks["get_market_snapshot"] = snap_hook
+    svc = await _settled_service(fake)
+    ws = FakeWS()
+    await svc.on_ws_connect(ws)
+    await _want(svc, ws, 1, ["AAPL", "MSFT"])
+    await _until(lambda: fake.entered.get("get_market_snapshot", 0) >= 2)
+
+    fake.drop()
+    await fake.connect()
+    rec = asyncio.create_task(svc.opend_recovered())  # session B
+    await svc.drain(timeout=0.05)
+    release_a.set()
+    await rec
+    await svc.drain()
+
+    assert svc.admission.state("AAPL").verify == "ok"
+    last = ws.last("assign")
+    assert sorted(last["ok"]) == ["AAPL", "MSFT"]
+    assert last["rejected"] == []
+
+
+@pytest.mark.asyncio
+async def test_stale_op_cannot_clear_replacement_reservation():
+    """R235-4: an old-session subscribe that resumes after the reconnect
+    must not clear the replacement session's reservation (no extra
+    admission)."""
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS)
+    gate_a, gate_b = asyncio.Event(), asyncio.Event()
+
+    async def sub_hook(n, codes):
+        if n == 1:
+            await gate_a.wait()
+        elif n == 2:
+            await gate_b.wait()
+
+    fake.hooks["subscribe"] = sub_hook
+    svc = await _settled_service(fake)
+    ws = FakeWS()
+    await svc.on_ws_connect(ws)
+    await _want(svc, ws, 1, ["AAPL"])
+    await _until(lambda: fake.entered.get("subscribe", 0) >= 1)
+
+    fake.drop()
+    await fake.connect()
+    rec = asyncio.create_task(svc.opend_recovered())
+    await svc.drain(timeout=0.05)
+    gate_a.set()  # the session-A op resumes
+    await rec
+    await _until(lambda: fake.entered.get("subscribe", 0) >= 2)  # B reserved + in flight
+    for _ in range(3):
+        await svc.tick_unsubscribes_once()
+        await svc.drain(timeout=0.05)
+    assert fake.entered["subscribe"] == 2  # no extra AAPL admission
+
+    gate_b.set()
+    await svc.drain()
+    assert fake.entered["subscribe"] == 2
+    assert svc.admission.is_ok("AAPL")
+
+
+@pytest.mark.asyncio
+async def test_stale_op_down_error_does_not_kill_new_session():
+    """R235-4: an OpenDDownError from an old-session op must not mark the
+    replacement session down."""
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS)
+    gate_a = asyncio.Event()
+
+    async def sub_hook(n, codes):
+        if n == 1:
+            await gate_a.wait()
+            raise OpenDDownError("session-A socket gone")
+
+    fake.hooks["subscribe"] = sub_hook
+    svc = await _settled_service(fake)
+    ws = FakeWS()
+    await svc.on_ws_connect(ws)
+    await _want(svc, ws, 1, ["AAPL"])
+    await _until(lambda: fake.entered.get("subscribe", 0) >= 1)
+
+    fake.drop()
+    await fake.connect()
+    rec = asyncio.create_task(svc.opend_recovered())
+    await svc.drain(timeout=0.05)
+    gate_a.set()
+    await rec
+    await svc.drain()
+
+    assert svc.admission.opend_connected
+    assert svc.admission.is_ok("AAPL")
+    assert ws.last("health")["opend_connected"] is True
+
+
+@pytest.mark.asyncio
+async def test_sdk_callbacks_from_replaced_context_are_dropped(monkeypatch):
+    """R235-4: SDK push/lifecycle callbacks are fenced by their originating
+    context. Late callbacks of a closed context never reach the service;
+    a push received before a later disconnect is not delivered after it.
+    The SDK socket layer is stubbed — no network."""
+    import pandas as pd
+    from futu import OpenQuoteContext, StockQuoteHandlerBase
+    from futu.common.constant import RET_OK
+
+    monkeypatch.setattr(opend_mod, "_probe_opend", lambda *a, **k: None)
+    monkeypatch.setattr(OpenQuoteContext, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(
+        OpenQuoteContext, "set_handler", lambda self, h: setattr(self, "_t_handler", h)
+    )
+    monkeypatch.setattr(OpenQuoteContext, "start", lambda self: None)
+    monkeypatch.setattr(OpenQuoteContext, "close", lambda self: None)
+    monkeypatch.setattr(OpenQuoteContext, "on_disconnect", lambda self, c, r, m: None)
+    monkeypatch.setattr(OpenQuoteContext, "on_api_socket_reconnected", lambda self: (RET_OK, ""))
+    monkeypatch.setattr(
+        StockQuoteHandlerBase, "on_recv_rsp", lambda self, rsp: (RET_OK, pd.DataFrame(rsp))
+    )
+
+    od = opend_mod.FutuOpenD()
+    rows: list = []
+    downs: list = []
+    ups: list = []
+    od.on_quote_rows = rows.append
+    od.on_disconnected = lambda: downs.append(1)
+    od.on_reconnected = lambda: ups.append(1)
+
+    async def settle() -> None:
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+    def seen() -> list:
+        return [int(r[0]["n"]) for r in rows]
+
+    await od.connect()
+    ctx_a = od._ctx
+    ctx_a._t_handler.on_recv_rsp([{"code": "US.AAPL", "n": 1}])
+    await settle()
+    assert seen() == [1]
+
+    await od.close()
+    await od.connect()  # context B replaces A
+    ctx_b = od._ctx
+    assert ctx_b is not ctx_a
+    # Context A's SDK threads are still draining.
+    ctx_a._t_handler.on_recv_rsp([{"code": "US.AAPL", "n": 2}])
+    ctx_a.on_api_socket_reconnected()
+    ctx_a.on_disconnect(1, None, "late")
+    ctx_b._t_handler.on_recv_rsp([{"code": "US.MSFT", "n": 3}])
+    await settle()
+    assert seen() == [1, 3]
+    assert downs == [] and ups == []
+
+    # Same context: push read before a later disconnect is not delivered after it.
+    ctx_b._t_handler.on_recv_rsp([{"code": "US.MSFT", "n": 4}])
+    ctx_b.on_disconnect(2, None, "drop")
+    await settle()
+    assert seen() == [1, 3]
+    assert downs == [1]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_with_failed_quota_refresh_never_over_admits():
+    """R235-5: a held symbol stays counted across reconnect even when the
+    quota refresh fails; only its reconfirm is sent, never a new admission
+    into its slot."""
+    clock = Clock(1000.0)
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=1, own_used=0, total_used=0)
+    svc = await _settled_service(fake, clock=clock, quota_cap=1)
+    ws = FakeWS()
+    await svc.on_ws_connect(ws)
+    await _want(svc, ws, 1, ["AAPL"])
+    await svc.drain()
+    assert svc.admission.is_ok("AAPL")
+    fake.remain = 0
+    await _want(svc, ws, 2, ["AAPL", "MSFT"])
+    await svc.drain()
+    assert {"symbol": "MSFT", "reason": "quota"} in ws.last("assign")["rejected"]
+
+    clock.advance(300)  # MSFT's quota backoff long expired
+    fake.quota_raise = OpenDProviderError("quota unavailable")
+    fake.drop()
+    await fake.connect()
+    await svc.opend_recovered()
+    await svc.drain()
+
+    assert fake.subscribe_calls.count("US.MSFT") == 0
+    assert fake.subscribe_calls.count("US.AAPL") == 2  # reconfirm only
+    assert svc.admission.is_ok("AAPL")
+    assert svc.admission.controlled_used() <= svc.admission.ceiling()
+    last = ws.last("assign")
+    assert last["ok"] == ["AAPL"]
+    assert {"symbol": "MSFT", "reason": "quota"} in last["rejected"]
+
+
+@pytest.mark.asyncio
+async def test_failed_reconfirm_keeps_retry_exemption():
+    """R235-5: a failed reconfirm keeps its intent — after backoff it is
+    retried as a reconfirm, not rejected for quota at a truthful ceiling."""
+    clock = Clock(1000.0)
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=1, own_used=0, total_used=0)
+    svc = await _settled_service(fake, clock=clock, quota_cap=1)
+    ws = FakeWS()
+    await svc.on_ws_connect(ws)
+    await _want(svc, ws, 1, ["AAPL"])
+    await svc.drain()
+    assert svc.admission.is_ok("AAPL")
+
+    fake.remain = 0  # truthful: own_used=1, remain=0 → ceiling 1
+    fake.drop()
+    await fake.connect()
+    fake.subscribe_errors["US.AAPL"] = "provider internal failure"
+    await svc.opend_recovered()
+    await svc.drain()
+    assert fake.subscribe_calls.count("US.AAPL") == 2  # failed reconfirm
+    assert not svc.admission.is_ok("AAPL")
+
+    clock.advance(10)  # past the 5 s backoff
+    await svc.tick_unsubscribes_once()
+    await svc.drain()
+    assert fake.subscribe_calls.count("US.AAPL") == 3
+    assert svc.admission.is_ok("AAPL")
+    assert svc.admission.own_used() == 1
+
+
+@pytest.mark.asyncio
+async def test_buffered_tick_dropped_on_back_to_back_remove_readd():
+    """R235-6: want(gen=2, []) then want(gen=3, [AAPL]) with no evaluation
+    in between — the removal itself drops the buffered tick."""
+    clock = Clock(1000.0)
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS)
+    svc = await _settled_service(fake, clock=clock)
+    ws = FakeWS()
+    await svc.on_ws_connect(ws)
+    await _want(svc, ws, 1, ["AAPL"])
+    await svc.drain()
+
+    fake.push([_raw_row("US.AAPL", 123.45)])
+    await _want(svc, ws, 2, [])
+    await _want(svc, ws, 3, ["AAPL"])
+    await svc.drain()
+    assert svc.admission.is_ok("AAPL")
+    clock.advance(0.2)
+    await svc.flush_now()
+    assert ws.frames("batch") == []
+
+
+@pytest.mark.asyncio
+async def test_generic_snapshot_error_is_retryable_not_unknown():
+    """R235-7: only a definite not-found makes unknown_symbol. A generic
+    provider error in a mixed batch isolates the good code and retries the
+    failing one after backoff."""
+    clock = Clock(1000.0)
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS)
+    fake.snapshot_errors["US.MSFT"] = OpenDProviderError("provider internal failure")
+    svc = await _settled_service(fake, clock=clock)
+    ws = FakeWS()
+    await svc.on_ws_connect(ws)
+    await _want(svc, ws, 1, ["AAPL", "MSFT"])
+    await svc.drain()
+    last = ws.last("assign")
+    assert last["ok"] == ["AAPL"]
+    assert {"symbol": "MSFT", "reason": "unknown_symbol"} not in last["rejected"]
+    assert {"symbol": "MSFT", "reason": "backoff"} in last["pending"]
+
+    del fake.snapshot_errors["US.MSFT"]
+    clock.advance(500)
+    await svc.tick_unsubscribes_once()
+    await svc.drain()
+    assert sorted(ws.last("assign")["ok"]) == ["AAPL", "MSFT"]

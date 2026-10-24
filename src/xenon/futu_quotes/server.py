@@ -20,6 +20,8 @@ import asyncio
 import json
 import logging
 import time
+from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Optional
 
@@ -28,12 +30,10 @@ from xenon.futu_quotes.admission import (
     ticker_of,
 )
 from xenon.futu_quotes.opend import (
-    OpAborted,
     OpenDDownError,
     OpenDError,
     OpenDLike,
     OpenDNotFoundError,
-    OpenDProviderError,
     OpenDTransientError,
     classify_subscribe_error,
     classify_unsubscribe_error,
@@ -104,8 +104,28 @@ class Batcher:
         self.window_start = None
 
 
+@dataclass
+class _Op:
+    """One provider operation, captured at enqueue.
+
+    ``epoch`` is the OpenD session it belongs to; ``items`` are the
+    ``(symbol, op_id)`` reservations it acts on. The worker re-checks both
+    right before the SDK call and right after it returns; on mismatch the
+    result is discarded and no state is touched.
+    """
+
+    kind: str  # verify | subscribe | unsubscribe | session | quota
+    epoch: int
+    items: tuple[tuple[str, int], ...] = ()
+    done: Optional[asyncio.Future] = None
+
+
 class FutuQuotesService:
-    """Core service; WS/socket plumbing is injected for tests."""
+    """Core service; WS/socket plumbing is injected for tests.
+
+    Every provider operation (verify, subscribe, unsubscribe, session and
+    quota polls) runs on ONE worker, one at a time, in enqueue order.
+    """
 
     def __init__(
         self,
@@ -126,11 +146,13 @@ class FutuQuotesService:
         self.highwater = HighWaterMark()
 
         self.conn: Any = None
-        self._ok_set: set[str] = set()
         self._tasks: set[asyncio.Task] = set()
         self._eval_task: Optional[asyncio.Task] = None
         self._eval_again = False
         self._eval_emit_always = False
+        self._ops: deque[_Op] = deque()
+        self._worker: Optional[asyncio.Task] = None
+        self._queued_polls: dict[str, _Op] = {}
         self._flush_handle: Optional[asyncio.Handle] = None
         self._last_health: Optional[dict] = None
         self._opend_down = asyncio.Event()
@@ -150,7 +172,6 @@ class FutuQuotesService:
         # or replay judgement.
         self.batcher.clear()
         self.highwater.reset_all()
-        self._ok_set = set()
         if old is not None and old is not ws:
             try:
                 await old.close()
@@ -179,7 +200,12 @@ class FutuQuotesService:
         symbols = msg.get("symbols")
         if not isinstance(symbols, list):
             symbols = []
+        prev = set(self.admission.desired)
         self.admission.set_desired(gen, [s for s in symbols if isinstance(s, str)])
+        # A removed symbol loses its buffered quote AT the transition — a
+        # later re-add before any evaluation must not revive it.
+        for s in prev.difference(self.admission.desired):
+            self.batcher.drop(s)
         self._kick(emit_always=True)
 
     async def on_ws_close(self, ws: Any) -> None:
@@ -188,6 +214,7 @@ class FutuQuotesService:
         self.conn = None
         self.admission.gen = 0
         self.admission.release_desired()
+        self.batcher.clear()
         self._kick()
         logger.info("relay disconnected; desired set released to grace")
 
@@ -214,7 +241,7 @@ class FutuQuotesService:
     # ------------------------------------------------------------------
 
     def _on_opend_down(self) -> None:
-        """SDK disconnect callback (loop thread)."""
+        """OpenD session lost (SDK callback or a current-session op)."""
         logger.warning("OpenD connection lost")
         self.admission.mark_disconnected()
         self.batcher.clear()  # dead-session ticks must not carry over
@@ -235,7 +262,8 @@ class FutuQuotesService:
         disconnect that lands mid-recovery is not lost.
         """
         self._opend_down.clear()
-        self.admission.mark_connected()
+        self.admission.mark_connected()  # new epoch: nothing is ready yet
+        self.batcher.clear()
         await self.refresh_quota_once()
         await self.poll_session_once()
         self._kick()
@@ -262,23 +290,22 @@ class FutuQuotesService:
     async def _eval_loop(self) -> None:
         try:
             for _ in range(200):
-                res = self.admission.evaluate(emit_always=self._eval_emit_always)
+                ad = self.admission
+                res = ad.evaluate(emit_always=self._eval_emit_always)
                 self._eval_emit_always = False
-                # A symbol leaving ok loses its buffered quote NOW — waiting
-                # for the flush-time fence misses remove→re-add in one window.
-                ok_now = set(res.partition["ok"])
-                for s in self._ok_set - ok_now:
-                    self.batcher.drop(s)
-                self._ok_set = ok_now
-                if res.changed and self.conn is not None and self.admission.gen > 0:
-                    await self._send(self.admission.assign_frame(res.partition))
-                epoch = self.admission.epoch
+                # Enqueue BEFORE any await: the ops carry the epoch and
+                # reservations the evaluation was made under.
+                epoch = ad.epoch
                 if res.actions.verify:
-                    self._spawn(self._do_verify(res.actions.verify, epoch))
+                    self._enqueue(
+                        _Op("verify", epoch, tuple((s, ad.state(s).op_id) for s in res.actions.verify))
+                    )
                 for sym in res.actions.subscribe:
-                    self._spawn(self._do_subscribe(sym, epoch))
+                    self._enqueue(_Op("subscribe", epoch, ((sym, ad.state(sym).op_id),)))
                 for sym in res.actions.unsubscribe:
-                    self._spawn(self._do_unsubscribe(sym, epoch))
+                    self._enqueue(_Op("unsubscribe", epoch, ((sym, ad.state(sym).op_id),)))
+                if res.changed and self.conn is not None and ad.gen > 0:
+                    await self._send(ad.assign_frame(res.partition))
                 await self._emit_health()
                 if not res.changed and not res.actions.any() and not self._eval_again:
                     break
@@ -293,205 +320,198 @@ class FutuQuotesService:
         return t
 
     # ------------------------------------------------------------------
-    # provider actions
+    # the provider-op worker
     # ------------------------------------------------------------------
 
-    async def _do_verify(self, symbols: list[str], epoch: int) -> None:
-        codes = [self.admission.state(s).code for s in symbols]
+    def _enqueue(self, op: _Op) -> None:
+        self._ops.append(op)
+        if self._worker is None or self._worker.done():
+            self._worker = self._spawn(self._op_worker())
+
+    async def _op_worker(self) -> None:
+        while self._ops:
+            op = self._ops.popleft()
+            if self._queued_polls.get(op.kind) is op:
+                del self._queued_polls[op.kind]
+            try:
+                if op.epoch == self.admission.epoch:  # else: stale, nothing sent
+                    await _OP_HANDLERS[op.kind](self, op)
+            except Exception:
+                logger.exception("futu-quotes %s op failed", op.kind)
+                # Never leave a symbol wedged behind a dead reservation.
+                for sym, oid in op.items:
+                    self.admission.release_op(sym, oid)
+                self._kick()
+            finally:
+                if op.done is not None and not op.done.done():
+                    op.done.set_result(None)
+
+    def _stale(self, op: _Op) -> bool:
+        return op.epoch != self.admission.epoch
+
+    def _down_from(self, op: _Op) -> None:
+        """OpenDDownError from an op: only a current-session op may declare
+        the current session dead."""
+        if not self._stale(op):
+            self._on_opend_down()
+
+    async def _op_verify(self, op: _Op) -> None:
+        ad = self.admission
+        todo: list[tuple[str, int]] = []
+        for sym, oid in op.items:
+            if not ad.op_current(sym, oid, op.epoch):
+                continue
+            if ad.verify_needed(sym):
+                todo.append((sym, oid))
+            else:
+                ad.release_op(sym, oid)
+        if not todo:
+            self._kick()
+            return
+        codes = [ad.state(s).code for s, _ in todo]
         try:
             rows = await self.opend.get_market_snapshot(codes)
         except OpenDDownError:
-            self._on_opend_down()
-            if epoch == self.admission.epoch:
-                for s in symbols:
-                    self.admission.verify_result(s, "transient")
-            return
-        except OpenDTransientError:
-            if epoch == self.admission.epoch:
-                for s in symbols:
-                    self.admission.verify_result(s, "transient")
-                self._kick()
-            return
-        except OpenDError:
-            # Whole-call failure — the SDK gives no per-code attribution, so
-            # one bad code must not poison the rest: isolate per code.
-            if epoch == self.admission.epoch:
-                await self._verify_split(symbols, epoch)
-            return
-        if epoch != self.admission.epoch:
-            return  # stale-session result
-        found = {str(r.get("code")): r for r in rows if isinstance(r, dict)}
-        for s in symbols:
-            row = found.get(self.admission.state(s).code)
-            if row is None:
-                self.admission.verify_result(s, "unknown_symbol")
-            else:
-                self.admission.verify_result(s, _classify_snapshot_row(row))
-        self._kick()
-
-    async def _verify_split(self, symbols: list[str], epoch: int) -> None:
-        """A batch snapshot call failed with no per-code detail — retry each
-        code alone so a single bad code cannot reject its batch-mates."""
-        for s in symbols:
-            if epoch != self.admission.epoch:
-                return
-            code = self.admission.state(s).code
-            try:
-                rows = await self.opend.get_market_snapshot([code])
-            except OpenDDownError:
-                self._on_opend_down()
-                self.admission.verify_result(s, "transient")
-            except (OpenDNotFoundError, OpenDProviderError):
-                self.admission.verify_result(s, "unknown_symbol")
-            except OpenDError:
-                self.admission.verify_result(s, "transient")
-            else:
-                row = rows[0] if rows else None
-                self.admission.verify_result(
-                    s,
-                    _classify_snapshot_row(row) if isinstance(row, dict) else "unknown_symbol",
-                )
-            await asyncio.sleep(0)  # yield — the serialized adapter paces calls
-        self._kick()
-
-    async def _do_subscribe(self, symbol: str, epoch: int) -> None:
-        st = self.admission.state(symbol)
-        code = st.code
-
-        def still_wanted() -> bool:
-            """Re-checked under the adapter lock right before the SDK call."""
-            return (
-                epoch == self.admission.epoch
-                and symbol in self.admission.desired
-                and not st.subscribed
-                and self.admission.opend_connected
-                and self.admission.session_open
-            )
-
-        if not still_wanted():
-            st.subscribing = False
-            st.subscribing_reconfirm = False
-            self._kick()
-            return
-        try:
-            res = await self.opend.subscribe([code], pre=still_wanted)
-        except OpAborted:
-            st.subscribing = False
-            st.subscribing_reconfirm = False
-            self._kick()
-            return
-        except OpenDDownError:
-            self._on_opend_down()
-            return
-        except OpenDNotFoundError as exc:
-            if epoch != self.admission.epoch:
-                return
-            # Unknown/invalid code — never retried; lands rejected/unknown_symbol.
-            self.admission.subscribe_result(symbol, str(exc), "unknown_symbol")
-            self._kick()
+            self._down_from(op)
             return
         except OpenDError as exc:
-            if epoch != self.admission.epoch:
+            if self._stale(op):
                 return
-            self.admission.subscribe_result(symbol, str(exc), classify_subscribe_error(str(exc)))
+            if len(todo) > 1 and not isinstance(exc, OpenDTransientError):
+                # Whole-call failure with no per-code attribution: verify
+                # each code alone (queued, so other ops interleave).
+                for item in todo:
+                    self._enqueue(_Op("verify", op.epoch, (item,)))
+                return
+            # Only a definite not-found is permanent; anything else retries.
+            outcome = "unknown_symbol" if isinstance(exc, OpenDNotFoundError) else "transient"
+            for sym, oid in todo:
+                if ad.op_current(sym, oid, op.epoch):
+                    ad.verify_result(sym, outcome)
             self._kick()
             return
-        if epoch != self.admission.epoch:
-            return  # stale-session completion — never certifies the new one
-        err = res.get(code)
-        if err is None:
-            self.admission.subscribe_result(symbol, None)
+        if self._stale(op):
+            return  # stale-session result
+        found = {str(r.get("code")): r for r in rows if isinstance(r, dict)}
+        for sym, oid in todo:
+            if not ad.op_current(sym, oid, op.epoch):
+                continue
+            row = found.get(ad.state(sym).code)
+            ad.verify_result(sym, "unknown_symbol" if row is None else _classify_snapshot_row(row))
+        self._kick()
+
+    async def _op_subscribe(self, op: _Op) -> None:
+        ad = self.admission
+        ((sym, oid),) = op.items
+        if not ad.op_current(sym, oid, op.epoch):
+            return
+        if not ad.subscribe_still_valid(sym):
+            ad.release_op(sym, oid)  # declined: nothing was sent
+            self._kick()
+            return
+        code = ad.state(sym).code
+        try:
+            res = await self.opend.subscribe([code])
+        except OpenDDownError:
+            self._down_from(op)
+            return
+        except OpenDError as exc:
+            if not ad.op_current(sym, oid, op.epoch):
+                return
+            reason = "unknown_symbol" if isinstance(exc, OpenDNotFoundError) else classify_subscribe_error(str(exc))
+            ad.subscribe_result(sym, str(exc), reason)
         else:
-            self.admission.subscribe_result(symbol, err, classify_subscribe_error(err))
-        if self.admission.refresh_quota_requested:
+            if not ad.op_current(sym, oid, op.epoch):
+                return  # stale-session completion — never certifies the new one
+            err = res.get(code)
+            ad.subscribe_result(sym, err, None if err is None else classify_subscribe_error(err))
+        if ad.refresh_quota_requested:
             # Provider rejection is authoritative — re-pull quota numbers.
-            self.admission.refresh_quota_requested = False
+            ad.refresh_quota_requested = False
             self._spawn(self.refresh_quota_once())
         self._kick()
 
-    async def _do_unsubscribe(self, symbol: str, epoch: int) -> None:
-        st = self.admission.state(symbol)
-        code = st.code
-
-        def still_due() -> bool:
-            """Re-checked under the adapter lock right before the SDK call."""
-            return (
-                epoch == self.admission.epoch
-                and symbol not in self.admission.desired
-                and st.subscribed
-                and self.admission.opend_connected
-            )
-
-        if not still_due():
-            st.unsub_inflight = False
+    async def _op_unsubscribe(self, op: _Op) -> None:
+        ad = self.admission
+        ((sym, oid),) = op.items
+        if not ad.op_current(sym, oid, op.epoch):
+            return
+        if not ad.unsubscribe_still_due(sym):
+            # Re-added, renewed grace, or not held any more: nothing sent.
+            ad.release_op(sym, oid)
             self._kick()
             return
+        code = ad.state(sym).code
         try:
-            res = await self.opend.unsubscribe([code], pre=still_due)
-        except OpAborted:
-            st.unsub_inflight = False
-            self._kick()
-            return
+            res = await self.opend.unsubscribe([code])
         except OpenDDownError:
-            self._on_opend_down()
-            return
-        except OpenDNotFoundError as exc:
-            if epoch != self.admission.epoch:
-                return
-            # Code unknown to OpenD ⇒ nothing is subscribed there.
-            self.admission.unsubscribe_result(symbol, str(exc), "not_subscribed")
-            self._kick()
+            self._down_from(op)
             return
         except OpenDError as exc:
-            if epoch != self.admission.epoch:
+            if not ad.op_current(sym, oid, op.epoch):
                 return
-            self.admission.unsubscribe_result(symbol, str(exc), "provider_error")
-            self._kick()
-            return
-        if epoch != self.admission.epoch:
-            return  # stale-session completion
-        err = res.get(code)
-        kind = None if err is None else classify_unsubscribe_error(err)
-        self.admission.unsubscribe_result(symbol, err, kind)
-        if not self.admission.state(symbol).subscribed:
-            self.highwater.reset(symbol)
+            # Code unknown to OpenD ⇒ nothing is subscribed there.
+            kind = "not_subscribed" if isinstance(exc, OpenDNotFoundError) else "provider_error"
+            ad.unsubscribe_result(sym, str(exc), kind)
+        else:
+            if not ad.op_current(sym, oid, op.epoch):
+                return  # stale-session completion
+            err = res.get(code)
+            ad.unsubscribe_result(sym, err, None if err is None else classify_unsubscribe_error(err))
+        if not ad.state(sym).subscribed:
+            self.highwater.reset(sym)
         self._kick()
 
-    # ------------------------------------------------------------------
-    # periodic jobs
-    # ------------------------------------------------------------------
-
-    async def poll_session_once(self) -> None:
-        """get_global_state().market_us ∈ {MORNING, AFTERNOON} ⇒ open."""
-        epoch = self.admission.epoch
+    async def _op_session(self, op: _Op) -> None:
         try:
             gs = await self.opend.get_global_state()
             open_ = Admission.session_is_open(gs.get("market_us"))
         except OpenDDownError:
-            self._on_opend_down()
+            self._down_from(op)
             return
         except OpenDError:
             open_ = False
-        if epoch != self.admission.epoch:
+        if self._stale(op):
             return  # stale-session poll result
+        if not open_:
+            self.batcher.clear()  # session closed: nothing is ok any more
         self.admission.set_session_open(open_)
         self._kick()
 
-    async def refresh_quota_once(self) -> None:
-        epoch = self.admission.epoch
+    async def _op_quota(self, op: _Op) -> None:
         try:
             data = await self.opend.query_subscription()
         except OpenDDownError:
-            self._on_opend_down()
+            self._down_from(op)
             return
         except OpenDError:
             return
-        if epoch != self.admission.epoch:
+        if self._stale(op):
             return  # stale-session poll result
         self.admission.apply_quota_snapshot(data)
         self.admission.refresh_quota_requested = False
         await self._emit_health()
         self._kick()
+
+    # ------------------------------------------------------------------
+    # periodic jobs (enqueued on the worker; a queued poll is coalesced)
+    # ------------------------------------------------------------------
+
+    async def _poll(self, kind: str) -> None:
+        op = self._queued_polls.get(kind)
+        if op is None or op.epoch != self.admission.epoch:
+            op = _Op(kind, self.admission.epoch, done=asyncio.get_running_loop().create_future())
+            self._queued_polls[kind] = op
+            self._enqueue(op)
+        assert op.done is not None
+        await asyncio.shield(op.done)
+
+    async def poll_session_once(self) -> None:
+        """get_global_state().market_us ∈ {MORNING, AFTERNOON} ⇒ open."""
+        await self._poll("session")
+
+    async def refresh_quota_once(self) -> None:
+        await self._poll("quota")
 
     async def tick_unsubscribes_once(self) -> None:
         self._kick()
@@ -541,9 +561,7 @@ class FutuQuotesService:
         except RuntimeError:
             return
         delay = max(0.0, (self.batcher.due_at() or 0.0) - self.batcher.now())
-        self._flush_handle = loop.call_later(
-            delay, lambda: self._spawn(self.flush_now())
-        )
+        self._flush_handle = loop.call_later(delay, lambda: self._spawn(self.flush_now()))
 
     async def flush_now(self) -> None:
         """Flush the coalesce window if due (callable directly in tests)."""
@@ -578,6 +596,15 @@ class FutuQuotesService:
                 _ = t.exception() if not t.cancelled() else None
             if not done:
                 break  # everything left is parked (e.g. a deferred provider call)
+
+
+_OP_HANDLERS: dict[str, Callable[[FutuQuotesService, _Op], Any]] = {
+    "verify": FutuQuotesService._op_verify,
+    "subscribe": FutuQuotesService._op_subscribe,
+    "unsubscribe": FutuQuotesService._op_unsubscribe,
+    "session": FutuQuotesService._op_session,
+    "quota": FutuQuotesService._op_quota,
+}
 
 
 def _classify_snapshot_row(row: dict) -> str:
@@ -664,9 +691,7 @@ async def run_forever(
             ping_interval=ping_interval_s,
             ping_timeout=ping_timeout_s,
         ):
-            logger.info(
-                "futu-quotes listening on %s:%s (quota cap %s)", host, port, quota_cap
-            )
+            logger.info("futu-quotes listening on %s:%s (quota cap %s)", host, port, quota_cap)
             await asyncio.Event().wait()
     finally:
         supervisor.cancel()

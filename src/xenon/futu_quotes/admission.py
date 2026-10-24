@@ -54,18 +54,21 @@ class SymbolState:
     symbol: str
     code: str
     verify: str = "unverified"  # unverified | ok | unknown_symbol | not_supported
-    verify_inflight: bool = False
+    # At most ONE reserved provider op per symbol: None | verify | subscribe
+    # | unsubscribe. ``op_id`` identifies the reservation; a result whose id
+    # (or session epoch) no longer matches is discarded without touching
+    # state. Every epoch bump clears all reservations.
+    op: Optional[str] = None
+    op_id: int = 0
+    # Believed HELD at the provider since the last successful subscribe —
+    # counted against the ceiling until a successful (or "not subscribed")
+    # unsubscribe releases it. A disconnect never clears it.
     subscribed_at: Optional[float] = None
-    subscribing: bool = False
-    # In-flight op reservations: one outstanding provider call per symbol per
-    # kind at a time; the op's pre-check re-validates demand under the adapter
-    # lock before anything is sent.
-    unsub_inflight: bool = False
-    # Believed-owned after an OpenD reconnect: needs an idempotent reconfirm
-    # that must NOT reserve a second quota unit (the SDK restores its own subs).
-    reconfirm: bool = False
-    # The in-flight subscribe was issued as a reconfirm, not a new admission.
-    subscribing_reconfirm: bool = False
+    # Epoch in which the provider last confirmed the subscription. Only a
+    # confirmation in the CURRENT session makes the symbol ready (ok). A
+    # held-but-not-ready wanted symbol needs a reconfirm; that intent is
+    # derived from state, so it survives failed or declined attempts.
+    ready_epoch: Optional[int] = None
     rejected_reason: Optional[str] = None
     retry_at: float = 0.0
     backoff_step: int = 0
@@ -75,6 +78,7 @@ class SymbolState:
 
     @property
     def subscribed(self) -> bool:
+        """Believed held at the provider (not necessarily ready)."""
         return self.subscribed_at is not None
 
 
@@ -96,7 +100,12 @@ class EvalResult:
 
 
 class Admission:
-    """Pure admission state; the service performs the emitted actions."""
+    """Pure admission state; the service performs the emitted actions.
+
+    Every emitted action is already RESERVED on its symbol (``st.op`` /
+    ``st.op_id``) when ``evaluate`` returns, so a due op can never be
+    emitted twice.
+    """
 
     def __init__(
         self,
@@ -121,7 +130,7 @@ class Admission:
 
         self.gen = 0
         # OpenD session epoch: bumped on every disconnect and (re)connect.
-        # Provider ops and callbacks carrying an older epoch are discarded.
+        # Provider ops carrying an older epoch are discarded.
         self.epoch = 0
         self.desired: list[str] = []
         self.session_open = False
@@ -133,6 +142,7 @@ class Admission:
         self.provider_all_used: Optional[int] = None
         self.refresh_quota_requested = False
 
+        self._op_seq = 0
         self._last_key: Optional[tuple] = None
 
     # ------------------------------------------------------------------
@@ -148,7 +158,7 @@ class Admission:
 
     def set_desired(self, gen: int, symbols: list[str]) -> None:
         """Accept a ``want`` frame's set; newly unwanted symbols start the
-        unsubscribe grace clock."""
+        unsubscribe grace clock (a renewed removal restarts it)."""
         self.gen = gen
         seen: set[str] = set()
         deduped: list[str] = []
@@ -190,38 +200,33 @@ class Admission:
         """get_global_state().market_us → RTH flag; unknown ⇒ closed."""
         return str(market_us or "").upper() in _OPEN_US_STATES
 
-    def mark_disconnected(self) -> None:
+    def _bump_epoch(self) -> None:
+        """New OpenD session: every reservation belongs to the old one."""
         self.epoch += 1
+        for st in self.symbols.values():
+            st.op = None
+
+    def mark_disconnected(self) -> None:
+        self._bump_epoch()
         self.opend_connected = False
         self.session_open = False
         self.provider_own_used = None
         self.provider_remain = None
         self.provider_all_used = None
-        for st in self.symbols.values():
-            st.subscribing = False
-            st.subscribing_reconfirm = False
-            st.verify_inflight = False
-            st.unsub_inflight = False
 
     def mark_connected(self) -> None:
         """Reconnect: never assume subscriptions survived.
 
-        Wanted symbols believed subscribed become ``reconfirm``: an
-        idempotent resubscribe that does not reserve a second quota unit —
-        the provider may already count them (the SDK restores its own subs).
-        Unwanted-but-believed-subscribed symbols get an immediate
-        unsubscribe attempt; if OpenD already dropped them the
-        ``not_subscribed`` reply clears the record the same as a success.
+        Held symbols stay held (counted once) but are no longer ready: a
+        wanted one gets an idempotent reconfirm that does not reserve a
+        second quota unit; an unwanted one gets an immediate unsubscribe
+        attempt (a ``not_subscribed`` reply releases it like a success).
         """
-        self.epoch += 1
+        self._bump_epoch()
         self.opend_connected = True
+        desired = set(self.desired)
         for st in self.symbols.values():
-            if not st.subscribed:
-                continue
-            if st.symbol in self.desired:
-                st.subscribed_at = None
-                st.reconfirm = True
-            else:
+            if st.subscribed and st.symbol not in desired:
                 st.unsub_retry_at = 0.0
 
     def ceiling(self) -> int:
@@ -237,18 +242,18 @@ class Admission:
         )
 
     def own_used(self) -> int:
-        """Local believed subscription count."""
+        """Local believed-held count (ready or awaiting reconfirm)."""
         return sum(1 for st in self.symbols.values() if st.subscribed)
 
     def controlled_used(self) -> int:
-        """own_used + in-flight NEW admissions (the ≤ ceiling invariant).
+        """Held + reserved NEW admissions (the ≤ ceiling invariant).
 
-        Reconfirms are excluded: a believed-owned sub is already inside
-        ``own_used``/provider counts; charging it twice would deadlock
-        recovery at the ceiling.
+        A reconfirm is a subscribe of an already-held symbol: it is inside
+        the held count and never charged twice, and its slot is never
+        handed to a new admission while it is pending or failing.
         """
         inflight = sum(
-            1 for st in self.symbols.values() if st.subscribing and not st.subscribing_reconfirm
+            1 for st in self.symbols.values() if st.op == "subscribe" and not st.subscribed
         )
         return max(self.provider_own_used or 0, self.own_used()) + inflight
 
@@ -268,12 +273,81 @@ class Admission:
 
         Only the counts are used: ``sub_list`` is merged across all
         connections, so it cannot attribute codes to this connection. Own
-        subscription truth stays local; an unsubscribe of a code OpenD
-        already dropped just errors and is dropped after bounded retries.
+        subscription truth stays local and is released only by an
+        unsubscribe result.
         """
         self.provider_own_used = _as_int(data.get("own_used"))
         self.provider_remain = _as_int(data.get("remain"))
         self.provider_all_used = _as_int(data.get("total_used"))
+
+    # ------------------------------------------------------------------
+    # readiness, reservations and pre-checks
+    # ------------------------------------------------------------------
+
+    def is_ready(self, st: SymbolState) -> bool:
+        """Held AND confirmed in the current OpenD session."""
+        return st.subscribed and st.ready_epoch == self.epoch
+
+    def _reserve(self, st: SymbolState, kind: str) -> None:
+        self._op_seq += 1
+        st.op = kind
+        st.op_id = self._op_seq
+
+    def op_current(self, symbol: str, op_id: int, epoch: int) -> bool:
+        """Is this op still the symbol's live reservation in this session?"""
+        st = self.symbols.get(symbol)
+        return (
+            st is not None
+            and epoch == self.epoch
+            and st.op is not None
+            and st.op_id == op_id
+        )
+
+    def release_op(self, symbol: str, op_id: int) -> None:
+        """Drop a reservation whose op was declined before anything was sent."""
+        st = self.symbols.get(symbol)
+        if st is not None and st.op is not None and st.op_id == op_id:
+            st.op = None
+
+    def unsub_due_at(self, st: SymbolState) -> float:
+        """Earliest unsubscribe time from the CURRENT lifetime, grace and
+        retry deadlines (a renewed removal gets its own grace)."""
+        due = max(
+            (st.subscribed_at or 0.0) + self.min_lifetime_s,
+            (st.unwanted_since if st.unwanted_since is not None else self.now())
+            + self.unsub_grace_s,
+        )
+        if st.unsub_retry_at is not None:
+            due = max(due, st.unsub_retry_at)
+        return due
+
+    def verify_needed(self, symbol: str) -> bool:
+        st = self.state(symbol)
+        return self.opend_connected and symbol in self.desired and st.verify == "unverified"
+
+    def subscribe_still_valid(self, symbol: str) -> bool:
+        """Pre-check right before a subscribe is sent."""
+        st = self.state(symbol)
+        if not (
+            self.opend_connected
+            and self.session_open
+            and symbol in self.desired
+            and st.verify == "ok"
+            and not self.is_ready(st)
+        ):
+            return False
+        # A new admission is already counted in controlled_used().
+        return st.subscribed or self.controlled_used() <= self.ceiling()
+
+    def unsubscribe_still_due(self, symbol: str) -> bool:
+        """Pre-check right before an unsubscribe is sent."""
+        st = self.state(symbol)
+        return (
+            self.opend_connected
+            and st.subscribed
+            and symbol not in self.desired
+            and self.now() >= self.unsub_due_at(st)
+        )
 
     # ------------------------------------------------------------------
     # evaluation → partition + actions
@@ -285,18 +359,19 @@ class Admission:
         pending: list[dict] = []
         rejected: list[dict] = []
         actions = Actions()
+        desired = set(self.desired)
 
         for sym in self.desired:
             st = self.state(sym)
             if st.verify == "unverified":
                 if not self.opend_connected:
                     pending.append({"symbol": sym, "reason": "opend_down"})
-                elif st.verify_inflight:
+                elif st.op is not None:
                     pending.append({"symbol": sym, "reason": "subscribing"})
                 elif now < st.retry_at:
                     pending.append({"symbol": sym, "reason": "backoff"})
                 else:
-                    st.verify_inflight = True
+                    self._reserve(st, "verify")
                     actions.verify.append(sym)
                     pending.append({"symbol": sym, "reason": "subscribing"})
                 continue
@@ -311,9 +386,11 @@ class Admission:
                 pending.append({"symbol": sym, "reason": "opend_down"})
             elif not self.session_open:
                 pending.append({"symbol": sym, "reason": "session"})
-            elif st.subscribed:
+            elif self.is_ready(st):
                 ok.append(sym)
-            elif st.subscribing:
+            elif st.op is not None:
+                # subscribe/reconfirm in flight, or an unsubscribe that its
+                # pre-check will decline now that the symbol is wanted again
                 pending.append({"symbol": sym, "reason": "subscribing"})
             elif now < st.retry_at:
                 reason = st.rejected_reason or "backoff"
@@ -321,35 +398,27 @@ class Admission:
                     rejected.append({"symbol": sym, "reason": reason})
                 else:
                     pending.append({"symbol": sym, "reason": "backoff"})
-            elif self.controlled_used() >= self.ceiling() and not st.reconfirm:
+            elif not st.subscribed and self.controlled_used() >= self.ceiling():
                 st.rejected_reason = "quota"
                 st.retry_at = now + self._backoff(st)
                 st.backoff_step += 1
                 rejected.append({"symbol": sym, "reason": "quota"})
             else:
-                st.subscribing = True
-                st.subscribing_reconfirm = st.reconfirm
-                st.reconfirm = False
+                # New admission, or reconfirm of a held symbol (never charged
+                # a second unit).
+                self._reserve(st, "subscribe")
                 st.rejected_reason = None
                 actions.subscribe.append(sym)
                 pending.append({"symbol": sym, "reason": "subscribing"})
 
-        # Unsubscribe pass: subscribed but no longer desired. The op is
-        # RESERVED per symbol before it is emitted (unsub_inflight) so a
-        # due op can never fan out across eval passes.
+        # Unsubscribe pass: held but no longer desired.
         for st in self.symbols.values():
-            if not st.subscribed or st.symbol in self.desired or st.unsub_inflight:
+            if not st.subscribed or st.symbol in desired or st.op is not None:
                 continue
             if st.unwanted_since is None:
                 st.unwanted_since = now
-            due = max(
-                (st.subscribed_at or 0.0) + self.min_lifetime_s,
-                st.unwanted_since + self.unsub_grace_s,
-            )
-            if st.unsub_retry_at is not None:
-                due = max(due, st.unsub_retry_at)
-            if now >= due and self.opend_connected:
-                st.unsub_inflight = True
+            if self.opend_connected and now >= self.unsub_due_at(st):
+                self._reserve(st, "unsubscribe")
                 actions.unsubscribe.append(st.symbol)
 
         partition = {"ok": ok, "pending": pending, "rejected": rejected}
@@ -371,13 +440,14 @@ class Admission:
         return min(self.backoff_base_s * (2**st.backoff_step), self.backoff_cap_s)
 
     # ------------------------------------------------------------------
-    # action results
+    # action results (the service applies only current-session,
+    # current-reservation results)
     # ------------------------------------------------------------------
 
     def verify_result(self, symbol: str, outcome: str) -> None:
-        """outcome: ok | unknown | not_supported | transient."""
+        """outcome: ok | unknown_symbol | not_supported | transient."""
         st = self.state(symbol)
-        st.verify_inflight = False
+        st.op = None
         if outcome == "ok":
             st.verify = "ok"
             st.rejected_reason = None
@@ -385,21 +455,21 @@ class Admission:
             st.backoff_step = 0
         elif outcome in ("unknown_symbol", "not_supported"):
             st.verify = outcome
-        else:  # transient
+        else:  # transient / generic provider failure: retry with backoff
             st.verify = "unverified"
             st.retry_at = self.now() + self._backoff(st)
             st.backoff_step += 1
 
     def subscribe_result(self, symbol: str, err: Optional[str], reason: Optional[str] = None) -> None:
-        """Record a provider subscribe outcome. A late completion still
-        lands: the subscription is real at OpenD whether or not the symbol
-        is still wanted (assignment re-evaluation decides ``ok``). The
-        service discards stale-epoch results before reaching here."""
+        """Record a provider subscribe outcome for the current session. A
+        late success still lands: the subscription is real at OpenD whether
+        or not the symbol is still wanted. A failed reconfirm keeps the
+        symbol held (counted) and retries after backoff."""
         st = self.state(symbol)
-        st.subscribing = False
-        st.subscribing_reconfirm = False
+        st.op = None
         if err is None:
             st.subscribed_at = self.now()
+            st.ready_epoch = self.epoch
             st.rejected_reason = None
             st.retry_at = 0.0
             st.backoff_step = 0
@@ -424,15 +494,16 @@ class Admission:
     def unsubscribe_result(self, symbol: str, err: Optional[str], kind: Optional[str] = None) -> None:
         """kind: too_early | not_subscribed | provider_error.
 
-        Success — or a "was never subscribed" reply — clears the local
+        Success — or a "was never subscribed" reply — releases the held
         record. ``too_early`` retries at the 60 s mark; other errors retry
-        with bounded escalation. A failed unsubscribe never frees the local
+        with bounded escalation. A failed unsubscribe never frees the
         record: the provider may still hold and count the subscription.
         """
         st = self.state(symbol)
-        st.unsub_inflight = False
+        st.op = None
         if err is None or kind == "not_subscribed":
             st.subscribed_at = None
+            st.ready_epoch = None
             st.unsub_retry_at = None
             st.unsub_attempts = 0
             if symbol in self.desired:
@@ -449,9 +520,6 @@ class Admission:
                 st.subscribed_at + self.min_lifetime_s, now + 1.0
             )
         else:
-            # A failed unsubscribe NEVER releases the local record — the
-            # provider may still hold (and count) the subscription. Bounded
-            # backoff limits request rate while ownership stays counted.
             delay = min(
                 self.unsub_retry_s * (1 << min(st.unsub_attempts - 1, 3)),
                 self.unsub_retry_cap_s,
@@ -460,7 +528,12 @@ class Admission:
 
     def is_ok(self, symbol: str) -> bool:
         """Producer fence: is ``symbol`` in the current ok set?"""
-        return symbol in self.desired and self.state(symbol).subscribed and self.session_open and self.opend_connected
+        return (
+            self.opend_connected
+            and self.session_open
+            and symbol in self.desired
+            and self.is_ready(self.state(symbol))
+        )
 
 
 def _as_int(value: Any) -> Optional[int]:
