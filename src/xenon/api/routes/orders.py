@@ -241,18 +241,19 @@ def _futu_empty(**fields: Any) -> dict[str, Any]:
 
 
 def _futu_ledger_payload(request_scope: AccountScope, *, limit: int) -> dict[str, Any]:
-    """FUTU orders for the configured trade scope (`FUTU_TRADE_ACC_ID` +
-    `FUTU_TRADE_ENV`), from Postgres only, so it keeps serving while OpenD is
-    offline. Served only when the request scope (the tab's account) equals the
+    """FUTU orders for the configured account of the request scope's env
+    (`?account_env=`, §11), from Postgres only, so it keeps serving while
+    OpenD is offline. Served only when the request scope equals that
     configured scope exactly; otherwise empty lists with
     `scope_reason: "scope_mismatch"` and both scopes, so one account's orders
-    never show under another account. No configured scope → empty lists plus
-    the reason; there is no latest-account fallback."""
+    never show under another account. An env without an account → empty
+    lists with `scope_reason: "not_configured"`; there is no latest-account
+    fallback. Every empty answer names the request env (`scope_env`)."""
     from xenon.execution import futu_scope
 
-    scope, reason = futu_scope.configured_scope()
+    scope, reason = futu_scope.configured_scope(request_scope.account_env)
     if scope is None:
-        return _futu_empty(scope_reason=reason)
+        return _futu_empty(scope_reason=reason, scope_env=request_scope.account_env)
     if (request_scope.broker, request_scope.account_env, request_scope.broker_account) != (
         scope.broker,
         scope.account_env,
@@ -260,6 +261,7 @@ def _futu_ledger_payload(request_scope: AccountScope, *, limit: int) -> dict[str
     ):
         return _futu_empty(
             scope_reason="scope_mismatch",
+            scope_env=request_scope.account_env,
             request_scope=_scope_fields(request_scope),
             configured_scope=_scope_fields(scope),
         )

@@ -296,7 +296,11 @@ async def _futu_refresh_db_first(scope) -> None:
 
     _FUTU_INCEPTION = _date(2024, 1, 1)
 
-    client = futu_routes._get_futu_client()
+    from xenon.api.guards import futu_not_configured
+
+    if futu_not_configured(scope):
+        return  # that env has no Futu account: nothing to sync
+    client = futu_routes._get_futu_client(scope.account_env)
 
     def _connect() -> bool:
         if not client.is_connected():
@@ -331,9 +335,9 @@ async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
 
     IB: subprocess pull (auto-allocated clientId 20-49, gateway auto-restart on
     ECONNREFUSED), gated on IB mode verification.
-    FUTU: one observation pass (run or joined) for the configured scope when
-    the request scope matches it, then the ledger payload (empty with
-    `scope_mismatch` otherwise). Reads only; the GET read path stays
+    FUTU: one observation pass (run or joined) of the request scope's own
+    loop (`?account_env=`, §11), then the ledger payload (empty with
+    `scope_reason` when that scope has no loop or no account). Reads only; the GET read path stays
     Postgres-only.
     """
     from xenon.api import server
@@ -356,11 +360,12 @@ async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
 
     if scope.broker == "FUTU":
         # The FUTU read path is the observation ledger, so refresh runs (or
-        # joins) one observation pass of the configured scope, only when the
-        # request scope is exactly that scope. History sync (futu_orders /
+        # joins) one pass of the request scope's own loop only; another
+        # scope's pass is never run or waited for. History sync (futu_orders /
         # futu_trades) stays separate (nightly loop, POST /blotter).
-        loop = getattr(request.app.state, "futu_observation_loop", None)
-        if loop is not None and loop.scope == scope:
+        loops = getattr(request.app.state, "futu_observation_loops", None)
+        loop = loops.loop_for(scope) if loops is not None else None
+        if loop is not None:
             try:
                 # Bounded wait (the web client times out first); the pass
                 # keeps running and the next read sees its result.

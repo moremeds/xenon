@@ -241,8 +241,9 @@ def test_futu_scope_rejects_order_as_READ_ONLY_BROKER(client, monkeypatch):
             "client_attempt_id": "futu-readonly-1",
         },
     )
-    assert resp.status_code == 403
-    assert resp.json()["reason_code"] == "READ_ONLY_BROKER"
+    # §11 A3: a FUTU mutation without ?account_env= is refused before anything else.
+    assert resp.status_code == 400
+    assert resp.json()["reason_code"] == "FUTU_SCOPE_REQUIRED"
 
 
 def test_futu_scope_rejects_before_ib_mode_verification(client, monkeypatch):
@@ -261,8 +262,8 @@ def test_futu_scope_rejects_before_ib_mode_verification(client, monkeypatch):
             "client_attempt_id": "futu-readonly-2",
         },
     )
-    assert resp.status_code == 403
-    assert resp.json()["reason_code"] == "READ_ONLY_BROKER"
+    assert resp.status_code == 400
+    assert resp.json()["reason_code"] == "FUTU_SCOPE_REQUIRED"
 
 
 def test_fresh_token_reaches_idempotency_layer(client):

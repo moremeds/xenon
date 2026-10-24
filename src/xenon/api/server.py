@@ -34,6 +34,7 @@ from xenon.api.auth import (
     validate_auth_config,
 )
 from xenon.api.guards import (
+    FutuScopeRefused,
     ReadOnlyDenied,
     is_read_only,
     read_only_403,
@@ -412,17 +413,30 @@ def _maybe_start_futu_history_loop() -> None:
 
 
 def _maybe_start_futu_observation_loop(app: FastAPI) -> None:
-    """Start the Futu observation loop; never blocks or fails boot."""
+    """Start the Futu observation set (one loop per scope); never blocks or fails boot."""
     from xenon.api.services import futu_observation
 
     try:
-        loop = futu_observation.start_observation_loop(
+        loops = futu_observation.start_observation_loops(
             resolve_meta=futu_observation.make_ib_meta_resolver(asyncio.get_running_loop(), lambda: ib_pool)
         )
     except Exception:  # noqa: BLE001
-        logger.exception("futu observation loop failed to start")
-        loop = None
-    app.state.futu_observation_loop = loop
+        logger.exception("futu observation loops failed to start")
+        loops = None
+    app.state.futu_observation_loops = loops
+
+
+def _maybe_start_futu_order_worker(app: FastAPI) -> None:
+    """Create the Futu order worker (X3c); never blocks or fails boot. It opens
+    its own trade context on the first job, not here."""
+    from xenon.api.futu_order_worker import start_futu_order_worker
+
+    try:
+        worker = start_futu_order_worker()
+    except Exception:  # noqa: BLE001
+        logger.exception("futu order worker failed to start")
+        worker = None
+    app.state.futu_order_worker = worker
 
 
 async def _run_fills_replay_on_boot() -> None:
@@ -650,10 +664,16 @@ async def lifespan(app: FastAPI):
     # set XENON_FUTU_HISTORY_LOOP=0 to suppress.
     _maybe_start_futu_history_loop()
 
-    # Futu observation loop (X3b): every 60 s, read positions + orders of the
-    # configured Futu trade scope and mirror them into Postgres. Reads only;
-    # skipped under XENON_READ_ONLY=1 or without FUTU_TRADE_ACC_ID/ENV.
+    # Futu observation (X3b, §11): one loop per scope (configured SIMULATE /
+    # REAL accounts plus stored scopes with unresolved orders); every 60 s it
+    # reads positions + orders and mirrors them into Postgres. Reads only;
+    # skipped under XENON_READ_ONLY=1.
     _maybe_start_futu_observation_loop(app)
+
+    # Futu order worker (X3c): one worker thread with its own trade context,
+    # separate from the IB order owner. Skipped under XENON_READ_ONLY=1,
+    # without a configured Futu scope or with XENON_FUTU_TRADING off.
+    _maybe_start_futu_order_worker(app)
 
     # Wizard Risk Alert (spec §2.9). Starts in read-only sessions too: it
     # evaluates there but never writes.
@@ -703,14 +723,20 @@ async def lifespan(app: FastAPI):
                 _cancel_task(getattr(app.state, "futu_history_loop_task", None)),
                 _SHUTDOWN_STEP_S["futu_loop"],
             )
-            observation_loop = getattr(app.state, "futu_observation_loop", None)
-            if observation_loop is not None:
+            observation_loops = getattr(app.state, "futu_observation_loops", None)
+            if observation_loops is not None:
                 await _bounded_cleanup(
-                    "futu observation loop", observation_loop.stop(), _SHUTDOWN_STEP_S["futu_observation"]
+                    "futu observation loops", observation_loops.stop(), _SHUTDOWN_STEP_S["futu_observation"]
                 )
-            if futu_routes._futu_client is not None:
+            futu_order_worker = getattr(app.state, "futu_order_worker", None)
+            if futu_order_worker is not None:
+                await _bounded_cleanup("futu order worker", futu_order_worker.stop(), _SHUTDOWN_STEP_S["futu_orders"])
+            futu_clients = futu_routes.display_clients()
+            if futu_clients:
                 await _bounded_cleanup(
-                    "FutuClient disconnect", asyncio.to_thread(futu_routes._futu_client.disconnect), _SHUTDOWN_STEP_S["futu"]
+                    "FutuClient disconnect",
+                    asyncio.to_thread(lambda: [c.disconnect() for c in futu_clients]),
+                    _SHUTDOWN_STEP_S["futu"],
                 )
             await _bounded_cleanup("engine dispose", dispose_engine(), _SHUTDOWN_STEP_S["engine"])
         logger.info("Xenon API shut down")
@@ -722,6 +748,11 @@ app = FastAPI(title="Xenon API", version="1.0.0", lifespan=lifespan)
 @app.exception_handler(ReadOnlyDenied)
 async def _read_only_denied_handler(request: Request, exc: ReadOnlyDenied):
     return read_only_403()
+
+
+@app.exception_handler(FutuScopeRefused)
+async def _futu_scope_refused_handler(request: Request, exc: FutuScopeRefused):
+    return exc.response()
 
 
 app.include_router(historical_router)
@@ -855,6 +886,7 @@ _SHUTDOWN_STEP_S = {
     "wizard": 1,
     "futu_loop": 1,
     "futu_observation": 1,
+    "futu_orders": 1,
     "futu": 1,
     "engine": 2,
 }

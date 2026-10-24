@@ -26,12 +26,15 @@ logger = logging.getLogger("xenon.api")
 # Futu singleton — lazy-initialized on first /futu/sync call so the server
 # boots cleanly even when OpenD is not running. Guarded by an asyncio lock
 # (singleflight) so concurrent HTTP requests collapse to one OpenD roundtrip.
+# `_futu_client` is the legacy client (no Futu account configured at all);
+# `_futu_clients` holds one display client per configured env (§11).
 _futu_client: Optional[FutuClient] = None
+_futu_clients: dict[str, FutuClient] = {}
 _futu_lock: Optional[asyncio.Lock] = None
-# `None` sentinel (not 0.0) so the first-call cooldown check does not fire.
-# time.monotonic() returns small values near process start, and `now - 0.0`
-# would look "recently synced" and serve stale cache instead of a real fetch.
-_futu_last_sync_monotonic: Optional[float] = None
+# Last successful sync per account env. A missing key (not 0.0) means never
+# synced this process: time.monotonic() is small near process start, and
+# `now - 0.0` would look "recently synced" and serve stale cache.
+_futu_last_sync: dict[str, float] = {}
 FUTU_COOLDOWN_S = 10
 # Hard bound on OpenD calls — matches the 15s bound in _futu_refresh_db_first.
 # A port-open but handshaking-hung OpenD must fail the route, not wedge it.
@@ -54,27 +57,51 @@ def _get_futu_lock() -> asyncio.Lock:
     return _futu_lock
 
 
-def _get_futu_client() -> FutuClient:
-    """Lazy-init the shared FutuClient singleton.
+def _new_client(scope: Optional[AccountScope]) -> FutuClient:
+    from xenon.execution import futu_scope
 
-    With a configured trade scope (`FUTU_TRADE_ACC_ID` + `FUTU_TRADE_ENV`)
-    the display client selects exactly that account and environment, so
-    display and trade use one Futu environment. `FUTU_TRD_ENV` (first account
-    of that env) applies only when no scope is configured."""
+    return FutuClient(
+        host=os.environ.get("FUTU_OPEND_HOST", "127.0.0.1"),
+        port=int(os.environ.get("FUTU_OPEND_PORT", "11111")),
+        security_firm=os.environ.get("FUTU_SECURITY_FIRM", "FUTUSECURITIES"),
+        trd_env=futu_scope.trd_env_for(scope) if scope else os.environ.get("FUTU_TRD_ENV", "REAL"),
+        filter_trading_market=os.environ.get("FUTU_MARKET", "US"),
+        acc_id=int(scope.broker_account) if scope else None,
+    )
+
+
+def _get_futu_client(account_env: Optional[str] = None) -> FutuClient:
+    """Lazy-init the display FutuClient of one env.
+
+    With a configured account for that env (`FUTU_TRADE_ACC_ID_SIMULATE` /
+    `_REAL`; default env when None) the client selects exactly that account
+    and environment. Only when that env has no account does the legacy
+    client apply (`FUTU_TRD_ENV`, first account of that env)."""
     global _futu_client
-    if _futu_client is None:
-        from xenon.execution import futu_scope
+    from xenon.execution import futu_scope
 
-        scope, _ = futu_scope.configured_scope()
-        _futu_client = FutuClient(
-            host=os.environ.get("FUTU_OPEND_HOST", "127.0.0.1"),
-            port=int(os.environ.get("FUTU_OPEND_PORT", "11111")),
-            security_firm=os.environ.get("FUTU_SECURITY_FIRM", "FUTUSECURITIES"),
-            trd_env=futu_scope.trd_env_for(scope) if scope else os.environ.get("FUTU_TRD_ENV", "REAL"),
-            filter_trading_market=os.environ.get("FUTU_MARKET", "US"),
-            acc_id=int(scope.broker_account) if scope else None,
-        )
+    scope, _ = futu_scope.configured_scope(account_env or futu_scope.default_read_env())
+    if scope is not None:
+        client = _futu_clients.get(scope.account_env)
+        if client is None:
+            client = _futu_clients[scope.account_env] = _new_client(scope)
+        return client
+    if _futu_client is None:
+        _futu_client = _new_client(None)
     return _futu_client
+
+
+def _existing_client(account_env: str) -> Optional[FutuClient]:
+    from xenon.execution import futu_scope
+
+    if futu_scope.configured_scope(account_env)[0] is not None:
+        return _futu_clients.get(account_env)
+    return _futu_client
+
+
+def display_clients() -> list[FutuClient]:
+    """Every display client created so far (for shutdown and health)."""
+    return [c for c in (_futu_client, *_futu_clients.values()) if c is not None]
 
 
 def _futu_fetch_portfolio_blocking(client: FutuClient) -> dict:
@@ -180,15 +207,6 @@ def _scope_fields(scope: AccountScope) -> dict:
     return {"broker": scope.broker, "accountEnv": scope.account_env, "brokerAccount": scope.broker_account}
 
 
-def _selected_scope(client: Optional[FutuClient]) -> Optional[AccountScope]:
-    """The Futu display scope: the configured trade scope (the same one
-    `GET /futu/portfolio` reads), else the client's own matched account."""
-    from xenon.execution import futu_scope
-
-    configured, _ = futu_scope.configured_scope()
-    return configured if configured is not None else client_scope(client)
-
-
 def _sync_scope_mismatch(selected: AccountScope, matched: Optional[AccountScope]) -> dict:
     """`/futu/sync` answer when the client's account is not the selected
     scope: no payload of another account or environment, nothing stored."""
@@ -242,17 +260,16 @@ def _persist_display_snapshot(client: FutuClient, result: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _futu_in_cooldown() -> bool:
-    """True if the last successful sync was less than FUTU_COOLDOWN_S ago.
-
-    Uses a None sentinel for "never synced this process" so the first call
-    after startup always proceeds to a real fetch.
-    """
-    if _futu_last_sync_monotonic is None:
+def _futu_in_cooldown(account_env: str) -> bool:
+    """True if the last successful sync of `account_env` was less than
+    FUTU_COOLDOWN_S ago. Never synced this process → False, so the first call
+    after startup always proceeds to a real fetch."""
+    last = _futu_last_sync.get(account_env)
+    if last is None:
         return False
     import time as _time
 
-    return _time.monotonic() - _futu_last_sync_monotonic < FUTU_COOLDOWN_S
+    return _time.monotonic() - last < FUTU_COOLDOWN_S
 
 
 def _maybe_preserve_partial_failure(new_result: dict, scope: Optional[AccountScope]) -> Optional[dict]:
@@ -289,7 +306,7 @@ def _maybe_preserve_partial_failure(new_result: dict, scope: Optional[AccountSco
 
 
 @router.post("/futu/sync")
-async def futu_sync():
+async def futu_sync(request: Request):
     """Force-fetch Futu positions + account, store a FUTU display snapshot in Postgres.
 
     Patterns:
@@ -307,16 +324,35 @@ async def futu_sync():
       client's RLock; a timeout also resets the client via ``disconnect()``.
     """
     from xenon.api import server
+    from xenon.api.guards import futu_not_configured, futu_request_scope
+    from xenon.execution import futu_scope
 
-    global _futu_last_sync_monotonic, _futu_sync_future
+    global _futu_sync_future
     import time as _time
+
+    # The request scope (`?account_env=`, §11 A3). An env without an account
+    # (while another env has one) serves and stores nothing.
+    requested = futu_request_scope(request)
+    env = requested.account_env
+    if futu_not_configured(requested) and futu_scope.configured_scopes():
+        return {**_FUTU_NEVER_SYNCED, "code": "not_configured", "scope": _scope_fields(requested)}
+
+    def _expected(client: Optional[FutuClient]) -> Optional[AccountScope]:
+        """The scope this sync may serve and store: the request scope, or,
+        with no Futu account configured at all, the client's matched account
+        when it is of the requested env."""
+        if not futu_not_configured(requested):
+            return requested
+        matched = client_scope(client)
+        return matched if matched is not None and matched.account_env == env else None
 
     lock = _get_futu_lock()
 
     # Early cooldown check — avoids lock contention when cache is fresh.
-    # Serves only the connected client's own scope.
-    if _futu_in_cooldown():
-        matched, selected = client_scope(_futu_client), _selected_scope(_futu_client)
+    # Serves only the request scope.
+    if _futu_in_cooldown(env):
+        existing = _existing_client(env)
+        matched, selected = client_scope(existing), _expected(existing)
         if selected is not None and matched is not None and matched != selected:
             return _sync_scope_mismatch(selected, matched)
         cached = await asyncio.to_thread(latest_display_snapshot, selected) if selected is not None else None
@@ -334,8 +370,9 @@ async def futu_sync():
     async with lock:
         # Re-check inside lock — race guard so two tabs inside the lock
         # window piggyback on the same result.
-        if _futu_in_cooldown():
-            matched, selected = client_scope(_futu_client), _selected_scope(_futu_client)
+        if _futu_in_cooldown(env):
+            existing = _existing_client(env)
+            matched, selected = client_scope(existing), _expected(existing)
             if selected is not None and matched is not None and matched != selected:
                 return _sync_scope_mismatch(selected, matched)
             cached = await asyncio.to_thread(latest_display_snapshot, selected) if selected is not None else None
@@ -348,7 +385,7 @@ async def futu_sync():
                 status_code=503, detail="Futu sync already in flight — retry shortly"
             )
 
-        client = _get_futu_client()
+        client = _get_futu_client(env)
         fetch = _futu_sync_executor.submit(_futu_fetch_portfolio_blocking, client)
         _futu_sync_future = fetch
         try:
@@ -392,9 +429,9 @@ async def futu_sync():
 
         # The fetched account must be the selected scope before anything is
         # served, preserved or stored.
-        matched, selected = client_scope(client), _selected_scope(client)
-        if selected is not None and matched != selected:
-            return _sync_scope_mismatch(selected, matched)
+        matched, selected = client_scope(client), _expected(client)
+        if selected is None or matched != selected:
+            return _sync_scope_mismatch(selected or requested, matched)
 
         # Partial-failure guard: if this snapshot looks worse than the
         # cache, keep the cache and return it with a warning tag.
@@ -410,7 +447,7 @@ async def futu_sync():
         except Exception as exc:  # noqa: BLE001 — the fetch itself succeeded
             logger.warning("Futu display snapshot not stored: %s", exc)
             result = {**result, "warnings": list(result.get("warnings") or []) + ["display_snapshot_not_stored"]}
-        _futu_last_sync_monotonic = _time.monotonic()
+        _futu_last_sync[env] = _time.monotonic()
 
         # Persist FUTU NAV to xenon.nav_history (spec §10). Best-effort —
         # a persistence failure must NOT mask a successful OpenD fetch.
@@ -452,19 +489,22 @@ _FUTU_NEVER_SYNCED = {
 async def futu_portfolio(request: Request):
     """Read the newest Futu display snapshot of the request scope from Postgres.
 
-    The scope is the FUTU read scope (`guards.get_broker_scope`: the connected
-    client's matched account, else the last-synced scope). Does not hit
-    OpenD. Returns HTTP 200 with `{ok:false, code:"never_synced"}` when that
-    scope (or no scope) has no snapshot, and `code:"scope_mismatch"` when only
-    other Futu scopes have one; another account's row is never served.
+    The scope is the FUTU request scope (`guards.futu_request_scope`,
+    `?account_env=`). Does not hit OpenD. Returns HTTP 200 with
+    `{ok:false, code:"not_configured"}` when that env has no account,
+    `code:"never_synced"` when the scope has no snapshot, and
+    `code:"scope_mismatch"` when only other Futu scopes have one; another
+    account's row is never served.
     Clients that need fresh data call `POST /futu/sync`.
     """
-    from xenon.api.guards import get_broker_scope
+    from xenon.api.guards import futu_not_configured, futu_request_scope
 
     try:
-        scope = get_broker_scope(request, "FUTU")
+        scope = futu_request_scope(request)
     except HTTPException:
         return dict(_FUTU_NEVER_SYNCED)
+    if futu_not_configured(scope):
+        return {**_FUTU_NEVER_SYNCED, "code": "not_configured", "scope": _scope_fields(scope)}
     # Off the event loop: a slow Postgres must not stall every API request.
     cached = await asyncio.to_thread(latest_display_snapshot, scope)
     if cached is None:

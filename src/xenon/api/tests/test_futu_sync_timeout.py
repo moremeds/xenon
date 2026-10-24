@@ -17,22 +17,34 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from types import SimpleNamespace
+
 from fastapi import HTTPException
 
 from xenon.api import server
 from xenon.clients.futu_exceptions import FutuConnectionError
 from xenon.api.routes import futu as futu_routes
 
+_REQ = SimpleNamespace(query_params={})  # no ?account_env=: the default read env
+
 
 @pytest.fixture()
 def _futu_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(futu_routes, "_futu_last_sync_monotonic", None)
+    monkeypatch.setattr(futu_routes, "_futu_last_sync", {})
     monkeypatch.setattr(futu_routes, "_futu_client", None)
     monkeypatch.setattr(futu_routes, "_futu_lock", None)
     monkeypatch.setattr(futu_routes, "_futu_sync_future", None)
     # Small bound keeps the suite fast; production default stays 15s.
     monkeypatch.setattr(futu_routes, "FUTU_SYNC_TIMEOUT_S", 0.25)
+    # The fakes carry no account: pin the request scope and the client's
+    # matched scope to one scope, so these tests exercise only the timeouts.
+    from xenon.api import guards
+    from xenon.execution.account_scope import AccountScope
+
+    scope = AccountScope(broker="FUTU", account_env="live", broker_account="281756479345015383")
+    monkeypatch.setattr(guards, "futu_request_scope", lambda request: scope)
+    monkeypatch.setattr(futu_routes, "client_scope", lambda client: scope)
     # No NAV persistence — a leftover lifespan engine must not make the
     # success-path test reach Postgres.
     monkeypatch.delattr(server.app.state, "db_engine", raising=False)
@@ -72,12 +84,12 @@ async def test_futu_sync_hung_connect_returns_503_fast(_futu_state, monkeypatch)
     fake = MagicMock()
     fake.is_connected.return_value = False
     fake.connect.side_effect = _hang_until(release)
-    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: fake)
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda *_a: fake)
 
     try:
         t0 = time.monotonic()
         with pytest.raises(HTTPException) as excinfo:
-            await futu_routes.futu_sync()
+            await futu_routes.futu_sync(_REQ)
         elapsed = time.monotonic() - t0
         assert excinfo.value.status_code == 503
         # Bounded — pre-fix this awaited the fake's full 30s block.
@@ -86,7 +98,7 @@ async def test_futu_sync_hung_connect_returns_503_fast(_futu_state, monkeypatch)
         # The singleflight lock was released — a second call is not queued
         # behind the still-hung worker thread.
         with pytest.raises(HTTPException) as excinfo2:
-            await futu_routes.futu_sync()
+            await futu_routes.futu_sync(_REQ)
         assert excinfo2.value.status_code == 503
     finally:
         release.set()
@@ -98,12 +110,12 @@ async def test_futu_sync_hung_fetch_returns_503_fast(_futu_state, monkeypatch) -
     fake = MagicMock()
     fake.is_connected.return_value = True
     fake.fetch_portfolio.side_effect = _hang_until(release)
-    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: fake)
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda *_a: fake)
 
     try:
         t0 = time.monotonic()
         with pytest.raises(HTTPException) as excinfo:
-            await futu_routes.futu_sync()
+            await futu_routes.futu_sync(_REQ)
         elapsed = time.monotonic() - t0
         assert excinfo.value.status_code == 503
         assert elapsed < 5
@@ -118,11 +130,11 @@ async def test_futu_sync_503_does_not_poison_next_success(_futu_state, monkeypat
     hung = MagicMock()
     hung.is_connected.return_value = True
     hung.fetch_portfolio.side_effect = _hang_until(release)
-    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: hung)
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda *_a: hung)
 
     try:
         with pytest.raises(HTTPException) as excinfo:
-            await futu_routes.futu_sync()
+            await futu_routes.futu_sync(_REQ)
         assert excinfo.value.status_code == 503
     finally:
         release.set()
@@ -142,8 +154,8 @@ async def test_futu_sync_503_does_not_poison_next_success(_futu_state, monkeypat
         "warnings": [],
         "account_summary": None,
     }
-    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: ok)
-    body = await futu_routes.futu_sync()
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda *_a: ok)
+    body = await futu_routes.futu_sync(_REQ)
     assert body["ok"] is True
     assert body["count"] == 0
 
@@ -210,7 +222,7 @@ async def test_timeout_cleanup_off_loop_no_extra_worker_then_recovers(
     must not stall the event loop, no second worker starts while fetch or
     cleanup is still alive, and the endpoint recovers once both finish."""
     fake = _HungClient()
-    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: fake)
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda *_a: fake)
 
     heartbeat = {"ticks": 0, "stop": False}
 
@@ -225,7 +237,7 @@ async def test_timeout_cleanup_off_loop_no_extra_worker_then_recovers(
         # disconnect() blocks for seconds — it runs on a daemon thread.
         t0 = time.monotonic()
         with pytest.raises(HTTPException) as excinfo:
-            await futu_routes.futu_sync()
+            await futu_routes.futu_sync(_REQ)
         assert excinfo.value.status_code == 503
         assert time.monotonic() - t0 < 2
         assert fake.fetch_calls == 1
@@ -240,7 +252,7 @@ async def test_timeout_cleanup_off_loop_no_extra_worker_then_recovers(
         # (b) fetch and cleanup both still blocked → immediate 503, no worker.
         t0 = time.monotonic()
         with pytest.raises(HTTPException) as excinfo2:
-            await futu_routes.futu_sync()
+            await futu_routes.futu_sync(_REQ)
         assert excinfo2.value.status_code == 503
         assert time.monotonic() - t0 < 0.25
         assert fake.fetch_calls == 1
@@ -250,7 +262,7 @@ async def test_timeout_cleanup_off_loop_no_extra_worker_then_recovers(
         # still blocked → still 503, still no worker.
         fake.release_fetch.set()
         with pytest.raises(HTTPException) as excinfo3:
-            await futu_routes.futu_sync()
+            await futu_routes.futu_sync(_REQ)
         assert excinfo3.value.status_code == 503
         assert fake.fetch_calls == 1
         assert fake.connect_calls == 0
@@ -262,7 +274,7 @@ async def test_timeout_cleanup_off_loop_no_extra_worker_then_recovers(
     await _await_worker_done()
 
     # (c) fetch + cleanup both finished → next request reconnects + succeeds.
-    body = await futu_routes.futu_sync()
+    body = await futu_routes.futu_sync(_REQ)
     assert body["ok"] is True
     assert fake.connect_calls == 1
     assert fake.fetch_calls == 2
@@ -274,7 +286,7 @@ async def test_cleanup_thread_spawn_failure_still_recovers(_futu_state, monkeypa
     new thread), the published marker must still complete when the fetch
     exits — the timeout response stays a normal 503, never a 500."""
     fake = _HungClient()
-    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: fake)
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda *_a: fake)
 
     real_start = threading.Thread.start
 
@@ -288,7 +300,7 @@ async def test_cleanup_thread_spawn_failure_still_recovers(_futu_state, monkeypa
     try:
         t0 = time.monotonic()
         with pytest.raises(HTTPException) as excinfo:
-            await futu_routes.futu_sync()
+            await futu_routes.futu_sync(_REQ)
         # Normal timeout 503 — the spawn failure must not escape as a 500.
         assert excinfo.value.status_code == 503
         assert time.monotonic() - t0 < 2
@@ -298,7 +310,7 @@ async def test_cleanup_thread_spawn_failure_still_recovers(_futu_state, monkeypa
 
         # Fetch still blocked → still 503, no new worker.
         with pytest.raises(HTTPException) as excinfo2:
-            await futu_routes.futu_sync()
+            await futu_routes.futu_sync(_REQ)
         assert excinfo2.value.status_code == 503
         assert fake.fetch_calls == 1
     finally:
@@ -307,7 +319,7 @@ async def test_cleanup_thread_spawn_failure_still_recovers(_futu_state, monkeypa
 
     # Marker completes via the fetch done-callback — endpoint unsticks.
     await _await_worker_done()
-    body = await futu_routes.futu_sync()
+    body = await futu_routes.futu_sync(_REQ)
     assert body["ok"] is True
     assert fake.fetch_calls == 2
     assert fake.disconnect_calls == 0

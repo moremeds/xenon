@@ -205,21 +205,7 @@ class OrderOwner:
         self._live.add(inv)
         fut = asyncio.ensure_future(self._pool.run_sync(ORDERS_ROLE, self._job, inv, core, settle))
         fut.add_done_callback(lambda _f: self._live.discard(inv))
-        try:
-            done, _ = await asyncio.wait({fut}, timeout=timeout)
-        except asyncio.CancelledError:
-            if inv.abandon():
-                _settle(settle, _not_sent("Request cancelled before the order action started; nothing was sent"))
-            raise
-        if fut in done and not fut.cancelled() and fut.exception() is None and fut.result() is not None:
-            return fut.result()
-        if inv.abandon():
-            reply = _not_sent("Order action did not start before the deadline; nothing was sent")
-            _settle(settle, reply)
-            return reply
-        return _unconfirmed(
-            "Order action started but its outcome is not confirmed yet; check working orders. Do not resubmit."
-        )
+        return await await_invocation(inv, fut, timeout=timeout, settle=settle)
 
     # -- worker side (orders executor thread) ----------------------------------
 
@@ -230,13 +216,7 @@ class OrderOwner:
             reply = self._execute(inv, core)
         except BaseException:  # pragma: no cover — _execute never raises
             reply = _unconfirmed("Order action crashed") if inv.sent else _not_sent("Order action crashed")
-        if inv.sent and reply.get("status") != "ok" and reply.get("amend_outcome") in (None, "not_sent"):
-            # Possibly transmitted and nothing proves it was not applied: only
-            # an explicit IB reject (amend_outcome "rejected") keeps it terminal.
-            reply = {**reply, "amend_outcome": "unconfirmed"}
-        inv.finish()
-        _settle(settle, reply)
-        return reply
+        return finish_job(inv, reply, settle)
 
     def _execute(self, inv: Invocation, core: Callable[[Any], dict]) -> dict:
         if self._halt is not None:
@@ -360,6 +340,42 @@ class OrderOwner:
                     await asyncio.sleep(delay)
         finally:
             self._recovering = False
+
+
+async def await_invocation(
+    inv: Invocation, fut: asyncio.Future, *, timeout: float, settle: Optional[Callable[[dict], None]]
+) -> dict:
+    """Request side shared by the IB owner and the Futu order worker: wait up
+    to ``timeout`` for the job future (its result is None when the job was
+    abandoned before it started). Queued at the deadline or on caller cancel
+    → abandoned and settled here as not sent; started → ``unconfirmed`` and
+    the worker settles."""
+    try:
+        done, _ = await asyncio.wait({fut}, timeout=timeout)
+    except asyncio.CancelledError:
+        if inv.abandon():
+            _settle(settle, _not_sent("Request cancelled before the order action started; nothing was sent"))
+        raise
+    if fut in done and not fut.cancelled() and fut.exception() is None and fut.result() is not None:
+        return fut.result()
+    if inv.abandon():
+        reply = _not_sent("Order action did not start before the deadline; nothing was sent")
+        _settle(settle, reply)
+        return reply
+    return _unconfirmed(
+        "Order action started but its outcome is not confirmed yet; check working orders. Do not resubmit."
+    )
+
+
+def finish_job(inv: Invocation, reply: dict, settle: Optional[Callable[[dict], None]]) -> dict:
+    """Worker side of a started job: settle exactly once and return the reply."""
+    if inv.sent and reply.get("status") != "ok" and reply.get("amend_outcome") in (None, "not_sent"):
+        # Possibly transmitted and nothing proves it was not applied: only
+        # an explicit broker reject (amend_outcome "rejected") keeps it terminal.
+        reply = {**reply, "amend_outcome": "unconfirmed"}
+    inv.finish()
+    _settle(settle, reply)
+    return reply
 
 
 def _settle(settle: Optional[Callable[[dict], None]], reply: dict) -> None:

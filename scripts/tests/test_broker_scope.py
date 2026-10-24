@@ -5,16 +5,15 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
-from fastapi import HTTPException
 
 import xenon.api.guards as guards
 from xenon.execution.account_scope import AccountScope
 
 
 class _FakeRequest:
-    def __init__(self):
+    def __init__(self, account_env=None):
         self.app = SimpleNamespace(state=SimpleNamespace())
+        self.query_params = {} if account_env is None else {"account_env": account_env}
 
 
 def _patch_futu_client(monkeypatch, client):
@@ -49,14 +48,14 @@ def test_futu_falls_back_to_db_scope_when_not_connected_without_blocking(monkeyp
     client.connect.assert_not_called()  # never block on the read path
 
 
-def test_futu_503_when_not_connected_and_no_synced_data(monkeypatch):
+def test_futu_not_configured_scope_when_not_connected_and_no_synced_data(monkeypatch):
     client = MagicMock()
     client.is_connected.return_value = False
     _patch_futu_client(monkeypatch, client)
     monkeypatch.setattr(guards, "_futu_scope_from_db", lambda: None)
-    with pytest.raises(HTTPException) as exc:
-        guards.get_broker_scope(_FakeRequest(), broker="FUTU")
-    assert exc.value.status_code == 503
+    scope = guards.get_broker_scope(_FakeRequest(), broker="FUTU")
+    assert scope == AccountScope(broker="FUTU", account_env="live", broker_account="")  # not configured: empty reads
+    assert guards.futu_not_configured(scope)
     client.connect.assert_not_called()
 
 

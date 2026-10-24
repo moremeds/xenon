@@ -48,8 +48,7 @@ OTHER = AccountScope(broker="FUTU", account_env="live", broker_account="11100011
 
 @pytest.fixture(autouse=True)
 def _configured(monkeypatch):
-    monkeypatch.setenv("FUTU_TRADE_ACC_ID", ACC)
-    monkeypatch.setenv("FUTU_TRADE_ENV", "SIMULATE")
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_SIMULATE", ACC)
     monkeypatch.setattr(fo, "_IB_META_CACHE", {}, raising=False)
 
 
@@ -242,7 +241,7 @@ def _offline_futu(monkeypatch, db_scope):
     from xenon.api.routes import futu as futu_routes
 
     offline = type("Offline", (), {"is_connected": lambda self: False})()
-    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda: offline)
+    monkeypatch.setattr(futu_routes, "_get_futu_client", lambda *_a: offline)
     monkeypatch.setattr(guards, "_futu_scope_from_db", lambda: db_scope)
     return guards
 
@@ -251,14 +250,16 @@ def _offline_futu(monkeypatch, db_scope):
 def test_f5_configured_scope_wins_without_opend(monkeypatch, db_scope):
     guards = _offline_futu(monkeypatch, db_scope)
 
-    assert guards.get_broker_scope(None, "FUTU") == SCOPE  # no 503, no other account
+    req = type("Req", (), {"query_params": {}})()
+    assert guards.get_broker_scope(req, "FUTU") == SCOPE  # no 503, no other account
 
 
 def test_f5_without_configured_scope_the_fallback_stays(monkeypatch):
     guards = _offline_futu(monkeypatch, OTHER)
-    monkeypatch.delenv("FUTU_TRADE_ACC_ID")
+    monkeypatch.delenv("FUTU_TRADE_ACC_ID_SIMULATE")
 
-    assert guards.get_broker_scope(None, "FUTU") == OTHER
+    req = type("Req", (), {"query_params": {"account_env": OTHER.account_env}})()
+    assert guards.get_broker_scope(req, "FUTU") == OTHER
 
 
 # ---------------------------------------------------------------------------

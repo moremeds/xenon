@@ -1844,6 +1844,25 @@ def futu_unobserved_order_ids(
         return sorted(oid for oid in ids if oid not in observed)
 
 
+def futu_unresolved_scopes() -> list[tuple[str, str]]:
+    """`(account_env, broker_account)` of every stored FUTU scope that still
+    has a non-terminal or UNKNOWN `order_submissions` row, with or without a
+    broker order id (§11 A2: those scopes stay in observation even after the
+    configured account changed or was removed). Sorted; read-only."""
+    with get_sync_engine().connect() as conn:
+        rows = conn.execute(
+            select(order_submissions.c.account_env, order_submissions.c.broker_account)
+            .where(
+                order_submissions.c.broker == "FUTU",
+                order_submissions.c.account_env.in_(("paper", "live")),
+                order_submissions.c.state.in_(NON_TERMINAL_STATES),
+            )
+            .distinct()
+            .order_by(order_submissions.c.account_env, order_submissions.c.broker_account)
+        ).all()
+    return [(r[0], r[1]) for r in rows]
+
+
 def futu_held_rows(*, broker_account: str, account_env: str, limit: int = 20) -> dict:
     """Non-terminal Futu rows in scope held by a FUTU_HELD_REASONS code:
     {reason: {"count", "order_ids"}} (oldest first, at most `limit` ids)."""
@@ -1863,6 +1882,34 @@ def futu_held_rows(*, broker_account: str, account_env: str, limit: int = 20) ->
         if len(out[reason]["order_ids"]) < limit:
             out[reason]["order_ids"].append(oid)
     return out
+
+
+def bind_futu_order_id(submission_id: str, order_id: str, *, broker_account: str, account_env: str) -> int:
+    """Store the Futu order id of an own place that Futu accepted (its own
+    reply) when no fresh read could bind the row yet. Conditional: only a
+    PENDING / UNKNOWN row of the scope without a broker order id, and only
+    when no other row of the scope carries that id. State is not changed;
+    the observation pass then finds the row by id. Returns the rowcount."""
+    ensure_writable()
+    with get_sync_engine().begin() as conn:
+        _lock_gate4_scope(conn, "FUTU", account_env, broker_account)
+        taken = conn.execute(
+            select(order_submissions.c.submission_id).where(
+                *_futu_scope_conds(account_env, broker_account), order_submissions.c.broker_order_id == order_id
+            )
+        ).first()
+        if taken is not None:
+            return 0
+        return conn.execute(
+            update(order_submissions)
+            .where(
+                *_futu_scope_conds(account_env, broker_account),
+                order_submissions.c.submission_id == submission_id,
+                order_submissions.c.broker_order_id.is_(None),
+                order_submissions.c.state.in_(("PENDING", "UNKNOWN")),
+            )
+            .values(broker_order_id=order_id, updated_at=monotone_updated_at(datetime.now(timezone.utc)))
+        ).rowcount
 
 
 def mark_futu_order_unobserved(order_id: str, *, broker_account: str, account_env: str) -> int:
