@@ -449,3 +449,17 @@ def test_adapter_never_writes_fills():
     assert "order_fills" not in src.replace("never writes `order_fills`", "")
     assert "mirror_futu_order" in src  # only named as the single fill writer
     assert "get_sync_engine" not in src and "insert(" not in src
+
+
+# Real Futu option codes for strikes below 100, read once from prod
+# xenon.futu_orders (read-only) by the lead on 2026-10-24: OpenD does not pad
+# the strike field.
+@pytest.mark.parametrize(
+    "spec,code",
+    [
+        (_opt(symbol="F", expiry="20260918", right="C", strike=Decimal("15")), "US.F260918C15000"),
+        (_opt(symbol="TE", expiry="20261016", right="C", strike=Decimal("8")), "US.TE261016C8000"),
+    ],
+)
+def test_option_codes_match_real_opend_codes_for_low_strikes(spec, code):
+    assert fo.futu_code_for(spec) == code

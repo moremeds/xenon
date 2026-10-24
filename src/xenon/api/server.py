@@ -425,6 +425,19 @@ def _maybe_start_futu_observation_loop(app: FastAPI) -> None:
     app.state.futu_observation_loop = loop
 
 
+def _maybe_start_futu_order_worker(app: FastAPI) -> None:
+    """Create the Futu order worker (X3c); never blocks or fails boot. It opens
+    its own trade context on the first job, not here."""
+    from xenon.api.futu_order_worker import start_futu_order_worker
+
+    try:
+        worker = start_futu_order_worker()
+    except Exception:  # noqa: BLE001
+        logger.exception("futu order worker failed to start")
+        worker = None
+    app.state.futu_order_worker = worker
+
+
 async def _run_fills_replay_on_boot() -> None:
     """Replay IB fills into xenon.order_fills once on boot. Best-effort.
 
@@ -655,6 +668,11 @@ async def lifespan(app: FastAPI):
     # skipped under XENON_READ_ONLY=1 or without FUTU_TRADE_ACC_ID/ENV.
     _maybe_start_futu_observation_loop(app)
 
+    # Futu order worker (X3c): one worker thread with its own trade context,
+    # separate from the IB order owner. Skipped under XENON_READ_ONLY=1,
+    # without a configured Futu scope or with XENON_FUTU_TRADING off.
+    _maybe_start_futu_order_worker(app)
+
     # Wizard Risk Alert (spec §2.9). Starts in read-only sessions too: it
     # evaluates there but never writes.
     _maybe_start_wizard_risk_alert()
@@ -708,6 +726,9 @@ async def lifespan(app: FastAPI):
                 await _bounded_cleanup(
                     "futu observation loop", observation_loop.stop(), _SHUTDOWN_STEP_S["futu_observation"]
                 )
+            futu_order_worker = getattr(app.state, "futu_order_worker", None)
+            if futu_order_worker is not None:
+                await _bounded_cleanup("futu order worker", futu_order_worker.stop(), _SHUTDOWN_STEP_S["futu_orders"])
             if futu_routes._futu_client is not None:
                 await _bounded_cleanup(
                     "FutuClient disconnect", asyncio.to_thread(futu_routes._futu_client.disconnect), _SHUTDOWN_STEP_S["futu"]
@@ -855,6 +876,7 @@ _SHUTDOWN_STEP_S = {
     "wizard": 1,
     "futu_loop": 1,
     "futu_observation": 1,
+    "futu_orders": 1,
     "futu": 1,
     "engine": 2,
 }
