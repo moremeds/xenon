@@ -5,6 +5,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+- **Futu order types in the web.** The Futu ticket offers order type, TIF and session only from `/health` `futu.capabilities[env].tuples` for the row's security type (no client copy of the matrix): `LMT`, `MKT`, `STP`, `STP LMT`, `MIT`, `LIT`, `TRAIL`, `TRAIL LIMIT`, each with only its own fields (trigger, limit, trail type and value, trail spread; `TRAIL LIMIT` has no limit price). For stocks a session selector replaces the "Fill outside RTH" checkbox, and a confirm line names the type, trigger and trail. `/api/orders/place` and `/api/orders/modify` forward `orderType` / `auxPrice` / `trailType` / `trailValue` / `trailSpread` / `session` and `newAuxPrice` / `newTrailValue` / `newTrailSpread` for FUTU only; an IB body that carries any of them gets 400 `INVALID_ORDER_BODY`. Futu modify shows the fields of the order's type and is offered only for types in `capabilities[env].modify`; cancel works for every type. A trigger-only or trail-only modify counts as a change (`confirmed:false` never shows success), and the uncertain-operation lock also checks trigger and trail terms. The Futu orders view adds Trigger, Trail and Session columns, and a missing limit price shows `---`.
+
 ## [0.16.1] — 2026-10-25
 
 - **Futu SIMULATE / REAL switch moved into the Futu account tab.** The switch is now part of the FUTU tab card instead of a separate panel under the tab bar, and it shows on every page that shows the tab bar. Picking an env from the IB view also opens the Futu tab. Active REAL uses the warning token; the separate SIMULATE / REAL badge is removed because the switch shows the same state.

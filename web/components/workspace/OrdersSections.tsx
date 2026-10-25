@@ -21,6 +21,7 @@ import { useSort } from "@/lib/useSort";
 import { useTableFilter } from "@/lib/useTableFilter";
 import TableSearch from "../TableSearch";
 import { fmtPrice } from "@/lib/positionUtils";
+import { fmtFutuPrice, futuOrderTermCells } from "@/lib/futuOrderTypes";
 import {
   buildOpenOrderDisplayRows,
   type OpenOrderDisplayRow,
@@ -82,6 +83,8 @@ export function OrdersSections({
 }) {
   // Futu is read-only: no order modify/cancel surfaces (mirrors the position table gate).
   const readonly = activeAccount === "futu" && !futuOrderActionsEnabled;
+  // Futu view adds trigger / trail / session columns (contract § Working orders).
+  const futuView = activeAccount === "futu";
   const futuEnv = useFutuAccountEnv();
   const futuTrading = useFutuTrading();
   const viewScope: OrderActionScope = useMemo(
@@ -352,7 +355,7 @@ export function OrdersSections({
           {openOrderRows.length === 0 ? (
             <div className="alert-item">No open orders</div>
           ) : (
-            <table>
+            <table className={futuView ? "futu-orders-table" : undefined}>
               <thead>
                 <tr>
                   <SortTh<OpenOrderKey>
@@ -392,6 +395,12 @@ export function OrdersSections({
                     direction={openSort.sort.direction}
                     onToggle={openSort.toggle}
                   />
+                  {futuView && (
+                    <>
+                      <th className="right">Trigger</th>
+                      <th className="right">Trail</th>
+                    </>
+                  )}
                   <SortTh<OpenOrderKey>
                     label="Last Price"
                     sortKey="lastPrice"
@@ -414,6 +423,7 @@ export function OrdersSections({
                     direction={openSort.sort.direction}
                     onToggle={openSort.toggle}
                   />
+                  {futuView && <th>Session</th>}
                   <th className="actions-th">Actions</th>
                 </tr>
               </thead>
@@ -475,6 +485,12 @@ export function OrdersSections({
                                 : "—"}
                           </span>
                         </td>
+                        {futuView && (
+                          <>
+                            <td className="right">---</td>
+                            <td className="right">---</td>
+                          </>
+                        )}
                         <OrderPriceCell
                           price={resolveOpenOrderComboPrice(o.orders, prices)}
                         />
@@ -492,6 +508,7 @@ export function OrdersSections({
                           )}
                         </td>
                         <td>{o.tif}</td>
+                        {futuView && <td>---</td>}
                         <td className="actions-cell">
                           {futuComboActionsHidden ? null : readonly ? (
                             <span className="cancel-pending-label">
@@ -584,11 +601,29 @@ export function OrdersSections({
                         {rowPendingModify && o.order.orderType === "STP LMT" ? (
                           <span className="status-modifying">Modifying...</span>
                         ) : o.order.limitPrice != null ? (
-                          fmtPrice(o.order.limitPrice)
+                          isFutuOpenOrder(o.order) ? (
+                            fmtFutuPrice(o.order.limitPrice)
+                          ) : (
+                            fmtPrice(o.order.limitPrice)
+                          )
                         ) : (
-                          "—"
+                          // No fixed limit (MKT, STP, MIT, TRAIL, TRAIL LIMIT).
+                          "---"
                         )}
                       </td>
+                      {futuView && (
+                        <>
+                          <td
+                            className="right"
+                            data-testid="futu-order-trigger"
+                          >
+                            {futuOrderTermCells(o.order).trigger}
+                          </td>
+                          <td className="right" data-testid="futu-order-trail">
+                            {futuOrderTermCells(o.order).trail}
+                          </td>
+                        </>
+                      )}
                       <OrderPriceCell
                         price={resolveOrderLastPrice(
                           o.order,
@@ -608,6 +643,11 @@ export function OrdersSections({
                         )}
                       </td>
                       <td>{o.order.tif}</td>
+                      {futuView && (
+                        <td data-testid="futu-order-session">
+                          {futuOrderTermCells(o.order).session}
+                        </td>
+                      )}
                       <td className="actions-cell">
                         {readonly ? (
                           <span className="cancel-pending-label">

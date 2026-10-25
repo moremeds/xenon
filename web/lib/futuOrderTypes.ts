@@ -491,3 +491,36 @@ export function futuModifyTermsText(
   if (request.newQuantity != null) parts.push(`qty ${request.newQuantity}`);
   return parts.join(", ");
 }
+
+/* ── Orders view (contract § Working orders) ────────────────────────── */
+
+const UNAVAILABLE = "---";
+
+/** `$` price that never hides a finer digit (sub-$1 stock, 3 dp spread). */
+export function fmtFutuPrice(v: number | null | undefined): string {
+  return v == null || !Number.isFinite(v) ? UNAVAILABLE : `$${fmt2(v)}`;
+}
+
+/** Orders-view cells for a working Futu order; `---` when a term is absent. */
+export function futuOrderTermCells(order: {
+  auxPrice?: number | null;
+  trailType?: string | null;
+  trailValue?: number | null;
+  trailSpread?: number | null;
+  session?: string | null;
+}): { trigger: string; trail: string; session: string } {
+  let trail = UNAVAILABLE;
+  if (order.trailValue != null && Number.isFinite(order.trailValue)) {
+    trail =
+      order.trailType === "RATIO"
+        ? `${order.trailValue}%`
+        : fmtFutuPrice(order.trailValue);
+    if (order.trailSpread != null)
+      trail += ` · spread ${fmtFutuPrice(order.trailSpread)}`;
+  }
+  return {
+    trigger: fmtFutuPrice(order.auxPrice),
+    trail,
+    session: order.session || UNAVAILABLE,
+  };
+}

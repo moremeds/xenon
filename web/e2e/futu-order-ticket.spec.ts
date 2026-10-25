@@ -164,6 +164,7 @@ async function installOrderFlowMocks(
     remaining: quantity,
     avgFillPrice: null,
     tif: "DAY",
+    session: "RTH",
     contract: {
       conId: null,
       symbol: "AAPL",
@@ -200,7 +201,10 @@ async function installOrderFlowMocks(
         futu: {
           trading,
           capabilities: {
-            paper: { tuples: PAPER_TUPLES, modify: opts.paperModify ?? ["LMT"] },
+            paper: {
+              tuples: PAPER_TUPLES,
+              modify: opts.paperModify ?? ["LMT"],
+            },
             live: { tuples: opts.liveTuples ?? [], modify: ["LMT"] },
           },
         },
@@ -554,16 +558,15 @@ test.describe("Futu order ticket", () => {
       "SELL 100 AAPL · MKT · market · DAY · RTH",
     );
     await page.screenshot({
-      path: path.join(
-        SCREEN_DIR,
-        "futu-order-types-sim-ticket-2026-10-25.png",
-      ),
+      path: path.join(SCREEN_DIR, "futu-order-types-sim-ticket-2026-10-25.png"),
       fullPage: true,
       // Settle the 150 ms button transitions so the shot shows the final state.
       animations: "disabled",
     });
     await page.getByRole("button", { name: "Submit close" }).click();
-    await expect.poll(() => captured.some((c) => c.url.includes("/place"))).toBe(true);
+    await expect
+      .poll(() => captured.some((c) => c.url.includes("/place")))
+      .toBe(true);
     const place = captured.find((c) => c.url.includes("/place"))!;
     assertFutuPaperScope(place.url);
     expect(place.body).toMatchObject({
@@ -574,6 +577,165 @@ test.describe("Futu order ticket", () => {
     expect(place.body?.limitPrice).toBeUndefined();
     expect(place.body?.auxPrice).toBeUndefined();
   });
+
+  // Place per type in a mocked REAL env with every static live tuple.
+  const PLACE_CASES: Array<{
+    type: string;
+    fill: Record<string, string>;
+    trailType?: "AMOUNT";
+    session?: string;
+    expected: Record<string, unknown>;
+    confirm: string;
+  }> = [
+    {
+      type: "LMT",
+      fill: { "#position-order-price": "178.50" },
+      session: "ETH",
+      expected: { orderType: "LMT", limitPrice: 178.5, session: "ETH" },
+      confirm: "SELL 100 AAPL · LMT · limit 178.50 · DAY · ETH",
+    },
+    {
+      type: "MKT",
+      fill: {},
+      expected: { orderType: "MKT", session: "RTH" },
+      confirm: "SELL 100 AAPL · MKT · market · DAY · RTH",
+    },
+    {
+      type: "STP",
+      fill: { "#position-order-aux": "170.00" },
+      expected: { orderType: "STP", auxPrice: 170, session: "RTH" },
+      confirm: "SELL 100 AAPL · STP · trigger 170.00 · DAY · RTH",
+    },
+    {
+      type: "STP LMT",
+      fill: {
+        "#position-order-aux": "170.00",
+        "#position-order-price": "169.50",
+      },
+      expected: {
+        orderType: "STP LMT",
+        auxPrice: 170,
+        limitPrice: 169.5,
+        session: "RTH",
+      },
+      confirm:
+        "SELL 100 AAPL · STP LMT · trigger 170.00 · limit 169.50 · DAY · RTH",
+    },
+    {
+      type: "MIT",
+      fill: { "#position-order-aux": "185.00" },
+      expected: { orderType: "MIT", auxPrice: 185, session: "RTH" },
+      confirm: "SELL 100 AAPL · MIT · trigger 185.00 · DAY · RTH",
+    },
+    {
+      type: "LIT",
+      fill: {
+        "#position-order-aux": "185.00",
+        "#position-order-price": "185.50",
+      },
+      expected: {
+        orderType: "LIT",
+        auxPrice: 185,
+        limitPrice: 185.5,
+        session: "RTH",
+      },
+      confirm:
+        "SELL 100 AAPL · LIT · trigger 185.00 · limit 185.50 · DAY · RTH",
+    },
+    {
+      type: "TRAIL",
+      fill: { "#position-order-trail-value": "2.5" },
+      expected: {
+        orderType: "TRAIL",
+        trailType: "RATIO",
+        trailValue: 2.5,
+        session: "RTH",
+      },
+      confirm: "SELL 100 AAPL · TRAIL · trail 2.5% · DAY · RTH",
+    },
+    {
+      type: "TRAIL LIMIT",
+      trailType: "AMOUNT",
+      fill: {
+        "#position-order-trail-value": "1.25",
+        "#position-order-trail-spread": "0.05",
+      },
+      expected: {
+        orderType: "TRAIL LIMIT",
+        trailType: "AMOUNT",
+        trailValue: 1.25,
+        trailSpread: 0.05,
+        session: "RTH",
+      },
+      confirm:
+        "SELL 100 AAPL · TRAIL LIMIT · trail 1.25 · spread 0.05 · DAY · RTH",
+    },
+  ];
+  const TERM_KEYS = [
+    "orderType",
+    "limitPrice",
+    "auxPrice",
+    "trailType",
+    "trailValue",
+    "trailSpread",
+    "session",
+  ];
+
+  for (const c of PLACE_CASES) {
+    test(`REAL place ${c.type}: only the type's fields are sent`, async ({
+      page,
+    }) => {
+      const { captured } = await installOrderFlowMocks(
+        page,
+        { paper: true, live: true },
+        { liveTuples: LIVE_ALL_TUPLES },
+      );
+      await openFutuTab(page);
+      await page.getByTestId("futu-env-real").click();
+      await page.locator(".position-order-btn").first().click();
+      const dialog = page.getByRole("dialog");
+      await dialog
+        .getByRole("group", { name: "Order type" })
+        .getByRole("button", { name: c.type, exact: true })
+        .click();
+      if (c.trailType) {
+        await dialog
+          .getByRole("group", { name: "Trail type" })
+          .getByRole("button", { name: c.trailType })
+          .click();
+      }
+      if (c.session) {
+        await dialog
+          .getByRole("group", { name: "Session" })
+          .getByRole("button", { name: c.session, exact: true })
+          .click();
+      }
+      for (const [sel, value] of Object.entries(c.fill)) {
+        await page.locator(sel).fill(value);
+      }
+      await expect(page.getByTestId("futu-order-confirm")).toHaveText(
+        c.confirm,
+      );
+      await page.screenshot({
+        path: path.join(
+          SCREEN_DIR,
+          `futu-order-types-place-${c.type.toLowerCase().replace(/\s+/g, "-")}-2026-10-25.png`,
+        ),
+        fullPage: true,
+        animations: "disabled",
+      });
+      await page.getByRole("button", { name: "Submit close" }).click();
+      await expect
+        .poll(() => captured.some((r) => r.url.includes("/place")))
+        .toBe(true);
+      const place = captured.find((r) => r.url.includes("/place"))!;
+      expect(new URL(place.url).searchParams.get("account_env")).toBe("live");
+      expect(place.body).toMatchObject({ ...c.expected, tif: "DAY" });
+      for (const key of TERM_KEYS) {
+        if (!(key in c.expected)) expect(place.body?.[key]).toBeUndefined();
+      }
+    });
+  }
 
   test("REAL with all tuples: STP LMT ticket names trigger and limit", async ({
     page,
@@ -646,7 +808,9 @@ test.describe("Futu order ticket", () => {
     });
     await types.getByRole("button", { name: "STP LMT" }).click();
     await page.getByRole("button", { name: "Submit close" }).click();
-    await expect.poll(() => captured.some((c) => c.url.includes("/place"))).toBe(true);
+    await expect
+      .poll(() => captured.some((c) => c.url.includes("/place")))
+      .toBe(true);
     const place = captured.find((c) => c.url.includes("/place"))!;
     expect(new URL(place.url).searchParams.get("account_env")).toBe("live");
     expect(place.body).toMatchObject({
@@ -682,10 +846,7 @@ test.describe("Futu order ticket", () => {
       "trigger 170.00 → 168.50",
     );
     await page.screenshot({
-      path: path.join(
-        SCREEN_DIR,
-        "futu-order-types-modify-aux-2026-10-25.png",
-      ),
+      path: path.join(SCREEN_DIR, "futu-order-types-modify-aux-2026-10-25.png"),
       fullPage: true,
       animations: "disabled",
     });
@@ -713,6 +874,10 @@ test.describe("Futu order ticket", () => {
     await openFutuTab(page);
     await page.goto("/orders");
     await expect(page.getByRole("button", { name: "MODIFY" })).toBeDisabled();
+    // Orders view: type label, no fixed limit, trigger, trail, session.
+    await expect(page.getByTestId("futu-order-trigger")).toHaveText("$170.00");
+    await expect(page.getByTestId("futu-order-trail")).toHaveText("---");
+    await expect(page.getByTestId("futu-order-session")).toHaveText("RTH");
     await page.screenshot({
       path: path.join(
         SCREEN_DIR,

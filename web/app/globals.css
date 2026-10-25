@@ -3550,6 +3550,13 @@ tr.leg-row td {
   color: var(--signal-strong);
   box-shadow: inset 0 -2px 0 var(--signal-core);
 }
+/* Futu open orders: three extra term columns (trigger / trail / session) on
+   the 8px grid so the table fits the panel. */
+.futu-orders-table th,
+.futu-orders-table td {
+  padding-left: 8px;
+  padding-right: 8px;
+}
 /* OrderChoiceSelector — server-supplied choices (Futu type / TIF / session) */
 .order-choice-selector {
   flex-wrap: wrap;
