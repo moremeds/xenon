@@ -49,7 +49,6 @@ export default function FutuEnvSwitch({
       aria-label="Futu account environment"
       style={{
         display: "inline-flex",
-        marginTop: 8,
         border: "1px solid var(--border-dim)",
         borderRadius: 4,
         overflow: "hidden",

@@ -104,7 +104,7 @@ function AccountTab({
           </div>
         )}
       </button>
-      {footer}
+      {footer ? <div className="account-tab-footer">{footer}</div> : null}
     </div>
   );
 }
