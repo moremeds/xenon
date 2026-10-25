@@ -5,6 +5,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-10-25
+
 - **Futu SIMULATE / REAL switch moved into the Futu account tab.** The switch is now part of the FUTU tab card instead of a separate panel under the tab bar, and it shows on every page that shows the tab bar. Picking an env from the IB view also opens the Futu tab. Active REAL uses the warning token; the separate SIMULATE / REAL badge is removed because the switch shows the same state.
 
 ## [0.16.0] — 2026-10-25
