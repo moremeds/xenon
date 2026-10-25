@@ -265,22 +265,31 @@ SECRET = "0123456789abcdef0123456789ABCDEF"  # made-up, format-valid
 
 
 class FakeOrderCtx(FakeTradeCtx):
-    """FakeTradeCtx plus the trade mutations, over an in-memory order book."""
+    """FakeTradeCtx plus the trade mutations, over an in-memory order book.
+    Every mutation is first bound against `create_autospec` of the installed
+    SDK's `OpenSecTradeContext` (an unsupported keyword raises TypeError)."""
 
     def __init__(self, *, place="ok", modify="apply", cancel="cancelled"):
+        from unittest.mock import create_autospec
+
+        from futu import OpenSecTradeContext
+
         super().__init__(accounts=[_acc_row(), _acc_row(LIVE_ACC, env="REAL")])
         self.place_mode, self.modify_mode, self.cancel_mode = place, modify, cancel
         self.book: dict[str, dict] = {}
         self.mutations: list[tuple[str, dict]] = []
         self.unlocks = 0
         self._next = 8812345678900000001
+        self._sdk = create_autospec(OpenSecTradeContext, instance=True)
 
     def unlock_trade(self, **kw):
+        self._sdk.unlock_trade(**kw)
         self.unlocks += 1
         self.calls.append(("unlock_trade", {}))
         return 0, "ok"
 
     def place_order(self, **kw):
+        self._sdk.place_order(**kw)
         self.mutations.append(("place_order", kw))
         if self.place_mode == "lost":
             return -1, "timeout"
@@ -294,6 +303,7 @@ class FakeOrderCtx(FakeTradeCtx):
         return 0, _frame(ORDER_COLS, [row])
 
     def modify_order(self, **kw):
+        self._sdk.modify_order(**kw)
         self.mutations.append(("modify_order", kw))
         row = self.book[kw["order_id"]]
         if kw["modify_order_op"] == "CANCEL":
@@ -778,3 +788,67 @@ def test_health_trading_false_without_a_running_worker(futu, monkeypatch):
     assert _trading() == {"paper": False, "live": False}
     monkeypatch.setattr(server.app.state, "futu_order_worker", None, raising=False)
     assert _trading() == {"paper": False, "live": False}
+
+
+# -- X5a task 1: allowed tuples through the routes (upgrade fixture, R3-1) ----
+
+
+def _set_tif(sid, tif):
+    with get_sync_engine().begin() as conn:
+        conn.execute(update(order_submissions).where(order_submissions.c.submission_id == sid).values(tif=tif))
+
+
+def test_upgrade_live_gtc_lmt_place_modify_cancel_unchanged(futu):
+    """Unset tuple variables: a REAL install keeps GTC LMT (the v0.16 code surface)."""
+    resp = _post(futu, "/orders/place", _stock(cid="futu-live-gtc", tif="GTC"), env="live")
+    assert resp.status_code == 200, resp.text
+    sid, oid = resp.json()["submission_id"], resp.json()["brokerOrderId"]
+    [(_, place_kw)] = futu.ctx.mutations
+    assert place_kw["time_in_force"] == "GTC" and place_kw["order_type"] == "NORMAL" and "session" not in place_kw
+    assert _row(sid).tif == "GTC"
+
+    mod = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newPrice": 500.1, "modifySequence": 1}, env="live")
+    assert mod.status_code == 200 and mod.json()["confirmed"] is True, mod.text
+    can = _post(futu, "/orders/cancel", {"brokerOrderId": oid}, env="live")
+    assert can.status_code == 200 and can.json()["confirmed"] is True
+    assert [kw["modify_order_op"] for kw in _modifies(futu)] == ["NORMAL", "CANCEL"]
+
+
+def test_upgrade_paper_gtc_place_is_refused_before_a_row_is_reserved(futu):
+    resp = _post(futu, "/orders/place", _stock(cid="futu-paper-gtc", tif="GTC"))
+
+    assert resp.status_code == 400 and resp.json()["reason_code"] == "FUTU_TIF_UNSUPPORTED"
+    assert "GTC" in resp.json()["detail"]
+    assert futu.ctx.mutations == [] and futu.ctx.calls == []  # no OpenD round trip at all
+    with get_sync_engine().connect() as conn:
+        assert conn.execute(order_submissions.select()).first() is None  # nothing reserved
+
+
+def test_upgrade_pre_existing_paper_gtc_keeps_cancel_and_demand_modify_refused(futu):
+    sid, oid = _placed(futu, cid="futu-paper-old-gtc")
+    _set_tif(sid, "GTC")  # a paper GTC LMT placed before the upgrade
+    before = _row(sid)
+
+    mod = _post(futu, "/orders/modify", {"brokerOrderId": oid, "newPrice": 500.1, "modifySequence": 1})
+
+    assert mod.status_code == 400 and mod.json()["reason_code"] == "FUTU_TIF_UNSUPPORTED", mod.text
+    assert _modifies(futu) == []  # nothing sent
+    after = _row(sid)
+    assert (after.state, after.quantity, after.modify_sequence) == (
+        before.state,
+        before.quantity,
+        before.modify_sequence,
+    )
+    assert after.legs.get("pending_amend_id") is None  # no amend opened: demand unchanged
+    can = _post(futu, "/orders/cancel", {"brokerOrderId": oid})
+    assert can.status_code == 200 and can.json()["confirmed"] is True
+    assert _row(sid).state == "CANCELLED"
+
+
+def test_a_tuple_outside_the_operator_allowlist_is_refused_before_io(futu, monkeypatch):
+    monkeypatch.setenv("XENON_FUTU_TUPLES_LIVE", "STK:LMT:GTC:RTH")  # DAY withdrawn by the operator
+
+    resp = _post(futu, "/orders/place", _stock(cid="futu-live-day"), env="live")
+
+    assert resp.status_code == 400 and resp.json()["reason_code"] == "FUTU_TIF_UNSUPPORTED"
+    assert futu.ctx.mutations == [] and futu.ctx.calls == []

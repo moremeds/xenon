@@ -6,13 +6,20 @@ the context and calls these functions; dispatch (task 3) owns the rows.
 
 SDK facts (futu-api 10.03.6308, `.venv/lib/python3.13/site-packages/futu/`):
 - `place_order(price, qty, code, trd_side, order_type, adjust_limit, trd_env,
-  acc_id, acc_index, remark, time_in_force, ...)` (trade/open_trade_context.py:526).
+  acc_id, acc_index, remark, time_in_force, fill_outside_rth, aux_price,
+  trail_type, trail_value, trail_spread, session, ...)` (trade/open_trade_context.py:526-529).
   `remark` longer than 64 UTF-8 bytes is refused (:545-550). The reply is a
   one-row frame; its order fields come from a NON-refresh order query (:592-599).
+  `price` is positional and always sent (`float(price)`, :568); `aux_price` /
+  `trail_*` are sent only when not None (trade/trade_query.py:460-471).
 - `modify_order(modify_order_op, order_id, qty, price, adjust_limit, trd_env,
-  acc_id, ...)` (:617); the reply is only `trd_env, order_id` (:661-664).
+  acc_id, acc_index, aux_price, trail_type, trail_value, trail_spread)`
+  (:617-619): no `session`, no `order_type`; the reply is only
+  `trd_env, order_id` (:661-664).
 - `order_list_query(order_id, status_filter_list, code, start, end, trd_env,
-  acc_id, acc_index, refresh_cache, order_market)` (:445);
+  acc_id, acc_index, refresh_cache, order_market)` (:445); its rows carry
+  `order_type`, `time_in_force`, `session`, `aux_price`, `trail_type`,
+  `trail_value`, `trail_spread` (:466-467; 'N/A' when unset, trade/trade_query.py:392-398);
   `history_order_list_query(status_filter_list, code, start, end, trd_env,
   acc_id, acc_index, order_market)` (:739), window at most 90 days (:757).
 - `unlock_trade(password=None, password_md5=None, is_unlock=True)` (:115).
@@ -22,9 +29,12 @@ SDK facts (futu-api 10.03.6308, `.venv/lib/python3.13/site-packages/futu/`):
   the caller cannot tell them apart, so after a possible send every non-OK
   result is uncertain.
 - `OrderStatus` (common/constant.py:1251-1306), `ModifyOrderOp` NORMAL / CANCEL
-  (:1339-1371), `TrdSide` BUY / SELL (:1374), `OrderType.NORMAL` = US limit
-  order (:1167-1176), `TimeInForce` DAY / GTC (:2820), `TrdEnv` REAL /
-  SIMULATE (:1064).
+  (:1339-1371), `TrdSide` BUY / SELL (:1374), `OrderType` (:1167-1199;
+  NORMAL = US limit order, MARKET, STOP, STOP_LIMIT, MARKET_IF_TOUCHED,
+  LIMIT_IF_TOUCHED, TRAILING_STOP, TRAILING_STOP_LIMIT at :1187-1199),
+  `TrailType` RATIO / AMOUNT (:1240-1241), `TimeInForce` DAY / GTC
+  (:2820-2822), `Session` RTH / ETH / ALL / OVERNIGHT (:2834-2837; default
+  `Session.NONE`), `TrdEnv` REAL / SIMULATE (:1064).
 - The SDK has no price-precision rule: the price is sent as `float(price)` and
   `adjust_limit=0` sets `adjustPrice=False` (trade/trade_query.py:445-447), so
   the server never moves it. This adapter never rounds a price either; it
@@ -59,6 +69,61 @@ ORDER_TYPE_LIMIT = "NORMAL"  # OrderType.NORMAL = US limit order (common/constan
 _TIF = {"DAY": "DAY", "GTC": "GTC"}  # TimeInForce (common/constant.py:2820-2822)
 _TRD_ENV = {"paper": "SIMULATE", "live": "REAL"}  # TrdEnv (common/constant.py:1073-1074)
 
+# Xenon order-type label (wire `orderType`) → Futu `OrderType` (common/constant.py:1187-1199).
+ORDER_TYPE_TO_FUTU = {
+    "LMT": ORDER_TYPE_LIMIT,
+    "MKT": "MARKET",
+    "STP": "STOP",
+    "STP LMT": "STOP_LIMIT",
+    "MIT": "MARKET_IF_TOUCHED",
+    "LIT": "LIMIT_IF_TOUCHED",
+    "TRAIL": "TRAILING_STOP",
+    "TRAIL LIMIT": "TRAILING_STOP_LIMIT",
+}
+FUTU_TO_ORDER_TYPE = {v: k for k, v in ORDER_TYPE_TO_FUTU.items()}
+LIMIT_TYPES = frozenset({"LMT", "STP LMT", "LIT"})  # a fixed user limit (`limitPrice`)
+AUX_TYPES = frozenset({"STP", "STP LMT", "MIT", "LIT"})  # a trigger (`auxPrice`)
+TRAIL_TYPES = frozenset({"TRAIL", "TRAIL LIMIT"})  # `trailType` + `trailValue`
+SPREAD_TYPES = frozenset({"TRAIL LIMIT"})  # `trailSpread`
+TRAIL_KINDS = ("RATIO", "AMOUNT")  # TrailType (common/constant.py:1240-1241)
+SEC_TYPES = ("STK", "OPT")
+TIFS = tuple(_TIF)
+SESSIONS = ("RTH", "ETH", "ALL", "OVERNIGHT")  # Session (common/constant.py:2834-2837)
+DEFAULT_SESSION = "RTH"
+# `price` is a required SDK argument; types without a fixed limit send this
+# placeholder (Futu ignores `price` for them). Never persisted or shown.
+PLACEHOLDER_PRICE = 0.0
+RATIO_MAX = Decimal(20)  # trail ratio, percent
+
+
+def _product(secs, types, tifs, sessions) -> set[tuple[str, str, str, str]]:
+    return {(s, t, f, n) for s in secs for t in types for f in tifs for n in sessions}
+
+
+# Every (security, order type, TIF, session) Futu supports for the env (plan § 2);
+# an operator allowlist can only narrow it. Paper: Futu SIMULATE takes limit and
+# market orders, DAY, RTH. Live: stock LMT in any session; other stock types
+# RTH only (other sessions unverified); option MKT / STP / MIT / TRAIL /
+# TRAIL LIMIT never (unbounded fill on a wide spread).
+STATIC_TUPLES: dict[str, frozenset[tuple[str, str, str, str]]] = {
+    "paper": frozenset(_product(SEC_TYPES, ["LMT"], ["DAY"], ["RTH"]) | _product(["STK"], ["MKT"], ["DAY"], ["RTH"])),
+    "live": frozenset(
+        _product(["STK"], ["LMT"], TIFS, SESSIONS)
+        | _product(["STK"], ["MKT"], ["DAY"], ["RTH"])
+        | _product(["STK"], ["STP", "STP LMT", "MIT", "LIT", "TRAIL", "TRAIL LIMIT"], TIFS, ["RTH"])
+        | _product(["OPT"], ["LMT", "STP LMT", "LIT"], TIFS, ["RTH"])
+    ),
+}
+TUPLES_ENV = {"live": "XENON_FUTU_TUPLES_LIVE", "paper": "XENON_FUTU_TUPLES_PAPER"}
+# Unset allowlists keep the v0.16 code surface: live DAY + GTC LMT; paper DAY
+# LMT plus stock MKT (paper GTC withdrawn: SIMULATE is DAY only).
+DEFAULT_TUPLES = {
+    "live": "STK:LMT:DAY:RTH,STK:LMT:GTC:RTH,OPT:LMT:DAY:RTH,OPT:LMT:GTC:RTH",
+    "paper": "STK:LMT:DAY:RTH,OPT:LMT:DAY:RTH,STK:MKT:DAY:RTH",
+}
+MODIFY_TYPES_ENV = "XENON_FUTU_MODIFY_TYPES"
+DEFAULT_MODIFY_TYPES = "LMT"
+
 # Status table: the observation pass's (`futu_observation.FUTU_STATUS_TO_STATE`),
 # one table for both paths. Statuses it does not map — N/A, UNSUBMITTED,
 # WAITING_SUBMIT, SUBMITTING, TIMEOUT, FILL_CANCELLED (common/constant.py:
@@ -67,6 +132,9 @@ TERMINAL_STATES = frozenset({"FILLED", "CANCELLED", "REJECTED"})
 
 # Reason codes (top-level `reason_code` in API responses).
 UNSUPPORTED_ORDER_TYPE = "FUTU_ORDER_TYPE_UNSUPPORTED"
+TIF_UNSUPPORTED = "FUTU_TIF_UNSUPPORTED"
+SESSION_UNSUPPORTED = "FUTU_SESSION_UNSUPPORTED"
+NOT_MODIFIABLE = "FUTU_ORDER_NOT_MODIFIABLE"
 PRICE_PRECISION = "FUTU_PRICE_PRECISION"
 INVALID_ORDER = "FUTU_INVALID_ORDER"
 REMARK_TOO_LONG = "FUTU_REMARK_TOO_LONG"
@@ -101,18 +169,128 @@ class FutuOrderRefused(Exception):
 
 @dataclass(frozen=True)
 class FutuOrderSpec:
-    """One single-leg US limit order, in Xenon (IB) conventions."""
+    """One single-leg US order, in Xenon (IB) conventions. `order_type` is a
+    Xenon label (`ORDER_TYPE_TO_FUTU`); `limit_price` is None for a type
+    without a fixed limit; `aux_price` / `trail_*` only for the types that
+    have them (`AUX_TYPES`, `TRAIL_TYPES`, `SPREAD_TYPES`)."""
 
     sec_type: str  # "STK" | "OPT"
     symbol: str  # IB symbol ("BRK B", "SPY")
     action: str  # "BUY" | "SELL"
     quantity: int
-    limit_price: Decimal
+    limit_price: Decimal | None
     order_type: str = "LMT"
     tif: str = "DAY"
     expiry: str | None = None  # YYYYMMDD (OPT)
     right: str | None = None  # "C" | "P" (OPT)
     strike: Decimal | None = None  # OPT
+    session: str = DEFAULT_SESSION
+    aux_price: Decimal | None = None  # trigger
+    trail_type: str | None = None  # "RATIO" (percent) | "AMOUNT" (price distance)
+    trail_value: Decimal | None = None
+    trail_spread: Decimal | None = None
+
+
+# ---------------------------------------------------------------------------
+# Allowed tuples (plan § 2)
+# ---------------------------------------------------------------------------
+
+_bad_config_logged: set[tuple[str, str]] = set()
+
+
+def _log_bad_config(name: str, raw: str, why: str) -> None:
+    if (name, raw) not in _bad_config_logged:
+        _bad_config_logged.add((name, raw))
+        log.error("%s=%r %s", name, raw, why)
+
+
+def _label(text: str) -> str:
+    return " ".join(text.split()).upper()
+
+
+def _parse_tuple(token: str) -> tuple[str, str, str, str] | None:
+    parts = [_label(p) for p in token.split(":")]
+    if len(parts) != 4:
+        return None
+    sec, order_type, tif, session = parts
+    if sec not in SEC_TYPES or order_type not in ORDER_TYPE_TO_FUTU or tif not in TIFS or session not in SESSIONS:
+        return None
+    return sec, order_type, tif, session
+
+
+def allowed_tuples(account_env: str, environ: Mapping[str, str] | None = None) -> frozenset[tuple[str, str, str, str]]:
+    """The env's tuples `(sec, order_type, tif, session)`: the operator
+    allowlist (`XENON_FUTU_TUPLES_LIVE` / `_PAPER`, exact `SEC:TYPE:TIF:SESSION`
+    entries; unset or blank → `DEFAULT_TUPLES`) intersected with
+    `STATIC_TUPLES`. An entry that does not parse turns the whole list off
+    (fail closed, one ERROR log); a valid entry outside the static set is
+    dropped (one ERROR log)."""
+    static = STATIC_TUPLES.get(account_env)
+    if static is None:
+        return frozenset()
+    env = os.environ if environ is None else environ
+    name = TUPLES_ENV[account_env]
+    raw = env.get(name) or ""
+    if not raw.strip():
+        raw = DEFAULT_TUPLES[account_env]
+    parsed = [_parse_tuple(t) for t in raw.split(",") if t.strip()]
+    if any(p is None for p in parsed):
+        _log_bad_config(name, raw, "has an entry that is not SEC:TYPE:TIF:SESSION: no Futu tuple is allowed")
+        return frozenset()
+    outside = [p for p in parsed if p not in static]
+    if outside:
+        _log_bad_config(name, raw, f"names tuples Futu does not support for {account_env}, ignored: {outside}")
+    return frozenset(p for p in parsed if p in static)
+
+
+def modify_types(environ: Mapping[str, str] | None = None) -> frozenset[str]:
+    """Order types whose modify is on (`XENON_FUTU_MODIFY_TYPES`, labels;
+    unset or blank → `LMT`). An unknown label turns modify off for every type
+    (fail closed, one ERROR log). Cancel never depends on it."""
+    env = os.environ if environ is None else environ
+    raw = env.get(MODIFY_TYPES_ENV) or ""
+    if not raw.strip():
+        raw = DEFAULT_MODIFY_TYPES
+    labels = [_label(t) for t in raw.split(",") if t.strip()]
+    if any(t not in ORDER_TYPE_TO_FUTU for t in labels):
+        _log_bad_config(MODIFY_TYPES_ENV, raw, "has an unknown order type: Futu modify is off")
+        return frozenset()
+    return frozenset(labels)
+
+
+def allowed(
+    account_env: str,
+    sec_type: str,
+    order_type: str,
+    tif: str,
+    session: str,
+    *,
+    op: str = "place",
+    environ: Mapping[str, str] | None = None,
+) -> tuple[str, str] | None:
+    """None when the tuple may be placed (`op="place"`) or modified
+    (`op="modify"`: the tuple is allowed AND its type is in `modify_types`)
+    in `account_env`; else `(reason_code, detail)`, the detail naming the
+    failing part. One function for the server gate and `/health`."""
+    where = f"Futu {account_env}"
+    if order_type not in ORDER_TYPE_TO_FUTU:
+        return UNSUPPORTED_ORDER_TYPE, f"order type {order_type!r} is not a Futu order type"
+    if tif not in TIFS:
+        return TIF_UNSUPPORTED, f"time in force {tif!r} is not DAY or GTC"
+    if session not in SESSIONS:
+        return SESSION_UNSUPPORTED, f"session {session!r} is not one of {', '.join(SESSIONS)}"
+    if sec_type not in SEC_TYPES:
+        return INVALID_ORDER, f"security type {sec_type!r} is not STK or OPT"
+    tuples = allowed_tuples(account_env, environ)
+    if (sec_type, order_type, tif, session) not in tuples:
+        if not any(t[:2] == (sec_type, order_type) for t in tuples):
+            return UNSUPPORTED_ORDER_TYPE, f"{where} does not allow {order_type} {sec_type} orders"
+        if not any(t[:3] == (sec_type, order_type, tif) for t in tuples):
+            return TIF_UNSUPPORTED, f"{where} does not allow {tif} for {order_type} {sec_type} orders"
+        return SESSION_UNSUPPORTED, f"{where} does not allow session {session} for {order_type} {sec_type} {tif} orders"
+    if op == "modify" and order_type not in modify_types(environ):
+        return NOT_MODIFIABLE, f"{where} modify is off for {order_type} orders; cancel instead"
+    return None
 
 
 def remark_for(submission_id: str) -> str:
@@ -175,15 +353,58 @@ def _price_increment(spec: FutuOrderSpec, price: Decimal) -> Decimal:
     return Decimal("0.01")
 
 
-def checked_price(spec: FutuOrderSpec, price: Any) -> Decimal:
-    """The limit price, unchanged. Refused (never moved) when it is not a
-    positive finite number on the minimum increment."""
+def checked_price(spec: FutuOrderSpec, price: Any, name: str = "limit price") -> Decimal:
+    """The limit (or trigger) price, unchanged. Refused (never moved) when it
+    is not a positive finite number on the minimum increment."""
     p = _decimal(price)
     if p is None or p <= 0:
-        raise FutuOrderRefused(INVALID_ORDER, "limit price must be a positive number")
+        raise FutuOrderRefused(INVALID_ORDER, f"{name} must be a positive number")
     if p % _price_increment(spec, p) != 0:
-        raise FutuOrderRefused(PRICE_PRECISION, f"limit price {p} is not on the {_price_increment(spec, p)} increment")
+        raise FutuOrderRefused(PRICE_PRECISION, f"{name} {p} is not on the {_price_increment(spec, p)} increment")
     return p
+
+
+def _checked_dp(value: Decimal, dp: int, name: str) -> Decimal:
+    try:
+        exact = value.quantize(Decimal(1).scaleb(-dp)) == value
+    except InvalidOperation:
+        exact = False
+    if not exact:
+        raise FutuOrderRefused(PRICE_PRECISION, f"{name} {value} has more than {dp} decimals (never rounded)")
+    return value
+
+
+def trail_value_dp(spec: FutuOrderSpec) -> int:
+    """Decimals Futu keeps for `trail_value`: RATIO 2 (percent); AMOUNT 4 for a
+    stock, 2 for an option (plan § 1)."""
+    if spec.trail_type == "RATIO":
+        return 2
+    return 4 if spec.sec_type == "STK" else 2
+
+
+def checked_trail_value(spec: FutuOrderSpec, value: Any) -> Decimal:
+    """`trail_value`, unchanged: finite, > 0, on its decimals (`trail_value_dp`),
+    RATIO at most 20 (percent). The AMOUNT upper bound (20 % of the IB
+    reference price) belongs to the quote gate."""
+    if spec.trail_type not in TRAIL_KINDS:
+        raise FutuOrderRefused(INVALID_ORDER, f"trail type must be RATIO or AMOUNT (got {spec.trail_type!r})")
+    v = _decimal(value)
+    if v is None or v <= 0:
+        raise FutuOrderRefused(INVALID_ORDER, "trail value must be a positive number")
+    _checked_dp(v, trail_value_dp(spec), "trail value")
+    if spec.trail_type == "RATIO" and v > RATIO_MAX:
+        raise FutuOrderRefused(INVALID_ORDER, f"trail ratio must be at most {RATIO_MAX} (percent)")
+    return v
+
+
+def checked_trail_spread(value: Any) -> Decimal:
+    """`trail_spread`, unchanged: finite, >= 0 (0 = limit at the trigger), at
+    most 3 decimals. The upper bound (5 % of the IB reference price) belongs
+    to the quote gate."""
+    v = _decimal(value)
+    if v is None or v < 0:
+        raise FutuOrderRefused(INVALID_ORDER, "trail spread must be a number >= 0")
+    return _checked_dp(v, 3, "trail spread")
 
 
 def tick_price(spec: FutuOrderSpec, price: Any) -> Decimal | None:
@@ -197,16 +418,57 @@ def tick_price(spec: FutuOrderSpec, price: Any) -> Decimal | None:
     return p.quantize(_price_increment(spec, p))
 
 
-def _checked_spec(spec: FutuOrderSpec) -> tuple[str, Decimal]:
-    if spec.order_type != "LMT":
-        raise FutuOrderRefused(UNSUPPORTED_ORDER_TYPE, f"Futu orders are limit only (got {spec.order_type!r})")
+def _present(name: str, value: Any, required: bool, order_type: str) -> None:
+    if required and value is None:
+        raise FutuOrderRefused(INVALID_ORDER, f"{order_type} orders need {name}")
+    if not required and value is not None:
+        raise FutuOrderRefused(INVALID_ORDER, f"{order_type} orders take no {name}")
+
+
+@dataclass(frozen=True)
+class CheckedOrder:
+    """A spec that passed every pre-send check: the Futu code, the SDK `price`
+    (the limit, or `PLACEHOLDER_PRICE` for a type without one) and the
+    type-specific SDK keywords (`aux_price`, `trail_*`) shared by place and
+    modify. Session is place-only (`place_single`)."""
+
+    code: str
+    price: float
+    terms: dict
+
+
+def check_spec(
+    spec: FutuOrderSpec, account_env: str, *, op: str = "place", environ: Mapping[str, str] | None = None
+) -> CheckedOrder:
+    """Every pre-send check of a place (`op="place"`) or modify
+    (`op="modify"`): action, quantity, the allowed tuple (`allowed`), the
+    fields of the type (plan § 1: required or absent) and their precision
+    (refused, never rounded), the Futu code. Raises `FutuOrderRefused`; sends
+    nothing."""
+    _trd_env(account_env)
     if spec.action not in ("BUY", "SELL"):
         raise FutuOrderRefused(INVALID_ORDER, f"action must be BUY or SELL (got {spec.action!r})")
     if not isinstance(spec.quantity, int) or isinstance(spec.quantity, bool) or spec.quantity < 1:
         raise FutuOrderRefused(INVALID_ORDER, "quantity must be a whole number >= 1")
-    if spec.tif not in _TIF:
-        raise FutuOrderRefused(INVALID_ORDER, f"time in force must be DAY or GTC (got {spec.tif!r})")
-    return futu_code_for(spec), checked_price(spec, spec.limit_price)
+    refusal = allowed(account_env, spec.sec_type, spec.order_type, spec.tif, spec.session, op=op, environ=environ)
+    if refusal is not None:
+        raise FutuOrderRefused(*refusal)
+    t = spec.order_type
+    _present("a limit price", spec.limit_price, t in LIMIT_TYPES, t)
+    _present("a trigger price", spec.aux_price, t in AUX_TYPES, t)
+    _present("a trail type", spec.trail_type, t in TRAIL_TYPES, t)
+    _present("a trail value", spec.trail_value, t in TRAIL_TYPES, t)
+    _present("a trail spread", spec.trail_spread, t in SPREAD_TYPES, t)
+    price = float(checked_price(spec, spec.limit_price)) if t in LIMIT_TYPES else PLACEHOLDER_PRICE
+    terms: dict = {}
+    if t in AUX_TYPES:
+        terms["aux_price"] = float(checked_price(spec, spec.aux_price, "trigger price"))
+    if t in TRAIL_TYPES:
+        terms["trail_value"] = float(checked_trail_value(spec, spec.trail_value))
+        terms["trail_type"] = spec.trail_type
+    if t in SPREAD_TYPES:
+        terms["trail_spread"] = float(checked_trail_spread(spec.trail_spread))
+    return CheckedOrder(code=futu_code_for(spec), price=price, terms=terms)
 
 
 def _trd_env(account_env: str) -> str:
@@ -325,31 +587,40 @@ def place_single(
     mark_sent: Callable[[], None] | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> FutuSendResult:
-    """Place one limit order with remark `xo:<submission_id>`.
+    """Place one order with remark `xo:<submission_id>`.
 
-    Every check (order type, quantity, price increment, code, remark, unlock)
-    runs before `mark_sent`; a refusal raises `FutuOrderRefused` with nothing
-    sent. After the mark: RET_OK with an order id → "accepted" (state from the
-    reply's non-refresh row, never terminal: a terminal status there is
-    UNKNOWN until a fresh query); anything else → "unknown"."""
-    code, price = _checked_spec(spec)
+    Every check (`check_spec`: allowed tuple, fields, precision, code; then
+    remark, unlock) runs before `mark_sent`; a refusal raises
+    `FutuOrderRefused` with nothing sent. The SDK gets `order_type` from the
+    label map, the limit or `PLACEHOLDER_PRICE`, the type's `aux_price` /
+    `trail_*`, and `session` only when it is not RTH (RTH keeps the SDK
+    default `Session.NONE`, the v0.16 wire). After the mark: RET_OK with an
+    order id → "accepted" (state from the reply's non-refresh row, never
+    terminal: a terminal status there is UNKNOWN until a fresh query);
+    anything else → "unknown"."""
+    checked = check_spec(spec, account_env, environ=environ)
+    code = checked.code
     remark = remark_for(submission_id)
     trd_env = _trd_env(account_env)
+    extra = dict(checked.terms)
+    if spec.session != DEFAULT_SESSION:
+        extra["session"] = spec.session
     unlock(ctx, account_env, environ=environ)
     got = _send(
         "place_order",
         mark_sent,
         lambda: ctx.place_order(
-            price=float(price),
+            price=checked.price,
             qty=spec.quantity,
             code=code,
             trd_side=spec.action,
-            order_type=ORDER_TYPE_LIMIT,
+            order_type=ORDER_TYPE_TO_FUTU[spec.order_type],
             adjust_limit=0,
             trd_env=trd_env,
             acc_id=int(acc_id),
             remark=remark,
             time_in_force=_TIF[spec.tif],
+            **extra,
         ),
     )
     if isinstance(got, FutuSendResult):
@@ -382,11 +653,12 @@ def _modify(
     *,
     order_id: str,
     qty: int,
-    price: Decimal,
+    price: float,
     account_env: str,
     acc_id: str,
     mark_sent: Callable[[], None] | None,
     environ: Mapping[str, str] | None,
+    terms: Mapping[str, Any] | None = None,
 ) -> FutuSendResult:
     trd_env = _trd_env(account_env)
     if not order_id:
@@ -403,6 +675,7 @@ def _modify(
             adjust_limit=0,
             trd_env=trd_env,
             acc_id=int(acc_id),
+            **(terms or {}),
         ),
     )
     if isinstance(got, FutuSendResult):
@@ -423,19 +696,23 @@ def modify(
     mark_sent: Callable[[], None] | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> FutuSendResult:
-    """`modify_order(NORMAL)` to the spec's quantity / limit price. A RET_OK
-    is "sent", never a confirmation."""
-    _, price = _checked_spec(spec)
+    """`modify_order(NORMAL)` to the spec's full terms: quantity, the limit
+    (or `PLACEHOLDER_PRICE`), and the type's `aux_price` / `trail_*`. Type,
+    trail type and session are the order's own (`check_spec(op="modify")`
+    checks the tuple and the modify allowlist); `session` is never sent
+    (`modify_order` has none). A RET_OK is "sent", never a confirmation."""
+    checked = check_spec(spec, account_env, op="modify", environ=environ)
     return _modify(
         ctx,
         MODIFY_NORMAL,
         order_id=order_id,
         qty=spec.quantity,
-        price=price,
+        price=checked.price,
         account_env=account_env,
         acc_id=acc_id,
         mark_sent=mark_sent,
         environ=environ,
+        terms=checked.terms,
     )
 
 
@@ -456,7 +733,7 @@ def cancel(
         MODIFY_CANCEL,
         order_id=order_id,
         qty=0,
-        price=Decimal(0),
+        price=0.0,
         account_env=account_env,
         acc_id=acc_id,
         mark_sent=mark_sent,
@@ -486,6 +763,14 @@ class FutuOrderEvidence:
     dealt_qty: Decimal | None
     remark: str | None
     row: dict
+    futu_order_type: str | None = None  # raw Futu `OrderType`
+    order_type: str | None = None  # Xenon label; None when absent or not a mapped type
+    aux_price: Decimal | None = None
+    trail_type: str | None = None
+    trail_value: Decimal | None = None
+    trail_spread: Decimal | None = None
+    tif: str | None = None
+    session: str | None = None
 
 
 def _evidence(row: dict) -> FutuOrderEvidence | None:
@@ -493,6 +778,7 @@ def _evidence(row: dict) -> FutuOrderEvidence | None:
     if oid is None:
         return None
     status = _text(row.get("order_status"))
+    futu_type = _text(row.get("order_type"))
     return FutuOrderEvidence(
         order_id=oid,
         futu_code=_text(row.get("code")),
@@ -503,6 +789,14 @@ def _evidence(row: dict) -> FutuOrderEvidence | None:
         dealt_qty=_decimal(row.get("dealt_qty")),
         remark=_text(row.get("remark")),
         row=dict(row),
+        futu_order_type=futu_type,
+        order_type=FUTU_TO_ORDER_TYPE.get(futu_type or ""),
+        aux_price=_decimal(row.get("aux_price")),
+        trail_type=_text(row.get("trail_type")),
+        trail_value=_decimal(row.get("trail_value")),
+        trail_spread=_decimal(row.get("trail_spread")),
+        tif=_text(row.get("time_in_force")),
+        session=_text(row.get("session")),
     )
 
 

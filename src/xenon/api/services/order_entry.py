@@ -2254,8 +2254,7 @@ async def _futu_place(body: dict, broker: str, account_env: str | None):
     # Refuse what the adapter would refuse before a row is reserved.
     try:
         spec = _futu_spec(body)
-        code = futu_orders.futu_code_for(spec)
-        futu_orders.checked_price(spec, spec.limit_price)
+        code = futu_orders.check_spec(spec, scope.account_env).code
     except futu_orders.FutuOrderRefused as exc:
         return _futu_refusal_response(exc)
     except (ValueError, TypeError, InvalidOperation) as exc:
@@ -2628,6 +2627,13 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
             right=row.get("right"),
             strike=Decimal(str(row["strike"])) if row.get("strike") is not None else None,
         )
+        # The order's tuple must still be allowed for modify in this env (an
+        # upgrade can withdraw it, e.g. paper GTC); cancel stays available.
+        refusal = futu_orders.allowed(
+            scope.account_env, base_spec.sec_type, base_spec.order_type, base_spec.tif, base_spec.session, op="modify"
+        )
+        if refusal is not None:
+            raise futu_orders.FutuOrderRefused(*refusal)
         req_price = futu_orders.checked_price(base_spec, Decimal(str(new_price))) if new_price is not None else None
     except futu_orders.FutuOrderRefused as exc:
         return order_error(exc.http_status, exc.reason_code, {"message": str(exc), "http_status": exc.http_status})
