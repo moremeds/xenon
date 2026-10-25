@@ -14,6 +14,7 @@ from sqlalchemy import desc, select
 from xenon.api.guards import get_broker_scope
 from xenon.db.engine import get_sync_engine
 from xenon.db.schema import order_fills, order_submissions
+from xenon.execution import orders_store
 from xenon.execution.account_scope import AccountScope
 
 router = APIRouter()
@@ -195,8 +196,13 @@ _FUTU_ORDER_TYPE = {"NORMAL": "LMT", "MARKET": "MKT"}
 
 def _futu_open_order(row: dict[str, Any], scope: AccountScope) -> dict[str, Any]:
     out = _open_order(row)
-    info = (row.get("legs") or {}).get("futu_order") if isinstance(row.get("legs"), dict) else None
+    legs = row.get("legs") if isinstance(row.get("legs"), dict) else {}
+    info = legs.get("futu_order")
     order_type = (info or {}).get("order_type")
+    # Observed type, else the placement intent (an own order not observed yet).
+    label = orders_store.FUTU_ORDER_LABELS.get(order_type or "") or (legs.get("futu_intent") or {}).get("order_type")
+    if label is not None and label not in orders_store.FUTU_LIMIT_LABELS:
+        out["limitPrice"] = None  # no fixed limit: Futu's `price` is an SDK placeholder
     out.update(
         orderId=0,
         permId=0,

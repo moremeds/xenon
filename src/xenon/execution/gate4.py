@@ -921,7 +921,7 @@ def _accepted_with_netting(inputs: Gate4Inputs, candidate) -> bool:
     return _evaluate(inputs, candidate, netting=True).accept
 
 
-def _legs_for_body_match(legs_payload):
+def _legs_for_body_match(legs_payload, futu_intent: dict | None = None):
     """Project a legs payload onto the request-owned keys (round 5, item 5).
 
     Whitelist, not blacklist: only what the client's body determines in
@@ -935,13 +935,22 @@ def _legs_for_body_match(legs_payload):
     while the open-order mirror stores IB's stock sentinels (right "?",
     strike 0.0) once it owns the leg list (incident row 36). They are not
     request terms, so a STK leg compares on its identity keys only.
+
+    `futu_intent` (FUTU only, X5 § 3): the frozen placement fingerprint
+    (order type, trigger, trail, session). It joins the projection, never
+    the mutable `futu_terms` / observed `futu_order`, so a replay after a
+    confirmed trigger / trail amend still matches the placement and a replay
+    with another type / trigger / trail / session is a body mismatch.
     """
     if not isinstance(legs_payload, dict):
         return legs_payload
     legs = legs_payload.get("legs")
     if isinstance(legs, list):
         legs = [_request_leg(leg) if isinstance(leg, dict) else leg for leg in legs]
-    return {"legs": legs, "guaranteed": legs_payload.get("guaranteed")}
+    out = {"legs": legs, "guaranteed": legs_payload.get("guaranteed")}
+    if futu_intent is not None:
+        out["futu_intent"] = futu_intent
+    return out
 
 
 def _request_leg(leg: dict) -> dict:
@@ -966,8 +975,13 @@ def _may_be_at_ib(m) -> bool:
 
 def _classify_existing(row, request: RequestRow, legs_payload) -> Gate4Outcome:
     m = row._mapping if hasattr(row, "_mapping") else row
-    body_legs = _legs_for_body_match(m["legs"])
-    if not _request_body_matches(_RowView(m, legs=body_legs), request, _legs_for_body_match(legs_payload)):
+    # The stored row's intent (a pre-X5 Xenon FUTU row → the legacy LMT
+    # intent) vs the request's own `futu_intent`; IB rows carry neither.
+    body_legs = _legs_for_body_match(m["legs"], orders_store.futu_intent_of(m))
+    request_intent = legs_payload.get("futu_intent") if isinstance(legs_payload, dict) else None
+    if not _request_body_matches(
+        _RowView(m, legs=body_legs), request, _legs_for_body_match(legs_payload, request_intent)
+    ):
         # Same attempt id, different body. If that attempt may be at IB, the
         # client must not be told to rebuild and resubmit: the id belongs to
         # an existing order and the new terms were never placed (PR-08).

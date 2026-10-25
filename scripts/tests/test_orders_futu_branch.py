@@ -174,7 +174,6 @@ def test_get_orders_route_serves_ledger_while_opend_offline(monkeypatch):
     assert body["scope"]["brokerAccount"] == ACC
 
 
-
 @pytest.mark.parametrize(
     "request_scope",
     [
@@ -269,6 +268,8 @@ class FakeOrderCtx(FakeTradeCtx):
     Every mutation is first bound against `create_autospec` of the installed
     SDK's `OpenSecTradeContext` (an unsupported keyword raises TypeError)."""
 
+    TERMS = ("aux_price", "trail_type", "trail_value", "trail_spread")
+
     def __init__(self, *, place="ok", modify="apply", cancel="cancelled"):
         from unittest.mock import create_autospec
 
@@ -297,6 +298,9 @@ class FakeOrderCtx(FakeTradeCtx):
         self._next += 1
         row = _order(order_id=oid, code=kw["code"], side=kw["trd_side"], qty=float(kw["qty"]), remark=kw["remark"])
         row["price"] = kw["price"]
+        # The booked order carries the type and terms the SDK was sent.
+        row["order_type"] = kw["order_type"]
+        row.update({k: kw[k] for k in self.TERMS + ("session",) if k in kw})
         self.book[oid] = row
         if self.place_mode == "error_after_send":
             return -1, "timeout"
@@ -314,6 +318,7 @@ class FakeOrderCtx(FakeTradeCtx):
                 row["dealt_qty"], row["dealt_avg_price"] = row["qty"], row["price"]
         elif self.modify_mode == "apply":
             row["qty"], row["price"] = float(kw["qty"]), kw["price"]
+            row.update({k: kw[k] for k in self.TERMS if k in kw})
         return 0, _frame(["trd_env", "order_id"], [{"trd_env": kw["trd_env"], "order_id": kw["order_id"]}])
 
     def order_list_query(self, **kw):

@@ -76,7 +76,9 @@ class RequestRow(BaseModel):
     right: Literal["C", "P"] | None = None
     multiplier: int
     con_id: int | None = None
-    limit_price: Decimal
+    # None only for a FUTU order type without a fixed limit (MKT, STP, MIT,
+    # TRAIL, TRAIL LIMIT); IB and every limit type carry a price (X5 § 3).
+    limit_price: Decimal | None
     # Time in force, part of the request identity (round 6, item 2).
     # Normalized like the place CLI (`params.get("tif", "DAY").upper()`).
     tif: str = "DAY"
@@ -124,6 +126,7 @@ def _log_noop(writer: str, submission_id: str, to_state: str, expected_states) -
         tuple(expected_states),
     )
 
+
 ATTEMPT_BODY_MISMATCH = "ATTEMPT_BODY_MISMATCH"
 
 # IB ``orderRef`` on every Xenon-placed order: "xo:<submission_id>". The
@@ -141,6 +144,7 @@ def submission_id_from_order_ref(ref: object) -> str | None:
     if isinstance(ref, str) and ref.startswith(XO_REF_PREFIX) and len(ref) > len(XO_REF_PREFIX):
         return ref[len(XO_REF_PREFIX) :]
     return None
+
 
 # Sentinel for optional JSONB write-through params (register_from_snapshot):
 # "not provided" must not overwrite a stored value the caller never computed.
@@ -1384,6 +1388,88 @@ FUTU_HELD_REASONS = (FUTU_FILL_UNPRICED, FUTU_FILL_CONFLICT, FUTU_NOT_OBSERVED)
 # Full passes in a row a non-terminal order must be absent from before it
 # becomes UNKNOWN (one-pass grace, like the IB disappeared-order sweep).
 FUTU_MISSING_PASSES = 2
+# user_id of a row the observation inserted for an order made outside Xenon.
+FUTU_OBSERVATION_USER = "futu-observation"
+
+# Futu `OrderType` (SDK common/constant.py:1187-1199) → Xenon label (wire
+# `orderType`). One table for the adapter, the binder and the read path.
+FUTU_ORDER_LABELS: dict[str, str] = {
+    "NORMAL": "LMT",
+    "MARKET": "MKT",
+    "STOP": "STP",
+    "STOP_LIMIT": "STP LMT",
+    "MARKET_IF_TOUCHED": "MIT",
+    "LIMIT_IF_TOUCHED": "LIT",
+    "TRAILING_STOP": "TRAIL",
+    "TRAILING_STOP_LIMIT": "TRAIL LIMIT",
+}
+# Labels with a fixed user limit (`limitPrice`); every other label has none
+# (`limit_price` NULL; Futu's `price` is an SDK placeholder for them).
+FUTU_LIMIT_LABELS = frozenset({"LMT", "STP LMT", "LIT"})
+# `legs.futu_intent`: the frozen placement fingerprint of a Xenon FUTU order,
+# written with the reservation and never changed (not by modify, not by the
+# runbook). `legs.futu_terms`: the current confirmed amendable terms; starts
+# equal to the intent, changed only by a confirmed modify or runbook § 5.
+FUTU_TERM_KEYS = ("aux_price", "trail_value", "trail_spread")
+# Intent of a Xenon FUTU row placed before X5 (no `futu_intent`): v0.16
+# placed only LMT, no trigger, no trail, regular session (R2-2).
+LEGACY_FUTU_INTENT: dict = {
+    "order_type": "LMT",
+    "aux_price": None,
+    "trail_type": None,
+    "trail_value": None,
+    "trail_spread": None,
+    "session": "RTH",
+}
+_FUTU_SESSIONS = frozenset({"RTH", "ETH", "ALL", "OVERNIGHT"})
+
+
+def canonical_decimal(value) -> str | None:
+    """A finite number as its canonical text (`1.50` → `"1.5"`, `1E+2` →
+    `"100"`), the form stored in `futu_intent` / `futu_terms`."""
+    if value is None:
+        return None
+    return format(Decimal(str(value)).normalize(), "f")
+
+
+def futu_price_increment(sec_type: str, price: Decimal) -> Decimal:
+    """Minimum US price increment: $0.01, and $0.0001 for a stock below $1
+    (Reg NMS Rule 612). The adapter's price grid (`futu_orders`)."""
+    if sec_type == "STK" and price < 1:
+        return Decimal("0.0001")
+    return Decimal("0.01")
+
+
+def futu_trail_value_dp(sec_type: str, trail_type: str | None) -> int:
+    """Decimals Futu keeps for `trail_value`: RATIO 2 (percent); AMOUNT 4 for
+    a stock, 2 for an option (X5 plan § 1)."""
+    if trail_type == "RATIO":
+        return 2
+    return 4 if sec_type == "STK" else 2
+
+
+FUTU_TRAIL_SPREAD_DP = 3
+
+
+def futu_intent_of(row) -> dict | None:
+    """The placement intent of a FUTU row (`legs.futu_intent`), or None.
+
+    A Xenon row placed before X5 has no stored intent and gets
+    `LEGACY_FUTU_INTENT` (v0.16 placed only LMT / RTH): every X5 reservation
+    writes the intent, so a Xenon row without one predates X5. A row the
+    observation inserted for an order made outside Xenon (user
+    `futu-observation`, id prefix `futu-`) gets None, never a fabricated
+    fingerprint: its type and terms come from a fresh broker read (R2-2).
+    IB rows → None."""
+    m = getattr(row, "_mapping", row)
+    if m["broker"] != "FUTU":
+        return None
+    intent = normalize_legs_payload(m["legs"]).get("futu_intent")
+    if isinstance(intent, dict):
+        return intent
+    if m["user_id"] == FUTU_OBSERVATION_USER or str(m["submission_id"]).startswith(FUTU_SUBMISSION_PREFIX):
+        return None
+    return dict(LEGACY_FUTU_INTENT)
 
 
 def futu_submission_id(account_env: str, broker_account: str, order_id: str) -> str:
@@ -1433,6 +1519,72 @@ class FutuOrderObservation:
     # the strike column (Numeric(12, 2)) is display precision only.
     futu_code: str | None = None
     fill_metadata: dict | None = None
+    # Observed trail terms and session (`trail_type` RATIO / AMOUNT,
+    # `trail_spread` may be 0); None when Futu reports N/A.
+    trail_type: str | None = None
+    trail_value: Decimal | None = None
+    trail_spread: Decimal | None = None
+    session: str | None = None
+
+    @property
+    def order_label(self) -> str | None:
+        """Xenon label of the observed Futu type; None when absent or not mapped."""
+        return FUTU_ORDER_LABELS.get(self.order_type or "")
+
+
+def _on_dp(value: Decimal, dp: int) -> Decimal:
+    return value.quantize(Decimal(1).scaleb(-dp))
+
+
+def _futu_intent_mismatch(row, obs: FutuOrderObservation) -> str | None:
+    """Which part of the placement a remark-bind observation contradicts
+    (X5 § 3): the quantity sent, and against the stored intent the order
+    type, the trigger tick, the trail type / value / spread on their grids,
+    and the session. A term Futu does not report is not a contradiction; a
+    term Futu reports that the placement did not have is. An order made
+    outside Xenon has no intent: only the quantity is compared. Never used
+    for an order that is already bound (a bound order's trigger / trail may
+    change through a modify or the Futu app)."""
+    if obs.quantity != int(row.quantity or 0):
+        return "quantity"
+    intent = futu_intent_of(row)
+    if intent is None:
+        return None
+    if obs.order_type is not None and obs.order_label != intent.get("order_type"):
+        return "order_type"
+
+    def _want(key: str) -> Decimal | None:
+        v = intent.get(key)
+        return None if v is None else Decimal(str(v))
+
+    aux = _want("aux_price")
+    if aux is None:
+        if obs.aux_price is not None:
+            return "aux_price"
+    elif obs.aux_price is not None and obs.aux_price.quantize(futu_price_increment(row.security_type, aux)) != aux:
+        return "aux_price"
+    trail_type = intent.get("trail_type")
+    if obs.trail_type is not None and obs.trail_type != trail_type:
+        return "trail_type"
+    value = _want("trail_value")
+    if value is None:
+        if obs.trail_value is not None:
+            return "trail_value"
+    elif (
+        obs.trail_value is not None
+        and _on_dp(obs.trail_value, futu_trail_value_dp(row.security_type, trail_type)) != value
+    ):
+        return "trail_value"
+    spread = _want("trail_spread")
+    if spread is None:
+        if obs.trail_spread is not None and obs.trail_spread != 0:
+            return "trail_spread"
+    elif obs.trail_spread is not None and _on_dp(obs.trail_spread, FUTU_TRAIL_SPREAD_DP) != spread:
+        return "trail_spread"
+    want_session = intent.get("session") or "RTH"
+    if obs.session in _FUTU_SESSIONS and obs.session != want_session:
+        return "session"
+    return None
 
 
 def _futu_order_info(obs: FutuOrderObservation) -> dict | None:
@@ -1520,7 +1672,11 @@ def _futu_state_values(row, obs: FutuOrderObservation, *, fresh: bool, own: bool
     quantity = obs.quantity if fresh else max(obs.quantity, int(row.quantity or 0))
     if quantity != int(row.quantity or 0):
         values["quantity"] = quantity
-    if fresh and obs.limit_price is not None and obs.limit_price != row.limit_price:
+    if fresh and obs.order_label is not None and obs.order_label not in FUTU_LIMIT_LABELS:
+        # No fixed user limit: Futu's `price` is a placeholder, never a limit.
+        if row.limit_price is not None:
+            values["limit_price"] = None
+    elif fresh and obs.limit_price is not None and obs.limit_price != row.limit_price:
         values["limit_price"] = obs.limit_price
     if obs.tif is not None and obs.tif != row.tif:
         values["tif"] = obs.tif
@@ -1571,7 +1727,10 @@ def mirror_futu_order(
 
     A row whose immutable identity (symbol, sec type, side, option fields)
     contradicts the observation is not bound or changed:
-    `identity_mismatch` names the field.
+    `identity_mismatch` names the field. A remark bind also compares the
+    quantity and the persisted placement intent (`_futu_intent_mismatch`);
+    a contradiction binds nothing and the row stays as it is (UNKNOWN after
+    an uncertain place), never re-sent.
     """
     ensure_writable()
     broker = "FUTU"
@@ -1601,6 +1760,11 @@ def mirror_futu_order(
             # nothing and keeps the reservation; the caller marks its pass
             # incomplete, so Gate 4 fails closed on the missing demand.
             mismatch = _futu_identity_mismatch(row, obs)
+            if mismatch is None and bind:
+                # Initial UNKNOWN binding by remark (also the place
+                # fresh-read confirmation): the order must be the placement
+                # Xenon persisted, not only the same contract and side.
+                mismatch = _futu_intent_mismatch(row, obs)
             if mismatch is not None:
                 out["submission_id"] = row.submission_id
                 out["identity_mismatch"] = mismatch
@@ -1682,7 +1846,9 @@ def mirror_futu_order(
                     action=obs.action,
                     quantity=obs.quantity,
                     **pg_insert_values,
-                    limit_price=obs.limit_price,
+                    limit_price=obs.limit_price
+                    if obs.order_label is None or obs.order_label in FUTU_LIMIT_LABELS
+                    else None,
                     state=obs.state,
                     filled_qty=0,
                     submitted_at=now,
