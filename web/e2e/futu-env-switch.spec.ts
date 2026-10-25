@@ -220,7 +220,7 @@ test.describe("Futu SIMULATE / REAL switch", () => {
     await context.clearCookies();
   });
 
-  test("toggle paper → live → paper; URLs and badge follow; reload persists", async ({
+  test("toggle paper → live → paper; URLs and switch state follow; reload persists", async ({
     page,
   }) => {
     const { futuUrls, orderUrls } = await installMocks(page);
@@ -232,7 +232,10 @@ test.describe("Futu SIMULATE / REAL switch", () => {
     await page.reload();
     await page.getByRole("button", { name: "Switch to FUTU account" }).click();
     await expect(page.getByTestId("futu-env-switch")).toBeVisible();
-    await expect(page.getByTestId("futu-env-badge")).toHaveText("SIMULATE");
+    await expect(page.getByTestId("futu-env-simulate")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
 
     await expect
       .poll(() => futuUrls.some((u) => u.includes("account_env=paper")))
@@ -245,7 +248,10 @@ test.describe("Futu SIMULATE / REAL switch", () => {
     });
 
     await page.getByTestId("futu-env-real").click();
-    await expect(page.getByTestId("futu-env-badge")).toHaveText("REAL");
+    await expect(page.getByTestId("futu-env-real")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
     await expect(page.getByTestId("futu-empty-state")).toHaveText(
       "No REAL Futu account configured for this environment.",
     );
@@ -266,10 +272,16 @@ test.describe("Futu SIMULATE / REAL switch", () => {
     await expect
       .poll(() => orderUrls.some((u) => u.includes("account_env=live")))
       .toBeTruthy();
-    await expect(page.getByTestId("futu-env-badge")).toHaveText("REAL");
+    await expect(page.getByTestId("futu-env-real")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
 
     await page.getByTestId("futu-env-simulate").click();
-    await expect(page.getByTestId("futu-env-badge")).toHaveText("SIMULATE");
+    await expect(page.getByTestId("futu-env-simulate")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
     await expect
       .poll(
         () => orderUrls.filter((u) => u.includes("account_env=paper")).length,
@@ -278,6 +290,9 @@ test.describe("Futu SIMULATE / REAL switch", () => {
 
     await page.reload();
     await page.getByRole("button", { name: "Switch to FUTU account" }).click();
-    await expect(page.getByTestId("futu-env-badge")).toHaveText("SIMULATE");
+    await expect(page.getByTestId("futu-env-simulate")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 });

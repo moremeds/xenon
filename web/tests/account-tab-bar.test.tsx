@@ -38,7 +38,6 @@ describe("AccountTabBar", () => {
         onChange={onChange}
         ib={ibState}
         futu={{ ...futuState, environment: "simulate" }}
-        futuEnv="paper"
       />,
     );
     expect(getByText(/· simulate/)).toBeTruthy();
@@ -88,6 +87,25 @@ describe("AccountTabBar", () => {
       />,
     );
     fireEvent.click(getByLabelText(/Switch to FUTU account/));
+    expect(onChange).toHaveBeenCalledWith("futu");
+  });
+
+  it("renders the SIMULATE / REAL switch inside the Futu tab only", () => {
+    const onChange = vi.fn();
+    const { getByTestId, getAllByTestId } = render(
+      <AccountTabBar
+        active="ib"
+        onChange={onChange}
+        ib={ibState}
+        futu={futuState}
+      />,
+    );
+    expect(getAllByTestId("futu-env-switch")).toHaveLength(1);
+    const futuCard = getByTestId("futu-env-switch").closest(".account-tab");
+    expect(futuCard?.textContent).toContain("ACCOUNT · FUTU");
+    expect(futuCard?.textContent).not.toContain("ACCOUNT · IB");
+    // Picking an env from the IB view also opens the Futu tab.
+    fireEvent.click(getByTestId("futu-env-real"));
     expect(onChange).toHaveBeenCalledWith("futu");
   });
 
