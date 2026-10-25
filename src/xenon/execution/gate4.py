@@ -50,6 +50,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -1445,6 +1446,7 @@ def settle_modify(
     scope: dict,
     new_qty: int | None = None,
     new_limit_price: Decimal | float | str | None = None,
+    new_futu_terms: Mapping[str, Any] | None = None,
 ) -> bool:
     """Resolve one amend generation against the broker reply.
 
@@ -1454,7 +1456,9 @@ def settle_modify(
     one, and a reply after mirror reconciliation never rewrites quantity.
 
     confirmed → quantity becomes new_qty (quantity amends) and limit_price
-                becomes new_limit_price (when given), amend clears.
+                becomes new_limit_price (when given); a Futu amend's confirmed
+                trigger / trail terms replace `legs.futu_terms` (when given;
+                `legs.futu_intent` is never touched); amend clears.
     rejected  → the broker provably did not apply the amend, amend clears.
     uncertain → a quantity amend keeps pending_amend_qty + token so coverage
                 keeps reserving max(old,new); a price-only amend clears its
@@ -1479,7 +1483,10 @@ def settle_modify(
             price = _finite_decimal(new_limit_price)
             if price is not None:
                 values["limit_price"] = price
-        _write_payload(conn, submission_id, orders_store._clear_pending(payload), **values)
+        payload = orders_store._clear_pending(payload)
+        if outcome == "confirmed" and new_futu_terms is not None:
+            payload["futu_terms"] = {k: new_futu_terms.get(k) for k in orders_store.FUTU_TERM_KEYS}
+        _write_payload(conn, submission_id, payload, **values)
         return True
 
 

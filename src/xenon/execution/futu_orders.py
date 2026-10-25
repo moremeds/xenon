@@ -504,20 +504,24 @@ def modify_spec(
     *,
     intent: Mapping[str, Any] | None,
     quantity: int | None,
-    limit_price: Decimal | None,
+    limit_price: Decimal | None = None,
+    aux_price: Decimal | None = None,
+    trail_value: Decimal | None = None,
+    trail_spread: Decimal | None = None,
 ) -> FutuOrderSpec:
     """The full outgoing terms of a modify (X5 § 3, R2-2), from a fresh read.
 
     Type, trail type and session (immutable) come from the placement
     `intent` (a Xenon order, incl. the legacy LMT intent); an order made
     outside Xenon (`intent` None) takes them from the read, never a guess.
-    Quantity and limit come from the request, else the read; trigger and
-    trail terms from the read (an omitted field keeps Futu's current value),
-    each on its own grid. Raises `FutuOrderRefused` (nothing sent):
+    Quantity, limit, trigger and trail terms come from the request
+    (`checked_amend`), else the read (an omitted field keeps Futu's current
+    value, also one changed in the Futu app), each on its own grid. Raises
+    `FutuOrderRefused` (nothing sent):
     `NOT_MODIFIABLE` when the read contradicts the intent's type, or an
     outside order's type / session / a term its type needs cannot be read;
     `FUTU_ORDER_UNVERIFIED` when a Xenon order's read lacks a term its type
-    needs; `INVALID_ORDER_BODY` for a new limit on a type without one."""
+    needs; `INVALID_ORDER_BODY` for a new field the type does not have."""
     label = ev.order_type
     if intent is not None:
         order_type = str(intent.get("order_type") or "LMT")
@@ -539,15 +543,12 @@ def modify_spec(
             raise FutuOrderRefused(NOT_MODIFIABLE, f"Futu session {session!r} of this order cannot be read")
         trail_type = ev.trail_type
         missing = NOT_MODIFIABLE, 400
-    if limit_price is not None and order_type not in LIMIT_TYPES:
-        raise FutuOrderRefused(INVALID_ORDER_BODY, f"{order_type} orders have no limit price")
     spec = dataclasses.replace(base, order_type=order_type, session=session)
     if order_type in TRAIL_TYPES:
         spec = dataclasses.replace(spec, trail_type=trail_type)
-    terms: dict[str, Any] = {
-        "limit_price": (limit_price if limit_price is not None else tick_price(spec, ev.price))
-        if order_type in LIMIT_TYPES
-        else None,
+    new = {"limit_price": limit_price, "aux_price": aux_price, "trail_value": trail_value, "trail_spread": trail_spread}
+    read: dict[str, Any] = {
+        "limit_price": tick_price(spec, ev.price) if order_type in LIMIT_TYPES else None,
         "aux_price": tick_price(spec, ev.aux_price) if order_type in AUX_TYPES else None,
         "trail_value": _on_grid(ev.trail_value, trail_value_dp(spec)) if order_type in TRAIL_TYPES else None,
         "trail_spread": _on_grid(ev.trail_spread, orders_store.FUTU_TRAIL_SPREAD_DP)
@@ -555,16 +556,64 @@ def modify_spec(
         else None,
     }
     lacking = (["trail_type"] if order_type in TRAIL_TYPES and trail_type not in TRAIL_KINDS else []) + [
-        k for k, v in terms.items() if v is None and _needs(order_type, k)
+        k for k in read if new[k] is None and read[k] is None and _needs(order_type, k)
     ]
     if lacking:
         code, status = missing
         raise FutuOrderRefused(
             code, f"Futu did not report the {', '.join(lacking)} of this {order_type} order; nothing was sent", status
         )
+    checked = checked_amend(spec, **new)
+    terms = {k: checked[k] if checked[k] is not None else read[k] for k in read}
     if ev.qty is None or ev.qty != ev.qty.to_integral_value():
         raise FutuOrderRefused(ORDER_UNVERIFIED, "Futu did not report this order's quantity", 503)
     return dataclasses.replace(spec, quantity=quantity if quantity is not None else int(ev.qty), **terms)
+
+
+_TERM_NAMES = {
+    "limit_price": "limit price",
+    "aux_price": "trigger price",
+    "trail_value": "trail value",
+    "trail_spread": "trail spread",
+}
+
+
+def checked_amend(spec: FutuOrderSpec, **new: Any) -> dict[str, Decimal | None]:
+    """The new terms of a modify body (`limit_price`, `aux_price`,
+    `trail_value`, `trail_spread`; None = keep Futu's value), unchanged, each
+    on its own grid. Raises `FutuOrderRefused`: `INVALID_ORDER_BODY` for a
+    field the spec's type does not have; the place precision refusals
+    otherwise (never rounded)."""
+    checks = {
+        "limit_price": lambda v: checked_price(spec, v),
+        "aux_price": lambda v: checked_price(spec, v, "trigger price"),
+        "trail_value": lambda v: checked_trail_value(spec, v),
+        "trail_spread": checked_trail_spread,
+    }
+    out: dict[str, Decimal | None] = {}
+    for key, value in new.items():
+        if value is not None and not _needs(spec.order_type, key):
+            raise FutuOrderRefused(INVALID_ORDER_BODY, f"{spec.order_type} orders have no {_TERM_NAMES[key]}")
+        out[key] = None if value is None else checks[key](value)
+    return out
+
+
+def amend_confirmed(spec: FutuOrderSpec, ev: FutuOrderEvidence | None) -> bool:
+    """A fresh read shows every sent field of `spec` (X5 § 5), each on its
+    own grid: quantity; limit tick (types with a fixed limit); trigger tick;
+    trail value at its decimals; spread at 3 decimals. A derived broker
+    price (the moving stop of a trailing order) is never compared."""
+    if ev is None or ev.qty is None or ev.qty != spec.quantity:
+        return False
+    t = spec.order_type
+    return all(
+        (
+            t not in LIMIT_TYPES or tick_price(spec, ev.price) == spec.limit_price,
+            t not in AUX_TYPES or tick_price(spec, ev.aux_price) == spec.aux_price,
+            t not in TRAIL_TYPES or _on_grid(ev.trail_value, trail_value_dp(spec)) == spec.trail_value,
+            t not in SPREAD_TYPES or _on_grid(ev.trail_spread, orders_store.FUTU_TRAIL_SPREAD_DP) == spec.trail_spread,
+        )
+    )
 
 
 def _needs(order_type: str, term: str) -> bool:

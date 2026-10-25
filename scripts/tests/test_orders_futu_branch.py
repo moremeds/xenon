@@ -359,13 +359,17 @@ def futu_ib_quotes(monkeypatch):
 
 @pytest.fixture
 def futu(futu_ib_quotes, monkeypatch):
-    """As futu_ib_quotes, with the IB quote gate passing."""
+    """As futu_ib_quotes, with the IB quote gate passing (place and modify)."""
     from xenon.api.services import order_entry
 
-    async def _quote_ok(body, submission_id):
+    async def _quote_ok(body, submission_id, futu_spec=None):
         return None
 
+    async def _modify_quote_ok(spec):
+        return (lambda full: []), None
+
     monkeypatch.setattr(order_entry, "_quote_gate", _quote_ok)
+    monkeypatch.setattr(order_entry, "_futu_modify_quote", _modify_quote_ok)
     return futu_ib_quotes
 
 

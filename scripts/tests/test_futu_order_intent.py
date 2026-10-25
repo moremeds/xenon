@@ -17,6 +17,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import func, select, update
 
+from scripts.tests import test_orders_futu_branch as _branch
 from scripts.tests.test_futu_observation import (  # noqa: F401 — autouse fixture
     ACC,
     SCOPE,
@@ -26,7 +27,6 @@ from scripts.tests.test_futu_observation import (  # noqa: F401 — autouse fixt
     _order,
     resolver,
 )
-from scripts.tests import test_orders_futu_branch as _branch
 from scripts.tests.test_orders_futu_branch import (  # noqa: F401 — autouse fixture
     LIVE_ACC,
     _configured,
@@ -41,7 +41,7 @@ from xenon.api.services import futu_observation as fo
 from xenon.api.services import order_entry
 from xenon.db.engine import get_sync_engine
 from xenon.db.schema import order_submissions
-from xenon.execution import futu_orders, gate4, orders_store
+from xenon.execution import futu_orders, orders_store
 from xenon.execution.account_scope import AccountScope
 
 pytestmark = pytest.mark.committed_db
@@ -145,17 +145,6 @@ def test_a_no_limit_type_keeps_a_null_price_from_reservation_to_get(futu, live_t
     assert open_row["limitPrice"] is None
 
 
-def test_a_no_limit_type_fails_closed_at_the_real_quote_gate_until_its_rules_exist(futu_ib_quotes):
-    """The LMT band is never run on a missing limit (X5 task 3 adds per-type rules)."""
-    resp = _post(futu_ib_quotes, "/orders/place", _typed("mkt-real-gate", orderType="MKT"))
-
-    assert resp.status_code == 400 and resp.json()["reason_code"] == "FUTU_ORDER_TYPE_UNSUPPORTED", resp.text
-    assert futu_ib_quotes.ctx.mutations == []
-    with get_sync_engine().connect() as conn:
-        row = conn.execute(order_submissions.select()).first()
-    assert row.state == "REJECTED" and row.limit_price is None  # reservation released
-
-
 @pytest.mark.parametrize(
     "env, fields",
     [
@@ -255,17 +244,6 @@ def test_a_replay_with_another_type_trigger_trail_or_session_is_a_body_mismatch(
     assert intent == futu_orders.intent_for(order_entry._futu_spec(_typed("x", **first)))
 
 
-def _confirm_amend(sid, scope, **terms):
-    """A confirmed trigger / trail amend as the modify path leaves it: the
-    amend generation settled and `futu_terms` moved (X5 task 3 writes them
-    through settle_modify; the intent is never touched)."""
-    scope_d = scope.as_dict()
-    opened = gate4.begin_modify(sid, None, scope_d)
-    assert opened.accept
-    assert gate4.settle_modify(sid, opened.amend_id, "confirmed", scope_d)
-    _set_legs(sid, futu_terms={**_row(sid).legs["futu_terms"], **terms})
-
-
 @pytest.mark.parametrize(
     "first, field, book_key, amended",
     [
@@ -275,13 +253,15 @@ def _confirm_amend(sid, scope, **terms):
     ],
 )
 def test_a_replay_after_a_confirmed_amend_still_matches_the_placement(
-    futu, live_types, first, field, book_key, amended
+    futu, live_types, monkeypatch, first, field, book_key, amended
 ):
+    monkeypatch.setenv("XENON_FUTU_MODIFY_TYPES", "LMT,STP,TRAIL,TRAIL LIMIT")
     a = _post(futu, "/orders/place", _typed("amended-1", **first), env="live")
     sid, oid = a.json()["submission_id"], a.json()["brokerOrderId"]
     intent = _row(sid).legs["futu_intent"]
-    futu.ctx.book[oid][book_key] = float(amended)  # the broker order moved
-    _confirm_amend(sid, LIVE, **{book_key: amended})
+    new_field = "new" + field[0].upper() + field[1:]
+    mod = _post(futu, "/orders/modify", {"brokerOrderId": oid, new_field: float(amended), "modifySequence": 1}, "live")
+    assert mod.status_code == 200 and mod.json()["confirmed"] is True, mod.text  # settle_modify moved the terms
     assert _observe(LIVE, futu.ctx)["complete"]  # a bound order with new terms is not refused
 
     row = _row(sid)
