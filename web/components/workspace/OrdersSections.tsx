@@ -52,6 +52,7 @@ import { HistoricalTradesSection } from "./HistoricalTradesSection";
 import {
   FUTU_MANAGEMENT_UNCONFIRMED_COPY,
   futuManageableOpenOrder,
+  futuModifiableOpenOrder,
   isFutuOpenOrder,
 } from "@/lib/futuOpenOrder";
 import { useFutuAccountEnv } from "@/lib/futuAccountEnv";
@@ -60,7 +61,11 @@ import {
   scopesMatch,
   type OrderActionScope,
 } from "@/lib/orderActionScope";
-import { futuTradingEnabledForEnv, useFutuTrading } from "@/lib/useFutuTrading";
+import {
+  futuCapabilitiesForEnv,
+  futuTradingEnabledForEnv,
+  useFutuTrading,
+} from "@/lib/useFutuTrading";
 
 export function OrdersSections({
   orders,
@@ -147,6 +152,26 @@ export function OrdersSections({
     [futuEnv, viewScope, futuTrading, isFutuManagementLocked],
   );
 
+  /** Modify: Futu only for types in `capabilities[env].modify` (cancel
+   *  stays available for every type); IB LMT / STP LMT. */
+  const canModifyOrder = useCallback(
+    (o: OpenOrder) => {
+      if (!canManageOrder(o)) return false;
+      if (isFutuOpenOrder(o)) {
+        const env =
+          o.accountEnv === "paper" || o.accountEnv === "live"
+            ? o.accountEnv
+            : futuEnv;
+        return futuModifiableOpenOrder(
+          o,
+          futuCapabilitiesForEnv(futuTrading, env),
+        );
+      }
+      return o.orderType === "LMT" || o.orderType === "STP LMT";
+    },
+    [canManageOrder, futuEnv, futuTrading],
+  );
+
   const handleCancel = useCallback(async () => {
     if (!cancelTarget || !canManageOrder(cancelTarget)) {
       setCancelTarget(null);
@@ -165,7 +190,7 @@ export function OrdersSections({
 
   const handleModify = useCallback(
     async (request: ModifyOrderRequest) => {
-      if (!modifyTarget || !canManageOrder(modifyTarget.requestOrder)) {
+      if (!modifyTarget || !canModifyOrder(modifyTarget.requestOrder)) {
         setModifyTarget(null);
         return;
       }
@@ -181,7 +206,7 @@ export function OrdersSections({
         setModifyTarget(null);
       }
     },
-    [modifyTarget, requestModify, canManageOrder, isFutuManagementLocked],
+    [modifyTarget, requestModify, canModifyOrder, isFutuManagementLocked],
   );
 
   const handleCancelCombo = useCallback(
@@ -275,11 +300,7 @@ export function OrdersSections({
     );
   }
 
-  const canModify = (o: OpenOrder) => {
-    if (!canManageOrder(o)) return false;
-    if (isFutuOpenOrder(o)) return true;
-    return o.orderType === "LMT" || o.orderType === "STP LMT";
-  };
+  const canModify = canModifyOrder;
   const execCount = orders.executed_count + cancelledOrders.length;
 
   return (
@@ -294,7 +315,7 @@ export function OrdersSections({
       />
       <ModifyOrderModal
         order={
-          modifyTarget && canManageOrder(modifyTarget.requestOrder)
+          modifyTarget && canModifyOrder(modifyTarget.requestOrder)
             ? modifyTarget.modalOrder
             : null
         }
@@ -605,8 +626,10 @@ export function OrdersSections({
                               disabled={!canModify(o.order)}
                               title={
                                 canModify(o.order)
-                                  ? "Modify limit price"
-                                  : "Only LMT orders can be modified"
+                                  ? "Modify order"
+                                  : isFutuOpenOrder(o.order)
+                                    ? `Modify of ${o.order.orderType} is off for this Futu environment; cancel instead`
+                                    : "Only LMT orders can be modified"
                               }
                               onClick={() =>
                                 setModifyTarget({

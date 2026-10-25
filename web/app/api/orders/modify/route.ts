@@ -7,6 +7,10 @@ import { getRequestId } from "@/lib/apiContracts";
 import type { ModifyCancelTarget, ReplaceComboOrder } from "@/lib/orderModify";
 import type { OrdersData } from "@/lib/order/types";
 import { forwardRequestQuery } from "@/lib/forwardRequestQuery";
+import {
+  FUTU_ONLY_MODIFY_FIELDS,
+  futuModifyFieldsError,
+} from "@/lib/futuOrderTypes";
 
 export const runtime = "nodejs";
 
@@ -16,6 +20,10 @@ type ModifyBody = {
   brokerOrderId?: string;
   newPrice?: number;
   newQuantity?: number;
+  // FUTU only (contract § Modify); refused on an IB body.
+  newAuxPrice?: number;
+  newTrailValue?: number;
+  newTrailSpread?: number;
   outsideRth?: boolean;
   cancelOrders?: ModifyCancelTarget[];
   replaceOrder?: ReplaceComboOrder;
@@ -71,6 +79,32 @@ export async function POST(request: Request): Promise<Response> {
     const newPrice = body.newPrice;
     const newQuantity = body.newQuantity;
     const replaceOrder = body.replaceOrder;
+    const futuScope =
+      new URL(request.url).searchParams.get("broker")?.toUpperCase() === "FUTU";
+
+    // Trigger / trail terms exist only for FUTU; an IB body carrying one
+    // (any value) is refused, never stripped.
+    if (body && typeof body === "object") {
+      const futuOnly = FUTU_ONLY_MODIFY_FIELDS.find((key) => key in body);
+      if (futuOnly && !futuScope) {
+        return NextResponse.json(
+          {
+            error: `${futuOnly} is only valid for a FUTU order`,
+            reason_code: "INVALID_ORDER_BODY",
+          },
+          { status: 400 },
+        );
+      }
+      const shapeErr = futuScope
+        ? futuModifyFieldsError(body as Record<string, unknown>)
+        : null;
+      if (shapeErr) {
+        return NextResponse.json(
+          { error: shapeErr, reason_code: "INVALID_ORDER_BODY" },
+          { status: 400 },
+        );
+      }
+    }
 
     if (orderId === 0 && permId === 0 && !brokerOrderId) {
       return NextResponse.json(
@@ -151,7 +185,32 @@ export async function POST(request: Request): Promise<Response> {
       }
     }
 
-    if (newPrice == null && newQuantity == null && body.outsideRth == null) {
+    const futuTermChange =
+      futuScope &&
+      (body.newAuxPrice != null ||
+        body.newTrailValue != null ||
+        body.newTrailSpread != null);
+    if (
+      futuScope &&
+      newPrice == null &&
+      newQuantity == null &&
+      !futuTermChange
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "Must provide at least one modify field: newPrice, newQuantity, newAuxPrice, newTrailValue or newTrailSpread",
+          reason_code: "INVALID_ORDER_BODY",
+        },
+        { status: 400 },
+      );
+    }
+    if (
+      newPrice == null &&
+      newQuantity == null &&
+      body.outsideRth == null &&
+      !futuTermChange
+    ) {
       return NextResponse.json(
         {
           error:
@@ -190,6 +249,13 @@ export async function POST(request: Request): Promise<Response> {
           brokerOrderId,
           newPrice,
           newQuantity,
+          ...(futuScope
+            ? {
+                newAuxPrice: body.newAuxPrice,
+                newTrailValue: body.newTrailValue,
+                newTrailSpread: body.newTrailSpread,
+              }
+            : {}),
           modifySequence: body.modifySequence,
         }
       : {
@@ -201,16 +267,22 @@ export async function POST(request: Request): Promise<Response> {
           modifySequence: body.modifySequence,
         };
 
-    const result = await xenonFetch<Record<string, unknown>>(`/orders/modify${scopeQs}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(modifyPayload),
-      timeout: 20_000,
-    });
+    const result = await xenonFetch<Record<string, unknown>>(
+      `/orders/modify${scopeQs}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(modifyPayload),
+        timeout: 20_000,
+      },
+    );
 
     // Refresh orders after modify
     try {
-      await xenonFetch(`/orders/refresh${scopeQs}`, { method: "POST", timeout: 10_000 });
+      await xenonFetch(`/orders/refresh${scopeQs}`, {
+        method: "POST",
+        timeout: 10_000,
+      });
     } catch {
       // Non-fatal
     }
@@ -223,7 +295,6 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    const futuScope = scopeQs.includes("broker=FUTU");
     if (
       !futuScope &&
       !isModifyConfirmed(orders, orderId, permId, newPrice, newQuantity)

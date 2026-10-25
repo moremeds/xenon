@@ -28,6 +28,10 @@ export type ModifyCancelTarget = {
 export type ModifyOrderRequest = {
   newPrice?: number;
   newQuantity?: number;
+  /** FUTU only (contract § Modify): new trigger / trail value / trail spread. */
+  newAuxPrice?: number;
+  newTrailValue?: number;
+  newTrailSpread?: number;
   outsideRth?: boolean;
   cancelOrders?: ModifyCancelTarget[];
   replaceOrder?: ReplaceComboOrder;

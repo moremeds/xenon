@@ -43,7 +43,12 @@ export type FutuEnvCapabilities = {
 
 export type FutuCapabilities = Partial<Record<string, FutuEnvCapabilities>>;
 
-type TypeFields = { limit: boolean; aux: boolean; trail: boolean; spread: boolean };
+type TypeFields = {
+  limit: boolean;
+  aux: boolean;
+  trail: boolean;
+  spread: boolean;
+};
 
 /** Which body fields each type has; every other field must be absent. */
 export const FUTU_ORDER_TYPE_FIELDS: Record<FutuOrderType, TypeFields> = {
@@ -263,7 +268,10 @@ export function futuOrderConfirmText(args: {
   fields: FutuOrderFields;
 }): string {
   const { fields } = args;
-  const parts = [`${args.action} ${args.quantity} ${args.symbol}`, fields.orderType];
+  const parts = [
+    `${args.action} ${args.quantity} ${args.symbol}`,
+    fields.orderType,
+  ];
   if (fields.orderType === "MKT") parts.push("market");
   if (fields.auxPrice != null) parts.push(`trigger ${fmt2(fields.auxPrice)}`);
   if (fields.limitPrice != null) parts.push(`limit ${fmt2(fields.limitPrice)}`);
@@ -278,4 +286,208 @@ export function futuOrderConfirmText(args: {
   parts.push(args.tif);
   if (fields.session) parts.push(fields.session);
   return parts.join(" · ");
+}
+
+/* ── Modify (contract § Modify) ─────────────────────────────────────── */
+
+/** Modify-body keys only a FUTU request may carry (IB → 400, never stripped). */
+export const FUTU_ONLY_MODIFY_FIELDS = [
+  "newAuxPrice",
+  "newTrailValue",
+  "newTrailSpread",
+] as const;
+
+/** Route-side shape check of the FUTU-only modify fields; first problem or null. */
+export function futuModifyFieldsError(
+  body: Record<string, unknown>,
+): string | null {
+  const rules: Array<[string, (v: unknown) => boolean, string]> = [
+    ["newAuxPrice", positive, "a positive number"],
+    ["newTrailValue", positive, "a positive number"],
+    ["newTrailSpread", nonNegative, "a number of 0 or more"],
+  ];
+  for (const [key, valid, what] of rules) {
+    if (body[key] != null && !valid(body[key])) return `${key} must be ${what}`;
+  }
+  return null;
+}
+
+/** The current terms of a working Futu order the modify dialog edits. */
+export type FutuModifyOrderTerms = {
+  orderType: string;
+  totalQuantity: number;
+  limitPrice: number | null;
+  auxPrice: number | null;
+  trailType?: string | null;
+  trailValue?: number | null;
+  trailSpread?: number | null;
+};
+
+/** Dialog inputs, parsed; NaN = blank or not a number. */
+export type FutuModifyInput = {
+  quantity: number;
+  limitPrice: number;
+  auxPrice: number;
+  trailValue: number;
+  trailSpread: number;
+};
+
+export type FutuModifyChange = {
+  field: "qty" | "limit" | "trigger" | "trail" | "spread";
+  from: number | null;
+  to: number;
+};
+
+export type FutuModifyRequestFields = {
+  newPrice?: number;
+  newQuantity?: number;
+  newAuxPrice?: number;
+  newTrailValue?: number;
+  newTrailSpread?: number;
+};
+
+export const FUTU_MODIFY_NO_CHANGE = "No change to send.";
+
+/** Fields the dialog shows for an order type; null = type not known here. */
+export function futuModifyFieldsFor(orderType: string): TypeFields | null {
+  return isFutuOrderType(orderType) ? FUTU_ORDER_TYPE_FIELDS[orderType] : null;
+}
+
+const sameNumber = (a: number, b: number | null | undefined) =>
+  b != null && Math.abs(a - b) < 1e-9;
+
+/**
+ * Changed terms → modify request with only the changed fields of the
+ * order's type (an omitted field keeps Futu's current value).
+ */
+export function buildFutuModifyRequest(
+  order: FutuModifyOrderTerms,
+  input: FutuModifyInput,
+):
+  | { ok: true; request: FutuModifyRequestFields; changes: FutuModifyChange[] }
+  | { ok: false; message: string } {
+  const f = futuModifyFieldsFor(order.orderType);
+  if (!f)
+    return {
+      ok: false,
+      message: `${order.orderType} cannot be modified here.`,
+    };
+  const request: FutuModifyRequestFields = {};
+  const changes: FutuModifyChange[] = [];
+  const terms: Array<{
+    shown: boolean;
+    value: number;
+    current: number | null | undefined;
+    valid: (v: number) => boolean;
+    key: keyof FutuModifyRequestFields;
+    field: FutuModifyChange["field"];
+    message: string;
+  }> = [
+    {
+      shown: true,
+      value: input.quantity,
+      current: order.totalQuantity,
+      valid: (v) => Number.isInteger(v) && v > 0,
+      key: "newQuantity",
+      field: "qty",
+      message: "Enter a whole quantity above 0.",
+    },
+    {
+      shown: f.limit,
+      value: input.limitPrice,
+      current: order.limitPrice,
+      valid: positive,
+      key: "newPrice",
+      field: "limit",
+      message: "Enter a positive limit price.",
+    },
+    {
+      shown: f.aux,
+      value: input.auxPrice,
+      current: order.auxPrice,
+      valid: positive,
+      key: "newAuxPrice",
+      field: "trigger",
+      message: "Enter a positive trigger price.",
+    },
+    {
+      shown: f.trail,
+      value: input.trailValue,
+      current: order.trailValue,
+      valid: positive,
+      key: "newTrailValue",
+      field: "trail",
+      message: "Enter a positive trail value.",
+    },
+    {
+      shown: f.spread,
+      value: input.trailSpread,
+      current: order.trailSpread,
+      valid: nonNegative,
+      key: "newTrailSpread",
+      field: "spread",
+      message: "Enter a trail spread of 0 or more.",
+    },
+  ];
+  for (const t of terms) {
+    if (!t.shown) continue;
+    // A term Futu did not report and the user left blank stays omitted.
+    if (Number.isNaN(t.value) && t.current == null) continue;
+    if (!t.valid(t.value)) return { ok: false, message: t.message };
+    if (sameNumber(t.value, t.current)) continue;
+    request[t.key] = t.value;
+    changes.push({ field: t.field, from: t.current ?? null, to: t.value });
+  }
+  if (changes.length === 0)
+    return { ok: false, message: FUTU_MODIFY_NO_CHANGE };
+  return { ok: true, request, changes };
+}
+
+function fmtTerm(
+  field: FutuModifyChange["field"],
+  v: number | null,
+  trailType: string | null | undefined,
+): string {
+  if (v == null) return "---";
+  if (field === "qty") return String(v);
+  if (field === "trail" && trailType === "RATIO") return `${v}%`;
+  return fmt2(v);
+}
+
+const CHANGE_LABEL: Record<FutuModifyChange["field"], string> = {
+  qty: "qty",
+  limit: "limit",
+  trigger: "trigger",
+  trail: "trail",
+  spread: "spread",
+};
+
+/** `"trigger 170.00 → 168.00 · qty 100 → 50"` — dialog confirmation line. */
+export function futuModifyConfirmText(
+  changes: FutuModifyChange[],
+  trailType?: string | null,
+): string {
+  return changes
+    .map(
+      (c) =>
+        `${CHANGE_LABEL[c.field]} ${fmtTerm(c.field, c.from, trailType)} → ${fmtTerm(c.field, c.to, trailType)}`,
+    )
+    .join(" · ");
+}
+
+/** `"trigger 168.00, trail 2.5%"` — the new terms of a modify request (toast copy). */
+export function futuModifyTermsText(
+  request: FutuModifyRequestFields,
+  trailType?: string | null,
+): string {
+  const parts: string[] = [];
+  if (request.newPrice != null) parts.push(`limit ${fmt2(request.newPrice)}`);
+  if (request.newAuxPrice != null)
+    parts.push(`trigger ${fmt2(request.newAuxPrice)}`);
+  if (request.newTrailValue != null)
+    parts.push(`trail ${fmtTerm("trail", request.newTrailValue, trailType)}`);
+  if (request.newTrailSpread != null)
+    parts.push(`spread ${fmt2(request.newTrailSpread)}`);
+  if (request.newQuantity != null) parts.push(`qty ${request.newQuantity}`);
+  return parts.join(", ");
 }

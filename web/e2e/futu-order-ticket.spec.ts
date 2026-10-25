@@ -126,10 +126,19 @@ const LIVE_ALL_TUPLES = [
 async function installOrderFlowMocks(
   page: Page,
   trading: { paper: boolean; live: boolean },
-  opts: { liveTuples?: string[] } = {},
+  opts: {
+    liveTuples?: string[];
+    /** Start with a working order of these terms (default: none). */
+    workingOrder?: Record<string, unknown>;
+    paperModify?: string[];
+  } = {},
 ) {
   const captured: CapturedRequest[] = [];
-  let working = false;
+  let working = Boolean(opts.workingOrder);
+  let auxPrice: number | null =
+    typeof opts.workingOrder?.auxPrice === "number"
+      ? opts.workingOrder.auxPrice
+      : null;
   let limitPrice = 178.5;
   let quantity = 100;
   let modifySequence = 1;
@@ -147,7 +156,9 @@ async function installOrderFlowMocks(
     totalQuantity: quantity,
     limitPrice,
     modifySequence,
-    auxPrice: null,
+    ...opts.workingOrder,
+    // The trigger follows the modify mock.
+    auxPrice,
     status: "Submitted",
     filled: 0,
     remaining: quantity,
@@ -189,7 +200,7 @@ async function installOrderFlowMocks(
         futu: {
           trading,
           capabilities: {
-            paper: { tuples: PAPER_TUPLES, modify: ["LMT"] },
+            paper: { tuples: PAPER_TUPLES, modify: opts.paperModify ?? ["LMT"] },
             live: { tuples: opts.liveTuples ?? [], modify: ["LMT"] },
           },
         },
@@ -285,6 +296,7 @@ async function installOrderFlowMocks(
     assertFutuMutationBody(body);
     if (typeof body.newPrice === "number") limitPrice = body.newPrice;
     if (typeof body.newQuantity === "number") quantity = body.newQuantity;
+    if (typeof body.newAuxPrice === "number") auxPrice = body.newAuxPrice;
     modifySequence =
       typeof body.modifySequence === "number"
         ? body.modifySequence
@@ -645,6 +657,78 @@ test.describe("Futu order ticket", () => {
       session: "RTH",
     });
     expect(place.body?.trailValue).toBeUndefined();
+  });
+
+  test("SIMULATE STP row: modify dialog sends the trigger only", async ({
+    page,
+  }) => {
+    const { captured } = await installOrderFlowMocks(
+      page,
+      { paper: true, live: false },
+      {
+        workingOrder: { orderType: "STP", limitPrice: null, auxPrice: 170 },
+        paperModify: ["LMT", "STP"],
+      },
+    );
+    await openFutuTab(page);
+    await page.goto("/orders");
+    await page.getByRole("button", { name: "MODIFY" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(page.locator("#modify-aux-input")).toHaveValue("170");
+    await expect(page.locator("#modify-price-input")).toHaveCount(0);
+    await expect(dialog.getByText("FILL OUTSIDE RTH")).toHaveCount(0);
+    await page.locator("#modify-aux-input").fill("168.50");
+    await expect(page.getByTestId("futu-modify-confirm")).toHaveText(
+      "trigger 170.00 → 168.50",
+    );
+    await page.screenshot({
+      path: path.join(
+        SCREEN_DIR,
+        "futu-order-types-modify-aux-2026-10-25.png",
+      ),
+      fullPage: true,
+      animations: "disabled",
+    });
+    await page.getByRole("button", { name: "Modify Order" }).click();
+    await expect
+      .poll(() => captured.some((c) => c.url.includes("/modify")))
+      .toBe(true);
+    const modify = captured.find((c) => c.url.includes("/modify"))!;
+    assertFutuPaperScope(modify.url);
+    expect(modify.body).toEqual({
+      brokerOrderId: BROKER_ORDER_ID,
+      newAuxPrice: 168.5,
+      modifySequence: 2,
+    });
+  });
+
+  test("SIMULATE STP row with modify=[LMT]: MODIFY off, CANCEL sends", async ({
+    page,
+  }) => {
+    const { captured } = await installOrderFlowMocks(
+      page,
+      { paper: true, live: false },
+      { workingOrder: { orderType: "STP", limitPrice: null, auxPrice: 170 } },
+    );
+    await openFutuTab(page);
+    await page.goto("/orders");
+    await expect(page.getByRole("button", { name: "MODIFY" })).toBeDisabled();
+    await page.screenshot({
+      path: path.join(
+        SCREEN_DIR,
+        "futu-order-types-stp-modify-off-2026-10-25.png",
+      ),
+      fullPage: true,
+      animations: "disabled",
+    });
+    await page.getByRole("button", { name: "CANCEL" }).click();
+    await page.getByRole("button", { name: "Cancel Order" }).click();
+    await expect
+      .poll(() => captured.some((c) => c.url.includes("/cancel")))
+      .toBe(true);
+    const cancel = captured.find((c) => c.url.includes("/cancel"))!;
+    assertFutuPaperScope(cancel.url);
+    expect(cancel.body).toEqual({ brokerOrderId: BROKER_ORDER_ID });
   });
 
   test("REAL with trading.live=false: no order action buttons", async ({

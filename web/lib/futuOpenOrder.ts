@@ -1,6 +1,7 @@
 import type { FutuAccountEnv } from "@/lib/futuAccountEnv";
 import { futuScopeQuery } from "@/lib/futuAccountEnv";
 import type { OpenOrder } from "@/lib/types";
+import type { FutuEnvCapabilities } from "@/lib/futuOrderTypes";
 
 export function isFutuOpenOrder(order: OpenOrder): boolean {
   return order.broker === "FUTU" || Boolean(order.brokerOrderId);
@@ -30,12 +31,20 @@ export function futuPlaceApiPath(env: FutuAccountEnv): string {
   return `/api/orders/place${futuScopeQuery(env)}`;
 }
 
-/** Contract: cancel/modify only LMT rows with a Futu broker id. */
+/** Contract § Working orders: cancel any Futu row with a broker id. */
 export function futuManageableOpenOrder(order: OpenOrder): boolean {
+  return isFutuOpenOrder(order) && Boolean(order.brokerOrderId);
+}
+
+/** Modify only rows whose order type is in `capabilities[env].modify`;
+ *  no capabilities for the env → no modify. */
+export function futuModifiableOpenOrder(
+  order: OpenOrder,
+  caps: FutuEnvCapabilities | null | undefined,
+): boolean {
   return (
-    isFutuOpenOrder(order) &&
-    order.orderType === "LMT" &&
-    Boolean(order.brokerOrderId)
+    futuManageableOpenOrder(order) &&
+    (caps?.modify ?? []).some((t) => t === order.orderType)
   );
 }
 
@@ -86,13 +95,34 @@ export type FutuManagementLock = {
   modifySequence: number | null;
   price: number | null;
   qty: number;
+  auxPrice: number | null;
+  trailValue: number | null;
+  trailSpread: number | null;
 };
+
+/** The row terms an uncertain cancel/modify is pinned to. */
+export function futuManagementLockFor(
+  env: FutuAccountEnv,
+  order: OpenOrder & { brokerOrderId: string },
+): FutuManagementLock {
+  return {
+    env,
+    brokerOrderId: order.brokerOrderId,
+    modifySequence: order.modifySequence ?? null,
+    price: order.limitPrice ?? null,
+    qty: order.totalQuantity,
+    auxPrice: order.auxPrice ?? null,
+    trailValue: order.trailValue ?? null,
+    trailSpread: order.trailSpread ?? null,
+  };
+}
 
 const TERMINAL_ORDER_STATUS =
   /^(filled|filled_all|cancelled|cancelled_all|cancelled_part|apicancelled|inactive|rejected|failed|disabled|deleted)$/i;
 
 /** True while `row` still shows the terms recorded in `lock` and is working.
- *  A terminal row or changed modifySequence / price / qty releases the lock. */
+ *  A terminal row or a changed modifySequence / price / qty / trigger /
+ *  trail value / trail spread releases the lock. */
 export function futuLockStillHolds(
   lock: FutuManagementLock,
   row: OpenOrder,
@@ -107,7 +137,10 @@ export function futuLockStillHolds(
   return (
     (row.modifySequence ?? null) === lock.modifySequence &&
     (row.limitPrice ?? null) === lock.price &&
-    row.totalQuantity === lock.qty
+    row.totalQuantity === lock.qty &&
+    (row.auxPrice ?? null) === lock.auxPrice &&
+    (row.trailValue ?? null) === lock.trailValue &&
+    (row.trailSpread ?? null) === lock.trailSpread
   );
 }
 
