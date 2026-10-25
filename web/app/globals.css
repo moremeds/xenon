@@ -468,6 +468,19 @@ body {
     border-color 120ms ease;
 }
 
+/* Inner tab target; the card can also hold sibling controls (Futu env switch). */
+.account-tab-hit {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
 .account-tab:last-child {
   margin-right: 0;
 }

@@ -2,8 +2,7 @@
 
 import type { ReactNode } from "react";
 import type { BrokerAccount } from "@/lib/accountContext";
-import type { FutuAccountEnv } from "@/lib/futuAccountEnv";
-import { FutuAccountEnvBadge } from "@/components/FutuEnvSwitch";
+import FutuEnvSwitch from "@/components/FutuEnvSwitch";
 import {
   FUTU_STATUS_CLASS,
   FUTU_STATUS_LABEL,
@@ -30,7 +29,6 @@ type Props = {
   onChange: (next: BrokerAccount) => void;
   ib: AccountTabState;
   futu: AccountTabState;
-  futuEnv?: FutuAccountEnv;
 };
 
 /**
@@ -41,13 +39,7 @@ type Props = {
  * Per plan: layout + information is identical between tabs. The only
  * difference is which portfolio feeds the screens below.
  */
-export default function AccountTabBar({
-  active,
-  onChange,
-  ib,
-  futu,
-  futuEnv = "paper",
-}: Props) {
+export default function AccountTabBar({ active, onChange, ib, futu }: Props) {
   return (
     <div className="account-tab-bar">
       <AccountTab
@@ -60,7 +52,7 @@ export default function AccountTabBar({
         broker="futu"
         state={futu}
         active={active === "futu"}
-        envBadge={<FutuAccountEnvBadge env={futuEnv} />}
+        footer={<FutuEnvSwitch onSelect={() => onChange("futu")} />}
         onClick={() => onChange("futu")}
       />
     </div>
@@ -71,48 +63,49 @@ function AccountTab({
   broker,
   state,
   active,
-  envBadge,
+  footer,
   onClick,
 }: {
   broker: BrokerAccount;
   state: AccountTabState;
   active: boolean;
-  envBadge?: ReactNode;
+  /** Controls below the tab target; a sibling, since buttons cannot nest. */
+  footer?: ReactNode;
   onClick: () => void;
 }) {
   const statusLabel = FUTU_STATUS_LABEL[state.status];
   const statusClass = FUTU_STATUS_CLASS[state.status];
 
   return (
-    <button
-      type="button"
-      className={`account-tab${active ? " account-tab-active" : ""}`}
-      onClick={onClick}
-      aria-pressed={active}
-      aria-label={`Switch to ${state.label} account`}
-    >
-      <div className="account-tab-header">
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+    <div className={`account-tab${active ? " account-tab-active" : ""}`}>
+      <button
+        type="button"
+        className="account-tab-hit"
+        onClick={onClick}
+        aria-pressed={active}
+        aria-label={`Switch to ${state.label} account`}
+      >
+        <div className="account-tab-header">
           <span className="account-tab-label">ACCOUNT · {state.label}</span>
-          {envBadge}
-        </span>
-        <span className={`account-tab-status ${statusClass}`}>
-          ● {statusLabel}
-        </span>
-      </div>
-      <div className="account-tab-id">
-        {state.accountId ? truncateId(state.accountId) : "—"}
-        {state.environment ? ` · ${state.environment}` : ""}
-      </div>
-      <div className="account-tab-meta">
-        {formatSyncAge(state.lastSync)} · {state.positionCount} pos
-      </div>
-      {state.netLiquidation != null && (
-        <div className="account-tab-metric">
-          net liq {formatCurrency(state.netLiquidation)}
+          <span className={`account-tab-status ${statusClass}`}>
+            ● {statusLabel}
+          </span>
         </div>
-      )}
-    </button>
+        <div className="account-tab-id">
+          {state.accountId ? truncateId(state.accountId) : "—"}
+          {state.environment ? ` · ${state.environment}` : ""}
+        </div>
+        <div className="account-tab-meta">
+          {formatSyncAge(state.lastSync)} · {state.positionCount} pos
+        </div>
+        {state.netLiquidation != null && (
+          <div className="account-tab-metric">
+            net liq {formatCurrency(state.netLiquidation)}
+          </div>
+        )}
+      </button>
+      {footer}
+    </div>
   );
 }
 

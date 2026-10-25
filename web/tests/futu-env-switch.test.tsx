@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { render, screen, cleanup, fireEvent } from "@testing-library/react";
-import FutuEnvSwitch, { FutuAccountEnvBadge } from "@/components/FutuEnvSwitch";
+import FutuEnvSwitch from "@/components/FutuEnvSwitch";
 import { getFutuAccountEnv, setFutuAccountEnv } from "@/lib/futuAccountEnv";
 
 const store = new Map<string, string>();
@@ -41,15 +41,13 @@ describe("FutuEnvSwitch", () => {
   });
 });
 
-describe("FutuAccountEnvBadge", () => {
-  it("shows SIMULATE with neutral token and REAL with warning token", () => {
-    const { rerender } = render(<FutuAccountEnvBadge env="paper" />);
-    const badge = screen.getByTestId("futu-env-badge");
-    expect(badge.textContent).toBe("SIMULATE");
-    expect(badge.style.color).toBe("var(--neutral)");
-    rerender(<FutuAccountEnvBadge env="live" />);
-    expect(screen.getByTestId("futu-env-badge").textContent).toBe("REAL");
-    expect(screen.getByTestId("futu-env-badge").style.color).toBe(
+describe("FutuEnvSwitch onSelect", () => {
+  it("reports the picked env and marks REAL with the warning token", () => {
+    const onSelect = vi.fn();
+    render(<FutuEnvSwitch onSelect={onSelect} />);
+    fireEvent.click(screen.getByTestId("futu-env-real"));
+    expect(onSelect).toHaveBeenCalledWith("live");
+    expect(screen.getByTestId("futu-env-real").style.color).toBe(
       "var(--warning)",
     );
   });

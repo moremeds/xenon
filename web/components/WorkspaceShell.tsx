@@ -36,7 +36,6 @@ import MetricCards from "@/components/MetricCards";
 import AccountTabBar, {
   type AccountTabState,
 } from "@/components/AccountTabBar";
-import FutuEnvSwitch from "@/components/FutuEnvSwitch";
 import {
   futuTabEnvironmentLabel,
   useFutuAccountEnv,
@@ -546,7 +545,6 @@ export default function WorkspaceShell({
             <AccountTabBar
               active={activeAccount}
               onChange={setActiveAccount}
-              futuEnv={futuAccountEnv}
               ib={{
                 label: "IB",
                 accountId: ibData.data?.account_summary ? "IB Account" : null,
@@ -573,13 +571,6 @@ export default function WorkspaceShell({
                 }),
               }}
             />
-          ) : null}
-
-          {activeAccount === "futu" &&
-          activeSection !== "dashboard" &&
-          activeSection !== "ticker-detail" &&
-          activeSection !== "operator" ? (
-            <FutuEnvSwitch />
           ) : null}
 
           {activeSection === "dashboard" ? (
