@@ -9,7 +9,21 @@ import {
   ticketAnchorFromTable,
   type TicketAnchor,
 } from "@/lib/orderActionScope";
-import { futuTradingEnabledForEnv, useFutuTrading } from "@/lib/useFutuTrading";
+import {
+  futuCapabilitiesForEnv,
+  futuTradingEnabledForEnv,
+  useFutuTrading,
+} from "@/lib/useFutuTrading";
+import {
+  FUTU_ORDER_TYPE_FIELDS,
+  FUTU_TRAIL_TYPES,
+  buildFutuOrderTerms,
+  futuOrderConfirmText,
+  futuTicketChoices,
+  type FutuSecType,
+  type FutuTicketSelection,
+  type FutuTrailType,
+} from "@/lib/futuOrderTypes";
 import {
   checkNakedShortRisk,
   type NakedShortPortfolio,
@@ -41,6 +55,7 @@ import { ModifyOrderQuoteTelemetry } from "./QuoteTelemetry";
 import { fmtPrice } from "@/lib/positionUtils";
 import { OrderLegPills, type OrderLeg as UnifiedOrderLeg } from "@/lib/order";
 import { OrderTifSelector } from "@/lib/order/components/OrderTifSelector";
+import { OrderChoiceSelector } from "@/lib/order/components/OrderChoiceSelector";
 import { useClientAttemptId } from "@/components/ticker-detail/useClientAttemptId";
 import { submitPlaceOrder } from "@/lib/order/submitPlace";
 import {
@@ -63,6 +78,11 @@ type Props = {
   /** Broker/env captured when the ticket opened (F2). */
   ticketAnchor?: TicketAnchor | null;
 };
+
+function parseInputNumber(text: string): number {
+  const t = text.trim();
+  return t === "" || t === "-" ? NaN : parseFloat(t);
+}
 
 function unifiedLegsFromPosition(pos: PortfolioPosition): UnifiedOrderLeg[] {
   return pos.legs
@@ -107,6 +127,11 @@ export default function PositionOrderModal({
   );
   const [outsideRth, setOutsideRth] = useState(false);
   const [tif, setTif] = useState<"DAY" | "GTC">(draft.payload.tif ?? "DAY");
+  const [futuSel, setFutuSel] = useState<FutuTicketSelection>({});
+  const [auxText, setAuxText] = useState("");
+  const [trailType, setTrailType] = useState<FutuTrailType>("RATIO");
+  const [trailValueText, setTrailValueText] = useState("");
+  const [trailSpreadText, setTrailSpreadText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -144,14 +169,80 @@ export default function PositionOrderModal({
       : position.structure_type === "Stock"
         ? parseFloat(qtyText)
         : parseInt(qtyText, 10);
-  const parsedPrice =
-    priceText.trim() === "" || priceText.trim() === "-"
-      ? NaN
-      : parseFloat(priceText);
+  const parsedPrice = parseInputNumber(priceText);
   const isValidQty = Number.isFinite(parsedQty) && parsedQty > 0;
   const isValidPrice =
     Number.isFinite(parsedPrice) &&
     (isCombo ? parsedPrice !== 0 : parsedPrice > 0);
+
+  // Futu single-leg: type / TIF / session only from capabilities[env].tuples.
+  const futuSec: FutuSecType | null =
+    futuTicket && !isCombo
+      ? draft.payload.type === "stock"
+        ? "STK"
+        : "OPT"
+      : null;
+  const futuChoices =
+    futuTicket && futuSec
+      ? futuTicketChoices(
+          futuCapabilitiesForEnv(futuTrading, futuTicket.env),
+          futuSec,
+          futuSel,
+        )
+      : null;
+  const futuType = futuChoices?.orderType ?? null;
+  const futuTypeFields = futuType ? FUTU_ORDER_TYPE_FIELDS[futuType] : null;
+  const showLimit = !futuChoices || futuTypeFields?.limit === true;
+  const showAux = futuTypeFields?.aux === true;
+  const futuTerms =
+    futuChoices && futuSec && futuType
+      ? buildFutuOrderTerms({
+          orderType: futuType,
+          sec: futuSec,
+          session: futuChoices.session,
+          limitPrice: parsedPrice,
+          auxPrice: parseInputNumber(auxText),
+          trailType,
+          trailValue: parseInputNumber(trailValueText),
+          trailSpread: parseInputNumber(trailSpreadText),
+        })
+      : null;
+  const futuReady = Boolean(futuTerms?.ok && futuChoices?.tif);
+  const isValidTerms = futuChoices ? futuReady : isValidPrice;
+  const clampedQty =
+    intent === "close"
+      ? Math.max(1, Math.min(fullQty, parsedQty))
+      : Math.max(1, parsedQty);
+  const futuConfirm =
+    futuTerms?.ok && futuChoices?.tif && isValidQty
+      ? futuOrderConfirmText({
+          action: draft.payload.action,
+          quantity: clampedQty,
+          symbol: position.ticker,
+          tif: futuChoices.tif,
+          fields: futuTerms.fields,
+        })
+      : null;
+
+  const editFutu = (field: string, apply: () => void) => {
+    apply();
+    attemptId.onFieldEdit(field);
+  };
+  // BID / MID / ASK fill the limit, or the trigger for types without a limit.
+  const referenceTarget: "limit" | "aux" | null = showLimit
+    ? "limit"
+    : showAux
+      ? "aux"
+      : null;
+  const applyReference = (value: number) => {
+    if (referenceTarget === "limit") {
+      setPriceText(value.toFixed(2));
+      attemptId.onFieldEdit("limitPrice");
+    } else if (referenceTarget === "aux") {
+      setAuxText(value.toFixed(2));
+      attemptId.onFieldEdit("auxPrice");
+    }
+  };
 
   const handleChip = (pct: number) => {
     const next = applyQtyChip(fullQty, pct);
@@ -163,7 +254,7 @@ export default function PositionOrderModal({
     if (
       submitting ||
       !isValidQty ||
-      !isValidPrice ||
+      !isValidTerms ||
       futuBlockedCombo ||
       nakedShortWarning
     )
@@ -179,17 +270,18 @@ export default function PositionOrderModal({
     setSubmitting(true);
     setError(null);
     try {
-      const clampedQty =
-        intent === "close"
-          ? Math.max(1, Math.min(fullQty, parsedQty))
-          : Math.max(1, parsedQty);
-      const body = {
+      const body: Record<string, unknown> = {
         ...draft.payload,
         quantity: clampedQty,
         limitPrice: parsedPrice,
         tif,
-        ...(outsideRth && !isCombo ? { outsideRth: true } : {}),
+        ...(outsideRth && !isCombo && !futuTicket ? { outsideRth: true } : {}),
       };
+      if (futuChoices && futuTerms?.ok) {
+        // Only the fields of the chosen type; absent fields are never sent.
+        delete body.limitPrice;
+        Object.assign(body, { tif: futuChoices.tif }, futuTerms.fields);
+      }
       const placed = await submitPlaceOrder(
         attemptId,
         body,
@@ -337,6 +429,30 @@ export default function PositionOrderModal({
             <ModifyOrderQuoteTelemetry priceData={priceData} />
 
             <div className="modify-price-section">
+              {futuChoices && (
+                <div className="modify-quick-section">
+                  <span className="modify-price-label">Order Type</span>
+                  <OrderChoiceSelector
+                    ariaLabel="Order type"
+                    options={futuChoices.orderTypes}
+                    value={futuChoices.orderType}
+                    className="modify-quick-buttons"
+                    onChange={(orderType) =>
+                      editFutu("orderType", () =>
+                        setFutuSel((s) => ({ ...s, orderType })),
+                      )
+                    }
+                  />
+                </div>
+              )}
+              {futuChoices &&
+                futuTrading !== null &&
+                futuChoices.orderTypes.length === 0 && (
+                  <p className="order-error">
+                    No Futu order types are enabled for this environment.
+                  </p>
+                )}
+
               <div
                 className={`modify-field-grid${isCombo ? " modify-field-grid-combo" : ""}`}
               >
@@ -357,26 +473,111 @@ export default function PositionOrderModal({
                   </div>
                 </label>
 
-                <label className="modify-field" htmlFor="position-order-price">
-                  <span className="modify-price-label">
-                    {isCombo ? "Net Limit Price" : "Limit Price"}
-                  </span>
-                  <div className="modify-price-input-row">
-                    <span className="modify-price-prefix">$</span>
-                    <input
-                      id="position-order-price"
-                      className="modify-price-input"
-                      type="text"
-                      inputMode="decimal"
-                      value={priceText}
-                      onChange={(e) => {
-                        setPriceText(e.target.value);
-                        attemptId.onFieldEdit("limitPrice");
-                      }}
-                      autoFocus
-                    />
-                  </div>
-                </label>
+                {showAux && (
+                  <label className="modify-field" htmlFor="position-order-aux">
+                    <span className="modify-price-label">Trigger Price</span>
+                    <div className="modify-price-input-row">
+                      <span className="modify-price-prefix">$</span>
+                      <input
+                        id="position-order-aux"
+                        className="modify-price-input"
+                        type="text"
+                        inputMode="decimal"
+                        value={auxText}
+                        onChange={(e) =>
+                          editFutu("auxPrice", () => setAuxText(e.target.value))
+                        }
+                      />
+                    </div>
+                  </label>
+                )}
+
+                {showLimit && (
+                  <label className="modify-field" htmlFor="position-order-price">
+                    <span className="modify-price-label">
+                      {isCombo ? "Net Limit Price" : "Limit Price"}
+                    </span>
+                    <div className="modify-price-input-row">
+                      <span className="modify-price-prefix">$</span>
+                      <input
+                        id="position-order-price"
+                        className="modify-price-input"
+                        type="text"
+                        inputMode="decimal"
+                        value={priceText}
+                        onChange={(e) => {
+                          setPriceText(e.target.value);
+                          attemptId.onFieldEdit("limitPrice");
+                        }}
+                        autoFocus
+                      />
+                    </div>
+                  </label>
+                )}
+
+                {futuTypeFields?.trail && (
+                  <>
+                    <div className="modify-quick-section">
+                      <span className="modify-price-label">Trail Type</span>
+                      <OrderChoiceSelector
+                        ariaLabel="Trail type"
+                        options={FUTU_TRAIL_TYPES}
+                        value={trailType}
+                        className="modify-quick-buttons"
+                        onChange={(value) =>
+                          editFutu("trailType", () => setTrailType(value))
+                        }
+                      />
+                    </div>
+                    <label
+                      className="modify-field"
+                      htmlFor="position-order-trail-value"
+                    >
+                      <span className="modify-price-label">Trail Value</span>
+                      <div className="modify-price-input-row">
+                        <span className="modify-price-prefix">
+                          {trailType === "RATIO" ? "%" : "$"}
+                        </span>
+                        <input
+                          id="position-order-trail-value"
+                          className="modify-price-input"
+                          type="text"
+                          inputMode="decimal"
+                          value={trailValueText}
+                          onChange={(e) =>
+                            editFutu("trailValue", () =>
+                              setTrailValueText(e.target.value),
+                            )
+                          }
+                        />
+                      </div>
+                    </label>
+                  </>
+                )}
+
+                {futuTypeFields?.spread && (
+                  <label
+                    className="modify-field"
+                    htmlFor="position-order-trail-spread"
+                  >
+                    <span className="modify-price-label">Trail Spread</span>
+                    <div className="modify-price-input-row">
+                      <span className="modify-price-prefix">$</span>
+                      <input
+                        id="position-order-trail-spread"
+                        className="modify-price-input"
+                        type="text"
+                        inputMode="decimal"
+                        value={trailSpreadText}
+                        onChange={(e) =>
+                          editFutu("trailSpread", () =>
+                            setTrailSpreadText(e.target.value),
+                          )
+                        }
+                      />
+                    </div>
+                  </label>
+                )}
               </div>
 
               {intent === "close" && (
@@ -414,12 +615,10 @@ export default function PositionOrderModal({
                 <div className="modify-quick-buttons">
                   <button
                     className="btn-quick"
-                    disabled={draft.referenceBid == null}
+                    disabled={draft.referenceBid == null || !referenceTarget}
                     onClick={() => {
-                      if (draft.referenceBid != null) {
-                        setPriceText(draft.referenceBid.toFixed(2));
-                        attemptId.onFieldEdit("limitPrice");
-                      }
+                      if (draft.referenceBid != null)
+                        applyReference(draft.referenceBid);
                     }}
                   >
                     BID
@@ -429,12 +628,10 @@ export default function PositionOrderModal({
                   </button>
                   <button
                     className="btn-quick"
-                    disabled={draft.referenceMid == null}
+                    disabled={draft.referenceMid == null || !referenceTarget}
                     onClick={() => {
-                      if (draft.referenceMid != null) {
-                        setPriceText(draft.referenceMid.toFixed(2));
-                        attemptId.onFieldEdit("limitPrice");
-                      }
+                      if (draft.referenceMid != null)
+                        applyReference(draft.referenceMid);
                     }}
                   >
                     MID
@@ -444,12 +641,10 @@ export default function PositionOrderModal({
                   </button>
                   <button
                     className="btn-quick"
-                    disabled={draft.referenceAsk == null}
+                    disabled={draft.referenceAsk == null || !referenceTarget}
                     onClick={() => {
-                      if (draft.referenceAsk != null) {
-                        setPriceText(draft.referenceAsk.toFixed(2));
-                        attemptId.onFieldEdit("limitPrice");
-                      }
+                      if (draft.referenceAsk != null)
+                        applyReference(draft.referenceAsk);
                     }}
                   >
                     ASK
@@ -460,7 +655,42 @@ export default function PositionOrderModal({
                 </div>
               </div>
 
-              {!isCombo && (
+              {futuChoices && (
+                <>
+                  <div className="modify-quick-section">
+                    <span className="modify-price-label">Time in Force</span>
+                    <OrderChoiceSelector
+                      ariaLabel="Time in force"
+                      options={futuChoices.tifs}
+                      value={futuChoices.tif}
+                      className="modify-quick-buttons"
+                      onChange={(value) =>
+                        editFutu("tif", () =>
+                          setFutuSel((s) => ({ ...s, tif: value })),
+                        )
+                      }
+                    />
+                  </div>
+                  {futuSec === "STK" && (
+                    <div className="modify-quick-section">
+                      <span className="modify-price-label">Session</span>
+                      <OrderChoiceSelector
+                        ariaLabel="Session"
+                        options={futuChoices.sessions}
+                        value={futuChoices.session}
+                        className="modify-quick-buttons"
+                        onChange={(value) =>
+                          editFutu("session", () =>
+                            setFutuSel((s) => ({ ...s, session: value })),
+                          )
+                        }
+                      />
+                    </div>
+                  )}
+                </>
+              )}
+
+              {!isCombo && !futuChoices && (
                 <>
                   <div className="modify-quick-section">
                     <span className="modify-price-label">Time in Force</span>
@@ -508,7 +738,8 @@ export default function PositionOrderModal({
                 </p>
               )}
 
-              {isValidPrice &&
+              {showLimit &&
+                isValidPrice &&
                 draft.referenceMid != null &&
                 Math.abs(parsedPrice - draft.referenceMid) >= 0.005 && (
                   <div
@@ -519,6 +750,12 @@ export default function PositionOrderModal({
                     mid {fmtPrice(draft.referenceMid)}
                   </div>
                 )}
+
+              {futuConfirm && (
+                <p className="futu-order-confirm" data-testid="futu-order-confirm">
+                  {futuConfirm}
+                </p>
+              )}
 
               {error && <p className="order-error">{error}</p>}
             </div>
@@ -551,7 +788,7 @@ export default function PositionOrderModal({
             className="btn-primary"
             onClick={handleSubmit}
             disabled={
-              submitting || !isValidQty || !isValidPrice || attemptId.uncertain
+              submitting || !isValidQty || !isValidTerms || attemptId.uncertain
             }
             aria-label={submitLabel}
           >

@@ -2,13 +2,20 @@
 
 import { useEffect, useState } from "react";
 import type { FutuAccountEnv } from "@/lib/futuAccountEnv";
+import {
+  parseFutuCapabilities,
+  type FutuCapabilities,
+  type FutuEnvCapabilities,
+} from "@/lib/futuOrderTypes";
 
 export type FutuTradingStatus = {
   paper: boolean;
   live: boolean;
+  /** `futu.capabilities` per env; an absent env offers no order types. */
+  capabilities?: FutuCapabilities;
 };
 
-function parseFutuTrading(body: unknown): FutuTradingStatus | null {
+export function parseFutuTrading(body: unknown): FutuTradingStatus | null {
   if (!body || typeof body !== "object") return null;
   const futu = (body as { futu?: unknown }).futu;
   if (!futu || typeof futu !== "object") return null;
@@ -17,10 +24,13 @@ function parseFutuTrading(body: unknown): FutuTradingStatus | null {
   const paper = (trading as { paper?: unknown }).paper;
   const live = (trading as { live?: unknown }).live;
   if (typeof paper !== "boolean" || typeof live !== "boolean") return null;
-  return { paper, live };
+  const capabilities =
+    parseFutuCapabilities((futu as { capabilities?: unknown }).capabilities) ??
+    {};
+  return { paper, live, capabilities };
 }
 
-/** `GET /api/health` → `futu.trading` (SIMULATE/REAL order surfaces). */
+/** `GET /api/health` → `futu.trading` + `futu.capabilities` (SIMULATE/REAL order surfaces). */
 export function useFutuTrading(): FutuTradingStatus | null {
   const [status, setStatus] = useState<FutuTradingStatus | null>(null);
 
@@ -51,4 +61,11 @@ export function futuTradingEnabledForEnv(
 ): boolean {
   if (!status) return false;
   return env === "paper" ? status.paper : status.live;
+}
+
+export function futuCapabilitiesForEnv(
+  status: FutuTradingStatus | null,
+  env: FutuAccountEnv,
+): FutuEnvCapabilities | null {
+  return status?.capabilities?.[env] ?? null;
 }

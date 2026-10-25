@@ -2,8 +2,13 @@ import {
   normalizeOptionRight,
   type PlaceOrderBodyValidated,
 } from "@/lib/placeOrderBodySchema";
+import { FUTU_ONLY_PLACE_FIELDS } from "@/lib/futuOrderTypes";
 
-export function buildFastApiPlaceOrderPayload(body: PlaceOrderBodyValidated) {
+export function buildFastApiPlaceOrderPayload(
+  body: PlaceOrderBodyValidated,
+  options?: { futu?: boolean },
+) {
+  const futu = options?.futu === true;
   const type = body.type ?? "stock";
   const payload: Record<string, unknown> = {
     type,
@@ -13,6 +18,13 @@ export function buildFastApiPlaceOrderPayload(body: PlaceOrderBodyValidated) {
     limitPrice: body.limitPrice,
     tif: body.tif ?? "DAY",
   };
+  // FUTU types without a fixed limit send no limitPrice; IB keeps its shape.
+  if (futu) {
+    if (body.limitPrice == null) delete payload.limitPrice;
+    for (const key of FUTU_ONLY_PLACE_FIELDS) {
+      if (body[key] != null) payload[key] = body[key];
+    }
+  }
 
   if (type === "option") {
     payload.expiry = body.expiry;

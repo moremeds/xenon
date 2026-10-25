@@ -107,9 +107,26 @@ async function parseBody(
   }
 }
 
+// Contract docs/architecture/futu-orders.md § Order types: the paper default
+// allowlist, and a REAL env with every static live tuple enabled.
+const PAPER_TUPLES = ["STK:LMT:DAY:RTH", "OPT:LMT:DAY:RTH", "STK:MKT:DAY:RTH"];
+const LIVE_ALL_TUPLES = [
+  ...["DAY", "GTC"].flatMap((tif) =>
+    ["RTH", "ETH", "ALL", "OVERNIGHT"].map((s) => `STK:LMT:${tif}:${s}`),
+  ),
+  "STK:MKT:DAY:RTH",
+  ...["STP", "STP LMT", "MIT", "LIT", "TRAIL", "TRAIL LIMIT"].flatMap((t) =>
+    ["DAY", "GTC"].map((tif) => `STK:${t}:${tif}:RTH`),
+  ),
+  ...["LMT", "STP LMT", "LIT"].flatMap((t) =>
+    ["DAY", "GTC"].map((tif) => `OPT:${t}:${tif}:RTH`),
+  ),
+];
+
 async function installOrderFlowMocks(
   page: Page,
   trading: { paper: boolean; live: boolean },
+  opts: { liveTuples?: string[] } = {},
 ) {
   const captured: CapturedRequest[] = [];
   let working = false;
@@ -169,14 +186,20 @@ async function installOrderFlowMocks(
       body: JSON.stringify({
         status: "ok",
         trading_mode: "paper",
-        futu: { trading },
+        futu: {
+          trading,
+          capabilities: {
+            paper: { tuples: PAPER_TUPLES, modify: ["LMT"] },
+            live: { tuples: opts.liveTuples ?? [], modify: ["LMT"] },
+          },
+        },
       }),
     });
   });
 
   await page.route("**/api/futu/portfolio**", async (route) => {
     const env = new URL(route.request().url()).searchParams.get("account_env");
-    if (env === "live") {
+    if (env === "live" && !opts.liveTuples) {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -235,7 +258,7 @@ async function installOrderFlowMocks(
 
   await page.route("**/api/orders/place**", async (route) => {
     await record(route);
-    assertFutuPaperScope(route.request().url());
+    assertFutuBrokerScope(route.request().url());
     working = true;
     await route.fulfill({
       status: 200,
@@ -487,6 +510,113 @@ test.describe("Futu order ticket", () => {
       fullPage: true,
     });
     expect(captured.some((c) => c.url.includes("/place"))).toBe(false);
+  });
+
+  test("SIMULATE ticket: only LMT / MKT from capabilities; MKT sends no price", async ({
+    page,
+  }) => {
+    const { captured } = await installOrderFlowMocks(page, {
+      paper: true,
+      live: false,
+    });
+    await openFutuTab(page);
+    await page.locator(".position-order-btn").first().click();
+    const dialog = page.getByRole("dialog");
+    const types = dialog.getByRole("group", { name: "Order type" });
+    await expect(types.getByRole("button")).toHaveText(["LMT", "MKT"]);
+    await expect(
+      dialog.getByRole("group", { name: "Time in force" }).getByRole("button"),
+    ).toHaveText(["DAY"]);
+    await expect(dialog.getByText("FILL OUTSIDE RTH")).toHaveCount(0);
+    await types.getByRole("button", { name: "MKT" }).click();
+    await expect(page.locator("#position-order-price")).toHaveCount(0);
+    await expect(page.getByTestId("futu-order-confirm")).toHaveText(
+      "SELL 100 AAPL · MKT · market · DAY · RTH",
+    );
+    await page.screenshot({
+      path: path.join(
+        SCREEN_DIR,
+        "futu-order-types-sim-ticket-2026-10-25.png",
+      ),
+      fullPage: true,
+    });
+    await page.getByRole("button", { name: "Submit close" }).click();
+    await expect.poll(() => captured.some((c) => c.url.includes("/place"))).toBe(true);
+    const place = captured.find((c) => c.url.includes("/place"))!;
+    assertFutuPaperScope(place.url);
+    expect(place.body).toMatchObject({
+      orderType: "MKT",
+      session: "RTH",
+      tif: "DAY",
+    });
+    expect(place.body?.limitPrice).toBeUndefined();
+    expect(place.body?.auxPrice).toBeUndefined();
+  });
+
+  test("REAL with all tuples: STP LMT ticket names trigger and limit", async ({
+    page,
+  }) => {
+    const { captured } = await installOrderFlowMocks(
+      page,
+      { paper: true, live: true },
+      { liveTuples: LIVE_ALL_TUPLES },
+    );
+    await openFutuTab(page);
+    await page.getByTestId("futu-env-real").click();
+    await page.locator(".position-order-btn").first().click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toContainText("REAL");
+    const types = dialog.getByRole("group", { name: "Order type" });
+    await expect(types.getByRole("button")).toHaveText([
+      "LMT",
+      "MKT",
+      "STP",
+      "STP LMT",
+      "MIT",
+      "LIT",
+      "TRAIL",
+      "TRAIL LIMIT",
+    ]);
+    await types.getByRole("button", { name: "STP LMT" }).click();
+    await page.locator("#position-order-aux").fill("170.00");
+    await page.locator("#position-order-price").fill("169.50");
+    await dialog
+      .getByRole("group", { name: "Time in force" })
+      .getByRole("button", { name: "GTC" })
+      .click();
+    await expect(page.getByTestId("futu-order-confirm")).toHaveText(
+      "SELL 100 AAPL · STP LMT · trigger 170.00 · limit 169.50 · GTC · RTH",
+    );
+    await page.screenshot({
+      path: path.join(
+        SCREEN_DIR,
+        "futu-order-types-real-stp-lmt-2026-10-25.png",
+      ),
+      fullPage: true,
+    });
+    await types.getByRole("button", { name: "TRAIL LIMIT" }).click();
+    await expect(page.locator("#position-order-price")).toHaveCount(0);
+    await expect(page.locator("#position-order-trail-spread")).toBeVisible();
+    await page.screenshot({
+      path: path.join(
+        SCREEN_DIR,
+        "futu-order-types-real-trail-limit-2026-10-25.png",
+      ),
+      fullPage: true,
+    });
+    await types.getByRole("button", { name: "STP LMT" }).click();
+    await page.getByRole("button", { name: "Submit close" }).click();
+    await expect.poll(() => captured.some((c) => c.url.includes("/place"))).toBe(true);
+    const place = captured.find((c) => c.url.includes("/place"))!;
+    expect(new URL(place.url).searchParams.get("account_env")).toBe("live");
+    expect(place.body).toMatchObject({
+      orderType: "STP LMT",
+      auxPrice: 170,
+      limitPrice: 169.5,
+      tif: "GTC",
+      session: "RTH",
+    });
+    expect(place.body?.trailValue).toBeUndefined();
   });
 
   test("REAL with trading.live=false: no order action buttons", async ({

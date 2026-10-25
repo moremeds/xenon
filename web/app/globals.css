@@ -3550,6 +3550,16 @@ tr.leg-row td {
   color: var(--signal-strong);
   box-shadow: inset 0 -2px 0 var(--signal-core);
 }
+/* OrderChoiceSelector — server-supplied choices (Futu type / TIF / session) */
+.order-choice-selector {
+  flex-wrap: wrap;
+}
+.futu-order-confirm {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin: 0;
+}
 
 /* OrderQuantityInput, OrderPriceInput */
 .order-price-input-row {
