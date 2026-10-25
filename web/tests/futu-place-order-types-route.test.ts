@@ -15,7 +15,8 @@ vi.mock("@/lib/xenonApi", async () => {
   return { ...actual, xenonFetch: (...args: unknown[]) => xenonFetch(...args) };
 });
 
-const FUTU_URL = "http://localhost/api/orders/place?broker=FUTU&account_env=live";
+const FUTU_URL =
+  "http://localhost/api/orders/place?broker=FUTU&account_env=live";
 const IB_URL = "http://localhost/api/orders/place";
 
 const base = {
@@ -69,7 +70,12 @@ describe("FUTU place — per type fields forwarded, absent fields not sent", () 
     ["STP", { orderType: "STP", auxPrice: 170, session: "RTH" }],
     [
       "STP LMT",
-      { orderType: "STP LMT", auxPrice: 170, limitPrice: 169.5, session: "RTH" },
+      {
+        orderType: "STP LMT",
+        auxPrice: 170,
+        limitPrice: 169.5,
+        session: "RTH",
+      },
     ],
     ["MIT", { orderType: "MIT", auxPrice: 190, session: "RTH" }],
     [
@@ -78,7 +84,12 @@ describe("FUTU place — per type fields forwarded, absent fields not sent", () 
     ],
     [
       "TRAIL",
-      { orderType: "TRAIL", trailType: "RATIO", trailValue: 1.5, session: "RTH" },
+      {
+        orderType: "TRAIL",
+        trailType: "RATIO",
+        trailValue: 1.5,
+        session: "RTH",
+      },
     ],
     [
       "TRAIL LIMIT",
@@ -197,6 +208,25 @@ describe("IB place — never carries the Futu fields", () => {
     },
   );
 
+  it.each([
+    ["orderType", null],
+    ["auxPrice", null],
+    ["orderType", "BOGUS"],
+    ["session", "NIGHT"],
+  ])(
+    "IB body with %s=%s (null or unknown) → 400 INVALID_ORDER_BODY, nothing sent",
+    async (key, value) => {
+      const res = await place(IB_URL, {
+        ...base,
+        limitPrice: 178.5,
+        [key]: value,
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).reason_code).toBe("INVALID_ORDER_BODY");
+      expect(xenonFetch).not.toHaveBeenCalled();
+    },
+  );
+
   it("IB still requires a positive limit price", async () => {
     const res = await place(IB_URL, base);
     expect(res.status).toBe(400);
@@ -210,7 +240,9 @@ describe("firstPlaceOrderSchemaErrorMessage — limitPrice per broker", () => {
     expect(firstPlaceOrderSchemaErrorMessage(noLimit)).toMatch(/^limitPrice/);
   });
   it("FUTU schema allows an absent limitPrice", () => {
-    expect(firstPlaceOrderSchemaErrorMessage(noLimit, { futu: true })).toBeNull();
+    expect(
+      firstPlaceOrderSchemaErrorMessage(noLimit, { futu: true }),
+    ).toBeNull();
   });
 });
 

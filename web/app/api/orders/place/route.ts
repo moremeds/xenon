@@ -114,6 +114,16 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     const futu = isFutuScope(request);
+    // An IB body carrying a Futu-only key (any value, even null) is refused,
+    // never stripped (contract § Order types).
+    if (!futu) {
+      const futuField = FUTU_ONLY_PLACE_FIELDS.find((key) => key in parsed);
+      if (futuField)
+        return invalidOrderBody(
+          `${futuField} is only valid for a FUTU order`,
+          requestId,
+        );
+    }
     const schemaErr = firstPlaceOrderSchemaErrorMessage(parsed, { futu });
     if (schemaErr) {
       return setNoStoreResponseHeaders(
@@ -129,16 +139,6 @@ export async function POST(request: Request): Promise<Response> {
 
     const body = parsed as PlaceBody;
     body.type = body.type ?? "stock";
-    if (!futu) {
-      const futuField = FUTU_ONLY_PLACE_FIELDS.find(
-        (key) => body[key] !== undefined,
-      );
-      if (futuField)
-        return invalidOrderBody(
-          `${futuField} is only valid for a FUTU order`,
-          requestId,
-        );
-    }
 
     // Chain UI sends CALL/PUT; IB + naked-short guard expect C/P
     if (body.type === "option" && body.right != null) {

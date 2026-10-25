@@ -529,6 +529,14 @@ test.describe("Futu order ticket", () => {
     ).toHaveText(["DAY"]);
     await expect(dialog.getByText("FILL OUTSIDE RTH")).toHaveCount(0);
     await types.getByRole("button", { name: "MKT" }).click();
+    await expect(types.getByRole("button", { name: "MKT" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await expect(types.getByRole("button", { name: "LMT" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
     await expect(page.locator("#position-order-price")).toHaveCount(0);
     await expect(page.getByTestId("futu-order-confirm")).toHaveText(
       "SELL 100 AAPL · MKT · market · DAY · RTH",
@@ -539,6 +547,8 @@ test.describe("Futu order ticket", () => {
         "futu-order-types-sim-ticket-2026-10-25.png",
       ),
       fullPage: true,
+      // Settle the 150 ms button transitions so the shot shows the final state.
+      animations: "disabled",
     });
     await page.getByRole("button", { name: "Submit close" }).click();
     await expect.poll(() => captured.some((c) => c.url.includes("/place"))).toBe(true);
@@ -587,22 +597,40 @@ test.describe("Futu order ticket", () => {
     await expect(page.getByTestId("futu-order-confirm")).toHaveText(
       "SELL 100 AAPL · STP LMT · trigger 170.00 · limit 169.50 · GTC · RTH",
     );
+    await expect(
+      types.getByRole("button", { name: "STP LMT", exact: true }),
+    ).toHaveAttribute("aria-pressed", "true");
+    await expect(
+      dialog
+        .getByRole("group", { name: "Time in force" })
+        .getByRole("button", { name: "GTC" }),
+    ).toHaveAttribute("aria-pressed", "true");
     await page.screenshot({
       path: path.join(
         SCREEN_DIR,
         "futu-order-types-real-stp-lmt-2026-10-25.png",
       ),
       fullPage: true,
+      // Settle the 150 ms button transitions so the shot shows the final state.
+      animations: "disabled",
     });
     await types.getByRole("button", { name: "TRAIL LIMIT" }).click();
     await expect(page.locator("#position-order-price")).toHaveCount(0);
+    await expect(page.locator("#position-order-aux")).toHaveCount(0);
     await expect(page.locator("#position-order-trail-spread")).toBeVisible();
+    await page.locator("#position-order-trail-value").fill("2.5");
+    await page.locator("#position-order-trail-spread").fill("0.05");
+    await expect(page.getByTestId("futu-order-confirm")).toHaveText(
+      "SELL 100 AAPL · TRAIL LIMIT · trail 2.5% · spread 0.05 · GTC · RTH",
+    );
     await page.screenshot({
       path: path.join(
         SCREEN_DIR,
         "futu-order-types-real-trail-limit-2026-10-25.png",
       ),
       fullPage: true,
+      // Settle the 150 ms button transitions so the shot shows the final state.
+      animations: "disabled",
     });
     await types.getByRole("button", { name: "STP LMT" }).click();
     await page.getByRole("button", { name: "Submit close" }).click();
