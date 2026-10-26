@@ -110,6 +110,34 @@ def order_book_top(row: Mapping[str, Any]) -> dict:
     return {"bid": bid, "bidSize": bid_size, "ask": ask, "askSize": ask_size}
 
 
+# Option QUOTE push ex-data (python names of pb_field_map_OptionBasicQotExData,
+# quote_query.py:59-77) → PriceData field → FUTU_GREEK_FACTORS key.
+_OPTION_GREEK_FIELDS = (
+    ("implied_volatility", "impliedVol", "iv"),
+    ("delta", "delta", "delta"),
+    ("gamma", "gamma", "gamma"),
+    ("theta", "theta", "theta"),
+    ("vega", "vega", "vega"),
+)
+
+
+def option_quote_fields(row: Mapping[str, Any], factors: Mapping[str, Any]) -> dict:
+    """Option greeks/IV of one QUOTE row, each pushed value × its factor.
+
+    `factors` is the parsed ``FUTU_GREEK_FACTORS`` JSON
+    (``{"iv": 0.01, "delta": 1, ...}``): Futu's IV arrives as a percentage
+    while PriceData expects a fraction, so `iv` usually carries 0.01.
+    A field stays ``None`` when the push value or the factor is missing
+    or non-finite.
+    """
+    out = {}
+    for src, dst, fkey in _OPTION_GREEK_FIELDS:
+        value = finite_or_none(row.get(src))
+        factor = finite_or_none(factors.get(fkey))
+        out[dst] = value * factor if value is not None and factor is not None else None
+    return out
+
+
 # PriceData fields Futu's QUOTE push never carries.
 _NULL_FIELDS: Mapping[str, None] = {
     "bid": None,

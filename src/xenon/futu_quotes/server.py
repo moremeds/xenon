@@ -27,6 +27,7 @@ from typing import Any, Callable, Optional
 
 from xenon.futu_quotes.admission import (
     Admission,
+    option_underlying,
     ticker_of,
     us_session,
 )
@@ -42,6 +43,7 @@ from xenon.futu_quotes.opend import (
 from xenon.futu_quotes.quote_map import (
     HighWaterMark,
     OvernightBaseline,
+    option_quote_fields,
     order_book_top,
     overnight_row_to_pricedata,
     row_to_pricedata,
@@ -141,6 +143,7 @@ class FutuQuotesService:
         wall: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         book_stale_s: float = 0.0,
         units_per_symbol: int = 2,
+        greek_factors: Optional[dict] = None,
     ) -> None:
         self.opend = opend
         opend.on_quote_rows = self._on_quote_rows
@@ -164,6 +167,8 @@ class FutuQuotesService:
         # RTH quote (pd, quote_ts) — the template book pushes rebuild from.
         self._book: dict[str, dict] = {}
         self._last_quote: dict[str, tuple[dict, datetime]] = {}
+        # Parsed FUTU_GREEK_FACTORS; None = greeks/IV stay NULL (contract).
+        self.greek_factors = greek_factors
         # US session from the last poll: "rth" | "overnight" | None (closed).
         self.session: Optional[str] = None
         self.baseline = OvernightBaseline()
@@ -592,6 +597,8 @@ class FutuQuotesService:
             if sym is None:
                 continue
             if received_at is not None:
+                if "_" in sym:
+                    continue  # option relay keys are RTH only, never overnight
                 out = overnight_row_to_pricedata(sym, row, received_at)
                 if out is None:
                     continue  # no overnight trade: not ready, not published
@@ -616,6 +623,7 @@ class FutuQuotesService:
                 # from, then overlay the fresh book top if we have one.
                 self._last_quote[sym] = (pd, ts)
                 self._apply_book(pd, ts)
+                self._apply_option(pd, sym, row)
             self.batcher.enqueue(pd, ts)  # ordering/mark stays on QUOTE ts
         self._schedule_flush()
 
@@ -638,6 +646,22 @@ class FutuQuotesService:
         pd.update(book["fields"])
         merged = max(quote_ts, book["recv"])
         pd["timestamp"] = merged.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+
+    def _apply_option(self, pd: dict, sym: str, row: Optional[dict] = None) -> None:
+        """Option relay keys: factored greeks/IV + underlying last, in place.
+
+        Greeks/IV stamp only from a QUOTE ``row`` and only when
+        ``greek_factors`` is set (else they stay NULL). ``undPrice`` is
+        the latest Futu last of the underlying while the service holds it,
+        else NULL — refreshed at emit time so book-driven rebuilds see the
+        newest underlying.
+        """
+        if row is not None and self.greek_factors is not None:
+            pd.update(option_quote_fields(row, self.greek_factors))
+        und = option_underlying(sym)
+        if und is not None:
+            base = self._last_quote.get(und)
+            pd["undPrice"] = base[0]["last"] if base is not None else None
 
     def _on_book_rows(self, rows: list[dict]) -> None:
         """ORDER_BOOK push rows (already on the loop thread).
@@ -666,6 +690,7 @@ class FutuQuotesService:
             out.update(fields)
             merged = max(quote_ts, recv)
             out["timestamp"] = merged.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+            self._apply_option(out, sym)  # refresh undPrice for option keys
             self.batcher.enqueue(out, quote_ts)
         self._schedule_flush()
 
@@ -796,6 +821,7 @@ async def run_forever(
     unsub_tick_s: float = 1.0,
     book_stale_s: float = 0.0,
     units_per_symbol: int = 2,
+    greek_factors: Optional[dict] = None,
 ) -> None:
     """Serve the internal relay WebSocket until cancelled."""
     try:
@@ -809,6 +835,7 @@ async def run_forever(
         clock=clock,
         book_stale_s=book_stale_s,
         units_per_symbol=units_per_symbol,
+        greek_factors=greek_factors,
     )
 
     supervisor = asyncio.create_task(_opend_supervisor(svc, opend))

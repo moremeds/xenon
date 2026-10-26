@@ -20,13 +20,16 @@ deterministically.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from datetime import time as dtime
 from typing import Any, Callable, Optional
 
 from xenon.futu_quotes.quote_map import ET
+from xenon.utils.symbol_norm import futu_to_ib
 
 MIN_LIFETIME_S = 60.0
 UNSUB_GRACE_S = 60.0
@@ -84,11 +87,55 @@ def futu_code(symbol: str) -> str:
     return f"US.{symbol}"
 
 
+# Option relay key (ib_realtime_server.js `optionKey`):
+# ``SYM_YYYYMMDD_STRIKE_RIGHT``, e.g. ``AAPL_20261030_150.5_C``. The
+# underlying stays `[A-Z][A-Z0-9]*` — class shares (`BRK.B`) have no
+# verified Futu option code (execution/futu_orders.py `futu_code_for`).
+_OPT_KEY_RE = re.compile(r"([A-Z][A-Z0-9]*)_(\d{8})_([0-9]+(?:\.[0-9]+)?)_([CP])")
+
+
+def code_for(symbol: str) -> Optional[str]:
+    """Relay symbol → Futu code; ``None`` when no Futu code exists.
+
+    Plain tickers → ``US.<SYM>``. Option keys → the OCC-packed
+    ``US.<UND><YYMMDD><C|P><strike×1000>`` without zero padding (the form
+    OpenD reports), under the same rule `futu_orders.futu_code_for` uses:
+    underlying `[A-Z][A-Z0-9]*`, strike positive with at most 3 decimals.
+    A symbol containing `_` that fails the option-key shape (class-share
+    underlying, bad expiry/right, 4-decimal strike) is unmappable → None.
+    """
+    if "_" not in symbol:
+        return futu_code(symbol)
+    m = _OPT_KEY_RE.fullmatch(symbol)
+    if m is None:
+        return None
+    underlying, yyyymmdd, strike_s, right = m.groups()
+    milli = Decimal(strike_s) * 1000
+    if milli <= 0 or milli != milli.to_integral_value():
+        return None
+    return f"US.{underlying}{yyyymmdd[2:]}{right}{int(milli)}"
+
+
+def option_underlying(symbol: str) -> Optional[str]:
+    """Underlying ticker of an option relay key; ``None`` otherwise."""
+    m = _OPT_KEY_RE.fullmatch(symbol)
+    return m.group(1) if m is not None else None
+
+
 def ticker_of(code: str) -> Optional[str]:
-    """Futu code → plain ticker; ``None`` for non-US codes."""
-    if isinstance(code, str) and code.startswith("US.") and len(code) > 3:
-        return code[3:]
-    return None
+    """Futu code → relay key; ``None`` for non-US codes.
+
+    Option codes unpack back to ``SYM_YYYYMMDD_STRIKE_RIGHT`` so `assign`
+    and `batch` keys stay exactly the `want.symbols` strings.
+    """
+    if not (isinstance(code, str) and code.startswith("US.") and len(code) > 3):
+        return None
+    info = futu_to_ib(code)
+    if info.get("kind") == "OPT":
+        strike = info["strike"]
+        strike_s = str(int(strike)) if strike == int(strike) else str(strike)
+        return f"{info['symbol']}_{info['expiry']}_{strike_s}_{info['right']}"
+    return code[3:]
 
 
 @dataclass
@@ -205,7 +252,12 @@ class Admission:
     def state(self, symbol: str) -> SymbolState:
         st = self.symbols.get(symbol)
         if st is None:
-            st = SymbolState(symbol=symbol, code=futu_code(symbol))
+            code = code_for(symbol)
+            st = SymbolState(symbol=symbol, code=code if code is not None else symbol)
+            if code is None:
+                # Unmappable relay key (e.g. class-share option
+                # ``BRK.B_..._C``): nothing to ask OpenD — reject locally.
+                st.verify = "not_supported"
             self.symbols[symbol] = st
         return st
 

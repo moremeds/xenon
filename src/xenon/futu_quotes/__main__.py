@@ -4,6 +4,8 @@ Env: ``FUTU_QUOTES_HOST``/``FUTU_QUOTES_PORT`` (listen, default
 0.0.0.0:8767), ``FUTU_QUOTE_QUOTA`` (admission ceiling, default 800),
 ``FUTU_UNITS_PER_SYMBOL`` (quota units per held symbol, default 2),
 ``FUTU_BOOK_STALE_S`` (ORDER_BOOK receipt-age cutoff; 0 = off, default 0),
+``FUTU_GREEK_FACTORS`` (JSON per-field multipliers for option greeks/IV,
+e.g. ``{"iv":0.01,"delta":1,"gamma":1,"theta":1,"vega":1}``; unset = NULL),
 ``FUTU_OPEND_HOST``/``FUTU_OPEND_PORT`` (OpenD, default 127.0.0.1:11111).
 """
 
@@ -11,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -55,6 +58,16 @@ def main(argv: list[str] | None = None) -> int:
     quota_cap = int(os.environ.get("FUTU_QUOTE_QUOTA", "800"))
     units_per_symbol = int(os.environ.get("FUTU_UNITS_PER_SYMBOL", "2"))
     book_stale_s = float(os.environ.get("FUTU_BOOK_STALE_S", "0"))
+    greek_factors = None
+    raw_factors = os.environ.get("FUTU_GREEK_FACTORS")
+    if raw_factors:
+        try:
+            parsed = json.loads(raw_factors)
+            greek_factors = {k: float(v) for k, v in parsed.items()} if isinstance(parsed, dict) else None
+            if greek_factors is None:
+                log.warning("FUTU_GREEK_FACTORS is not a JSON object; greeks/IV stay NULL")
+        except (TypeError, ValueError):
+            log.warning("FUTU_GREEK_FACTORS is not valid JSON; greeks/IV stay NULL")
     opend = FutuOpenD(
         host=os.environ.get("FUTU_OPEND_HOST", "127.0.0.1"),
         port=int(os.environ.get("FUTU_OPEND_PORT", "11111")),
@@ -68,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
                 quota_cap=quota_cap,
                 book_stale_s=book_stale_s,
                 units_per_symbol=units_per_symbol,
+                greek_factors=greek_factors,
             )
         )
     except KeyboardInterrupt:  # pragma: no cover
