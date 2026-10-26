@@ -259,6 +259,29 @@ function fmt2(v: number): string {
   return v.toFixed(Math.min(Math.max(2, dp), 6));
 }
 
+/** Plain decimal only (`170`, `0.5123`, `.5`): the whole trimmed text must
+ *  match, so `1,5` or `1oops` is invalid (NaN), never a prefix value. */
+export function parseStrictDecimal(text: string): number {
+  const t = text.trim();
+  return /^(\d+\.?\d*|\.\d+)$/.test(t) ? Number(t) : Number.NaN;
+}
+
+/** A Futu reference price as entered into a field: full precision, only
+ *  binary float noise removed (never rounded to 2 dp). */
+export function futuReferenceText(v: number): string {
+  return String(Number(v.toPrecision(12)));
+}
+
+/** Reference caption: at least 2 dp, every significant digit kept. */
+export function fmtFutuReference(v: number): string {
+  return fmt2(Number(v.toPrecision(12)));
+}
+
+/** Trail unit Xenon can display and edit; anything else is unavailable. */
+export function isKnownTrailType(t: unknown): t is FutuTrailType {
+  return isOneOf(FUTU_TRAIL_TYPES, t);
+}
+
 /** One-line ticket summary naming type, trigger, limit, trail, TIF, session. */
 export function futuOrderConfirmText(args: {
   action: string;
@@ -411,7 +434,8 @@ export function buildFutuModifyRequest(
       message: "Enter a positive trigger price.",
     },
     {
-      shown: f.trail,
+      // Without a known unit (RATIO / AMOUNT) the value cannot be edited.
+      shown: f.trail && isKnownTrailType(order.trailType),
       value: input.trailValue,
       current: order.trailValue,
       valid: positive,
@@ -514,7 +538,9 @@ export function futuOrderTermCells(order: {
     trail =
       order.trailType === "RATIO"
         ? `${order.trailValue}%`
-        : fmtFutuPrice(order.trailValue);
+        : order.trailType === "AMOUNT"
+          ? fmtFutuPrice(order.trailValue)
+          : UNAVAILABLE; // unknown unit: never shown as dollars
     if (order.trailSpread != null)
       trail += ` · spread ${fmtFutuPrice(order.trailSpread)}`;
   }

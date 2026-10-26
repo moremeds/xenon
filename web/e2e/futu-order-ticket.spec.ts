@@ -807,6 +807,14 @@ test.describe("Futu order ticket", () => {
       animations: "disabled",
     });
     await types.getByRole("button", { name: "STP LMT" }).click();
+    // A type change clears the terms: the old trigger and limit never return.
+    await expect(page.locator("#position-order-aux")).toHaveValue("");
+    await expect(page.locator("#position-order-price")).toHaveValue("");
+    await expect(
+      page.getByRole("button", { name: "Submit close" }),
+    ).toBeDisabled();
+    await page.locator("#position-order-aux").fill("170.00");
+    await page.locator("#position-order-price").fill("169.50");
     await page.getByRole("button", { name: "Submit close" }).click();
     await expect
       .poll(() => captured.some((c) => c.url.includes("/place")))
@@ -891,6 +899,52 @@ test.describe("Futu order ticket", () => {
     await expect
       .poll(() => captured.some((c) => c.url.includes("/cancel")))
       .toBe(true);
+    const cancel = captured.find((c) => c.url.includes("/cancel"))!;
+    assertFutuPaperScope(cancel.url);
+    expect(cancel.body).toEqual({ brokerOrderId: BROKER_ORDER_ID });
+  });
+
+  test("SIMULATE TRAIL row with unknown trail unit: ---, no trail edit, CANCEL sends", async ({
+    page,
+  }) => {
+    const { captured } = await installOrderFlowMocks(
+      page,
+      { paper: true, live: false },
+      {
+        workingOrder: {
+          orderType: "TRAIL",
+          limitPrice: null,
+          auxPrice: null,
+          trailType: null,
+          trailValue: 2,
+        },
+        paperModify: ["LMT", "TRAIL"],
+      },
+    );
+    await openFutuTab(page);
+    await page.goto("/orders");
+    // Unit unknown: an unavailable marker, never a guessed "$".
+    await expect(page.getByTestId("futu-order-trail")).toHaveText("---");
+    await page.getByRole("button", { name: "MODIFY" }).click();
+    await expect(page.locator("#modify-trail-value-input")).toBeDisabled();
+    const prefix = page
+      .locator(".modify-price-input-row")
+      .filter({ has: page.locator("#modify-trail-value-input") })
+      .locator(".modify-price-prefix");
+    await expect(prefix).toHaveText("---");
+    await page.screenshot({
+      path: path.join(SCREEN_DIR, "futu-trail-unit-unknown-2026-10-26.png"),
+      fullPage: true,
+      animations: "disabled",
+    });
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await page.getByRole("button", { name: "CANCEL" }).click();
+    await page.getByRole("button", { name: "Cancel Order" }).click();
+    await expect
+      .poll(() => captured.some((c) => c.url.includes("/cancel")))
+      .toBe(true);
+    expect(captured.some((c) => c.url.includes("/modify"))).toBe(false);
     const cancel = captured.find((c) => c.url.includes("/cancel"))!;
     assertFutuPaperScope(cancel.url);
     expect(cancel.body).toEqual({ brokerOrderId: BROKER_ORDER_ID });

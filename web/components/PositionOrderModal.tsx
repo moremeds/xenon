@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { PortfolioPosition } from "@/lib/types";
 import type { FutuAccountEnv } from "@/lib/futuAccountEnv";
 import { futuScopeQuery, useFutuAccountEnv } from "@/lib/futuAccountEnv";
@@ -18,6 +18,9 @@ import {
   FUTU_ORDER_TYPE_FIELDS,
   FUTU_TRAIL_TYPES,
   buildFutuOrderTerms,
+  fmtFutuReference,
+  futuReferenceText,
+  parseStrictDecimal,
   futuOrderConfirmText,
   futuTicketChoices,
   type FutuSecType,
@@ -169,7 +172,11 @@ export default function PositionOrderModal({
       : position.structure_type === "Stock"
         ? parseFloat(qtyText)
         : parseInt(qtyText, 10);
-  const parsedPrice = parseInputNumber(priceText);
+  // Futu single-leg: the whole text must be a decimal (no prefix parsing).
+  const futuSingleLeg = Boolean(futuTicket) && !isCombo;
+  const parsedPrice = futuSingleLeg
+    ? parseStrictDecimal(priceText)
+    : parseInputNumber(priceText);
   const isValidQty = Number.isFinite(parsedQty) && parsedQty > 0;
   const isValidPrice =
     Number.isFinite(parsedPrice) &&
@@ -192,6 +199,18 @@ export default function PositionOrderModal({
       : null;
   const futuType = futuChoices?.orderType ?? null;
   const futuTypeFields = futuType ? FUTU_ORDER_TYPE_FIELDS[futuType] : null;
+  // A change of the effective order type clears the manual limit, trigger
+  // and trail values, so a term typed for an earlier type never comes back.
+  const prevFutuType = useRef(futuType);
+  useEffect(() => {
+    const prev = prevFutuType.current;
+    prevFutuType.current = futuType;
+    if (prev == null || futuType == null || prev === futuType) return;
+    setPriceText("");
+    setAuxText("");
+    setTrailValueText("");
+    setTrailSpreadText("");
+  }, [futuType]);
   const showLimit = !futuChoices || futuTypeFields?.limit === true;
   const showAux = futuTypeFields?.aux === true;
   const futuTerms =
@@ -201,10 +220,10 @@ export default function PositionOrderModal({
           sec: futuSec,
           session: futuChoices.session,
           limitPrice: parsedPrice,
-          auxPrice: parseInputNumber(auxText),
+          auxPrice: parseStrictDecimal(auxText),
           trailType,
-          trailValue: parseInputNumber(trailValueText),
-          trailSpread: parseInputNumber(trailSpreadText),
+          trailValue: parseStrictDecimal(trailValueText),
+          trailSpread: parseStrictDecimal(trailSpreadText),
         })
       : null;
   const futuReady = Boolean(futuTerms?.ok && futuChoices?.tif);
@@ -234,12 +253,18 @@ export default function PositionOrderModal({
     : showAux
       ? "aux"
       : null;
+  // Futu keeps the full reference (a 0.5123 bid stays 0.5123; precision the
+  // grid does not support is refused by the server, never rounded here).
+  const referenceText = (value: number) =>
+    futuSingleLeg ? futuReferenceText(value) : value.toFixed(2);
+  const referenceCaption = (value: number) =>
+    futuSingleLeg ? fmtFutuReference(value) : value.toFixed(2);
   const applyReference = (value: number) => {
     if (referenceTarget === "limit") {
-      setPriceText(value.toFixed(2));
+      setPriceText(referenceText(value));
       attemptId.onFieldEdit("limitPrice");
     } else if (referenceTarget === "aux") {
-      setAuxText(value.toFixed(2));
+      setAuxText(referenceText(value));
       attemptId.onFieldEdit("auxPrice");
     }
   };
@@ -623,7 +648,7 @@ export default function PositionOrderModal({
                   >
                     BID
                     {draft.referenceBid != null
-                      ? ` ${draft.referenceBid.toFixed(2)}`
+                      ? ` ${referenceCaption(draft.referenceBid)}`
                       : ""}
                   </button>
                   <button
@@ -636,7 +661,7 @@ export default function PositionOrderModal({
                   >
                     MID
                     {draft.referenceMid != null
-                      ? ` ${draft.referenceMid.toFixed(2)}`
+                      ? ` ${referenceCaption(draft.referenceMid)}`
                       : ""}
                   </button>
                   <button
@@ -649,7 +674,7 @@ export default function PositionOrderModal({
                   >
                     ASK
                     {draft.referenceAsk != null
-                      ? ` ${draft.referenceAsk.toFixed(2)}`
+                      ? ` ${referenceCaption(draft.referenceAsk)}`
                       : ""}
                   </button>
                 </div>

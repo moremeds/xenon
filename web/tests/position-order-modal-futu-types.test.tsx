@@ -446,3 +446,93 @@ describe("IB ticket — unchanged", () => {
       expect(k in body).toBe(false);
   });
 });
+
+describe("Astra PR #247 — ticket input safety", () => {
+  beforeEach(() =>
+    setCapabilities({ live: { tuples: LIVE_ALL_TUPLES, modify: ["LMT"] } }),
+  );
+
+  const submitButton = (utils: ReturnType<typeof render>) =>
+    utils.getByRole("button", { name: /^Submit/ }) as HTMLButtonElement;
+
+  it.each([
+    ["TRAIL", /Trail Value/, "1,5"],
+    ["TRAIL", /Trail Value/, "1oops"],
+    ["STP", /Trigger Price/, "170.5x"],
+    ["TRAIL LIMIT", /Trail Spread/, "0.05,1"],
+  ])(
+    "%s: malformed %s text %s keeps Submit disabled, no request",
+    (type, field, text) => {
+      const utils = renderTicket(stockPos);
+      choose(utils, "Order type", type);
+      if (type === "TRAIL LIMIT") fill(utils, /Trail Value/, "2");
+      fill(utils, field, text);
+      expect(submitButton(utils).disabled).toBe(true);
+      fireEvent.click(submitButton(utils));
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("sub-dollar BID reference fills and submits the full trigger 0.5123", async () => {
+    const utils = render(
+      <PositionOrderModal
+        position={stockPos}
+        prices={{ AAPL: { last: 0.5124, bid: 0.5123, ask: 0.5125 } as never }}
+        onClose={() => {}}
+        futuTicket={{
+          env: "live",
+          accountTail: "1234",
+          portfolioPositions: [stockPos],
+        }}
+      />,
+    );
+    choose(utils, "Order type", "STP");
+    const bid = utils.getByRole("button", { name: /^BID/ });
+    expect(bid.textContent).toBe("BID 0.5123");
+    fireEvent.click(bid);
+    expect(
+      (utils.getByLabelText(/Trigger Price/) as HTMLInputElement).value,
+    ).toBe("0.5123");
+    const body = await submittedBody(utils);
+    expect(body).toMatchObject({ orderType: "STP", auxPrice: 0.5123 });
+  });
+
+  it("LMT 170.01 → MKT → STP LMT never resubmits the stale limit", async () => {
+    const utils = renderTicket(stockPos);
+    fill(utils, /Limit Price/, "170.01");
+    choose(utils, "Order type", "MKT");
+    choose(utils, "Order type", "STP LMT");
+    expect(
+      (utils.getByLabelText(/Limit Price/) as HTMLInputElement).value,
+    ).toBe("");
+    fill(utils, /Trigger Price/, "170.02");
+    expect(submitButton(utils).disabled).toBe(true);
+    fill(utils, /Limit Price/, "169.90");
+    const body = await submittedBody(utils);
+    expect(body).toMatchObject({
+      orderType: "STP LMT",
+      auxPrice: 170.02,
+      limitPrice: 169.9,
+    });
+  });
+
+  it("a type switch also clears the trigger and trail values", () => {
+    const utils = renderTicket(stockPos);
+    choose(utils, "Order type", "STP");
+    fill(utils, /Trigger Price/, "170");
+    choose(utils, "Order type", "TRAIL LIMIT");
+    fill(utils, /Trail Value/, "2");
+    fill(utils, /Trail Spread/, "0.05");
+    choose(utils, "Order type", "STP");
+    expect(
+      (utils.getByLabelText(/Trigger Price/) as HTMLInputElement).value,
+    ).toBe("");
+    choose(utils, "Order type", "TRAIL LIMIT");
+    expect(
+      (utils.getByLabelText(/Trail Value/) as HTMLInputElement).value,
+    ).toBe("");
+    expect(
+      (utils.getByLabelText(/Trail Spread/) as HTMLInputElement).value,
+    ).toBe("");
+  });
+});

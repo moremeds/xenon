@@ -455,3 +455,84 @@ describe("ModifyOrderModal fields per Futu type; IB unchanged", () => {
     expect(onConfirm).toHaveBeenCalledWith({ newPrice: 11 });
   });
 });
+
+describe("Astra PR #247 — modify dialog precision and trail unit", () => {
+  const trailNoUnit = {
+    ...trail,
+    brokerOrderId: "9005",
+    trailType: null,
+    trailValue: 2,
+  } as unknown as OpenOrder;
+
+  it("sub-dollar BID reference keeps 0.5123 for a Futu trigger", () => {
+    const onConfirm = vi.fn();
+    const r = render(
+      <ModifyOrderModal
+        order={{ ...stp, auxPrice: 0.6 } as OpenOrder}
+        prices={{
+          MOCK: { last: 0.5124, bid: 0.5123, ask: 0.5125 } as never,
+        }}
+        loading={false}
+        onConfirm={onConfirm}
+        onClose={() => {}}
+      />,
+    );
+    const bid = r.getByRole("button", { name: /^BID/ });
+    expect(bid.textContent).toBe("BID 0.5123");
+    fireEvent.click(bid);
+    expect(
+      (r.getByLabelText(/^New Trigger Price/) as HTMLInputElement).value,
+    ).toBe("0.5123");
+    fireEvent.click(r.getByRole("button", { name: "Modify Order" }));
+    expect(onConfirm).toHaveBeenCalledWith({ newAuxPrice: 0.5123 });
+  });
+
+  it("unknown trail unit: --- marker, trail value not editable, never sent", () => {
+    const onConfirm = vi.fn();
+    const r = render(
+      <ModifyOrderModal
+        order={trailNoUnit}
+        loading={false}
+        onConfirm={onConfirm}
+        onClose={() => {}}
+      />,
+    );
+    const input = r.getByLabelText(/^New Trail Value/) as HTMLInputElement;
+    expect(input.disabled).toBe(true);
+    const row = input.closest(".modify-price-input-row")!;
+    expect(row.querySelector(".modify-price-prefix")?.textContent).toBe("---");
+    expect(row.textContent).not.toContain("$");
+    fireEvent.change(input, { target: { value: "3" } });
+    fireEvent.click(r.getByRole("button", { name: "Modify Order" }));
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("unknown trail unit row: Trail shows ---, CANCEL stays available", async () => {
+    modifyTypes = ["LMT", "TRAIL"];
+    rows = [trailNoUnit];
+    const f = installFetch();
+    const r = render(
+      <OrderActionsProvider>
+        <OrdersSections
+          orders={snapshot([trailNoUnit])}
+          activeAccount="futu"
+          futuOrderActionsEnabled={true}
+        />
+      </OrderActionsProvider>,
+    );
+    await act(async () => {});
+    expect(r.getByTestId("futu-order-trail").textContent).toBe("---");
+    const cancel = r.getByRole("button", { name: "CANCEL" });
+    expect((cancel as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(cancel);
+    await act(async () => {
+      fireEvent.click(r.getByRole("button", { name: "Cancel Order" }));
+    });
+    const call = f.mock.calls.find(([u]) =>
+      String(u).startsWith("/api/orders/cancel"),
+    );
+    expect(JSON.parse(String((call![1] as RequestInit).body))).toEqual({
+      brokerOrderId: "9005",
+    });
+  });
+});

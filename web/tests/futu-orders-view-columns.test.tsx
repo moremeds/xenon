@@ -204,3 +204,17 @@ describe("Futu orders view columns", () => {
     expect(r.getByText("$10.00")).toBeTruthy();
   });
 });
+
+describe("Astra PR #247 — unknown trail unit display", () => {
+  it.each([[null], [undefined], ["PERCENT"]])(
+    "trailType %s renders --- for the trail value, never $",
+    (trailType) => {
+      const cells = futuOrderTermCells({ trailType, trailValue: 2 });
+      expect(cells.trail).toBe("---");
+      expect(
+        futuOrderTermCells({ trailType, trailValue: 2, trailSpread: 0.05 })
+          .trail,
+      ).toBe("--- · spread $0.05");
+    },
+  );
+});

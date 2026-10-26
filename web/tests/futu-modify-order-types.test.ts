@@ -365,3 +365,24 @@ describe("/api/orders/modify — Futu trigger / trail terms", () => {
     expect((await res.json()).reason_code).toBe("FUTU_SEND_UNCERTAIN");
   });
 });
+
+describe("Astra PR #247 — unknown trail unit", () => {
+  it.each([[null], ["PERCENT"]])(
+    "trailType %s: the trail value is never sent",
+    (trailType) => {
+      const o = row({
+        orderType: "TRAIL",
+        limitPrice: null,
+        trailType,
+        trailValue: 2,
+      });
+      const r = buildFutuModifyRequest(o, input({ trailValue: 3 }));
+      expect(r.ok).toBe(false);
+      const withQty = buildFutuModifyRequest(
+        o,
+        input({ quantity: 5, trailValue: 3 }),
+      );
+      expect(withQty.ok && withQty.request).toEqual({ newQuantity: 5 });
+    },
+  );
+});

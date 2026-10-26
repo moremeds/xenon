@@ -11,6 +11,10 @@ import { isFutuOpenOrder, openOrderActionKey } from "@/lib/futuOpenOrder";
 import {
   FUTU_MODIFY_NO_CHANGE as FUTU_NO_CHANGE,
   buildFutuModifyRequest,
+  fmtFutuReference,
+  futuReferenceText,
+  isKnownTrailType,
+  parseStrictDecimal,
   futuModifyConfirmText,
   futuModifyFieldsFor,
 } from "@/lib/futuOrderTypes";
@@ -330,19 +334,27 @@ export default function ModifyOrderModal({
   const futuModify = futu
     ? buildFutuModifyRequest(order, {
         quantity: parsedQuantity,
-        limitPrice: parsedNew,
-        auxPrice: parseFloat(newAux),
-        trailValue: parseFloat(newTrailValue),
-        trailSpread: parseFloat(newTrailSpread),
+        // The whole text must be a decimal: `1,5` / `1oops` stay invalid.
+        limitPrice: parseStrictDecimal(newPrice),
+        auxPrice: parseStrictDecimal(newAux),
+        trailValue: parseStrictDecimal(newTrailValue),
+        trailSpread: parseStrictDecimal(newTrailSpread),
       })
     : null;
   const showLimit = !futu || futuFields?.limit === true;
   const showAux = futuFields?.aux === true;
   // BID / MID / ASK fill the limit, or the trigger for types without a limit.
+  // Futu keeps the full reference value (never rounded to 2 dp); IB as before.
+  const referenceText = (v: number) =>
+    futu ? futuReferenceText(v) : v.toFixed(2);
+  const referenceCaption = (v: number) =>
+    futu ? fmtFutuReference(v) : v.toFixed(2);
   const setReference = (v: number) => {
-    if (showLimit) setNewPrice(v.toFixed(2));
-    else if (showAux) setNewAux(v.toFixed(2));
+    if (showLimit) setNewPrice(referenceText(v));
+    else if (showAux) setNewAux(referenceText(v));
   };
+  // A trail value is editable only with a known unit (RATIO / AMOUNT).
+  const trailUnitKnown = isKnownTrailType(order.trailType);
   const canSubmit = futuModify
     ? !loading && !locked && futuModify.ok
     : !loading &&
@@ -501,7 +513,7 @@ export default function ModifyOrderModal({
                         id="modify-aux-input"
                         className="modify-price-input"
                         type="number"
-                        step="0.01"
+                        step="any"
                         min="0.01"
                         value={newAux}
                         onChange={(e) => setNewAux(e.target.value)}
@@ -539,21 +551,28 @@ export default function ModifyOrderModal({
                   >
                     <span className="modify-price-label">
                       New Trail Value
-                      {order.trailType ? ` (${order.trailType})` : ""}
+                      {trailUnitKnown
+                        ? ` (${order.trailType})`
+                        : " (unit unavailable)"}
                     </span>
                     <div className="modify-price-input-row">
                       <span className="modify-price-prefix">
-                        {order.trailType === "RATIO" ? "%" : "$"}
+                        {order.trailType === "RATIO"
+                          ? "%"
+                          : order.trailType === "AMOUNT"
+                            ? "$"
+                            : "---"}
                       </span>
                       <input
                         id="modify-trail-value-input"
                         className="modify-price-input"
                         type="number"
-                        step="0.01"
+                        step="any"
                         min="0.01"
                         value={newTrailValue}
                         onChange={(e) => setNewTrailValue(e.target.value)}
-                        autoFocus
+                        disabled={!trailUnitKnown}
+                        autoFocus={trailUnitKnown}
                       />
                     </div>
                   </label>
@@ -591,7 +610,7 @@ export default function ModifyOrderModal({
                     }
                     onClick={() => bid != null && setReference(bid)}
                   >
-                    BID{bid != null ? ` ${bid.toFixed(2)}` : ""}
+                    BID{bid != null ? ` ${referenceCaption(bid)}` : ""}
                   </button>
                   <button
                     className="btn-quick"
@@ -600,7 +619,7 @@ export default function ModifyOrderModal({
                     }
                     onClick={() => mid != null && setReference(mid)}
                   >
-                    MID{mid != null ? ` ${mid.toFixed(2)}` : ""}
+                    MID{mid != null ? ` ${referenceCaption(mid)}` : ""}
                   </button>
                   <button
                     className="btn-quick"
@@ -609,7 +628,7 @@ export default function ModifyOrderModal({
                     }
                     onClick={() => ask != null && setReference(ask)}
                   >
-                    ASK{ask != null ? ` ${ask.toFixed(2)}` : ""}
+                    ASK{ask != null ? ` ${referenceCaption(ask)}` : ""}
                   </button>
                 </div>
               </div>
