@@ -71,6 +71,11 @@ the session changes.
   symbol. `pending` and `rejected` items are `{symbol, reason}`.
 - `ok`: subscribed on OpenD while the session is `rth` or `overnight`. The relay serves a symbol from Futu only when
   it is in `ok` of the latest `gen` of the active connection.
+- Overnight readiness: in the `overnight` session a subscribed symbol is `ok` only after the
+  service has seen at least one row for it with a valid `overnight_price` and an `overnight_volume`
+  above 0 since the last baseline reset (see the replay guard below). Until then it stays `pending`
+  with reason `session`, so the relay keeps it on IB. A symbol with no overnight trading never
+  leaves IB. The row that makes it ready is the baseline and is not published.
 - Assignment transitions are serialized. A late completion of an older subscribe never changes the
   assignment for a newer `gen`.
 - `pending.reason`: `subscribing` | `session` | `opend_down` | `backoff`.
@@ -103,11 +108,18 @@ the session changes.
   is the RTH `last_price` (the most recent regular close); `open` is `null`. During overnight the
   QUOTE push keeps `last_price` and `data_date`/`data_time` at the last RTH quote, and Futu has no
   overnight time field, so `timestamp` is the service's receipt time (UTC). A row with a missing,
-  non-finite or ≤ 0 `overnight_price` is dropped (for example a holiday night).
+  non-finite or ≤ 0 `overnight_price` or `overnight_volume` is dropped (for example a holiday night
+  or a rolled row): it is not published and does not count for readiness.
+- A missing `session` field means `rth`. Consumers must not require the field.
 - Overnight replay guard: the service publishes an overnight row only when `overnight_volume` or
   `overnight_price` differs from the last value seen for that symbol. The first row after a
   subscribe, an OpenD reconnect, a relay-owner change or a session change is a baseline and is not
-  published. A quiet symbol therefore sends nothing until its next overnight trade.
+  published. Each of those resets also clears overnight readiness. A ready but quiet symbol sends
+  nothing until its next overnight trade.
+- Overnight latency: after 20:00 ET, a symbol's first Futu tick reaches a futu-first client after
+  the session poll (≤ 30 s), its first trade row (readiness, not published), the relay hold-down
+  (≥ 60 s after `ok`) and then its next changed trade row. Until it is routed to Futu the client
+  stays on IB. After 03:50 ET, rows are still accepted for up to 30 s (until the next poll).
 - Every numeric field is a finite JSON number or `null`. An invalid raw field becomes `null`. The
   whole quote is dropped only when `last` or the time is invalid.
 - The cached quote OpenD sends right after a subscribe is forwarded with its true source

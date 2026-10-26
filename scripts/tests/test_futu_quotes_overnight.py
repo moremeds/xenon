@@ -150,6 +150,15 @@ def test_overnight_row_without_price_dropped(bad):
     assert overnight_row_to_pricedata("SPY", row, NOW) is None
 
 
+@pytest.mark.parametrize("bad", [None, "N/A", float("nan"), 0, -5])
+def test_overnight_row_without_volume_dropped(bad):
+    """A rolled or empty row (volume missing or ≤ 0) is not a trade."""
+    row = _on_row(overnight_volume=bad)
+    assert overnight_row_to_pricedata("SPY", row, NOW) is None
+    row.pop("overnight_volume")
+    assert overnight_row_to_pricedata("SPY", row, NOW) is None
+
+
 def test_rth_mapping_ignores_overnight_fields():
     """RTH mapping of a row that carries overnight fields is unchanged."""
     row = _on_row()
@@ -195,22 +204,64 @@ async def _overnight_service(clock: Clock, wall: Wall, fake: FakeOpenD):
 
 async def _push_flush(svc, fake: FakeOpenD, clock: Clock, row: dict) -> None:
     fake.push([row])
+    await svc.drain()  # a first trade row re-evaluates readiness
     clock.advance(0.11)
     await svc.flush_now()
+
+
+def _pending(ws: FakeWS) -> list:
+    return ws.last("assign")["pending"]
+
+
+SESSION_PENDING = [{"symbol": "SPY", "reason": "session"}]
 
 
 SNAPS = {**DEFAULT_SNAPSHOTS, "US.SPY": {"code": "US.SPY", "sec_type": "ETF", "last_price": 1.0}}
 
 
 @pytest.mark.asyncio
-async def test_overnight_state_admits_symbols_ok():
+async def test_overnight_ok_only_after_first_trade_row():
+    """Overnight: a subscribed symbol stays pending/session (relay keeps it
+    on IB) until a row with overnight price and volume > 0 is seen; that
+    baseline row makes it ok but is not published."""
     clock, wall = Clock(1000.0), Wall(NOW)
     fake = FakeOpenD(snapshots=SNAPS, market_us=AHE)
     svc, ws = await _overnight_service(clock, wall, fake)
     assert svc.session == "overnight"
+    assert "US.SPY" in fake.subscribed
+    assert _pending(ws) == SESSION_PENDING
+    assert not svc.admission.is_ok("SPY")
+
+    # No overnight trade yet: price missing, then volume 0.
+    await _push_flush(svc, fake, clock, _on_row(overnight_price=None))
+    await _push_flush(svc, fake, clock, _on_row(overnight_volume=0))
+    assert _pending(ws) == SESSION_PENDING
+    assert ws.frames("batch") == []
+
+    await _push_flush(svc, fake, clock, _on_row())  # first trade row
     last = ws.last("assign")
-    assert last is not None and last["ok"] == ["SPY"]
-    assert last["pending"] == []
+    assert last["ok"] == ["SPY"] and last["pending"] == []
+    assert ws.frames("batch") == []  # baseline: not published
+
+
+@pytest.mark.asyncio
+async def test_overnight_volume_zero_row_not_published():
+    clock, wall = Clock(1000.0), Wall(NOW)
+    fake = FakeOpenD(snapshots=SNAPS, market_us=AHE)
+    svc, ws = await _overnight_service(clock, wall, fake)
+    await _push_flush(svc, fake, clock, _on_row())  # baseline, now ok
+    await _push_flush(svc, fake, clock, _on_row(overnight_volume=0, overnight_price=759.0))
+    assert ws.frames("batch") == []
+    await _push_flush(svc, fake, clock, _on_row(overnight_volume=17500))
+    assert len(ws.frames("batch")) == 1
+
+
+@pytest.mark.asyncio
+async def test_rth_has_no_overnight_readiness_gate():
+    clock, wall = Clock(1000.0), Wall(et(2026, 10, 26, 11, 0))
+    fake = FakeOpenD(snapshots=SNAPS, market_us="MORNING")
+    svc, ws = await _overnight_service(clock, wall, fake)
+    assert ws.last("assign")["ok"] == ["SPY"]
 
 
 @pytest.mark.asyncio
@@ -255,10 +306,12 @@ async def test_overnight_baseline_reset_on_unsubscribe():
 
     await _want(svc, ws, 3, ["SPY"])
     await svc.drain()
-    assert svc.admission.is_ok("SPY")
+    assert not svc.admission.is_ok("SPY")  # readiness reset with the baseline
+    assert _pending(ws) == SESSION_PENDING
     # Differs from the pre-unsubscribe value, but it is the first row of the
     # new subscription: baseline only.
     await _push_flush(svc, fake, clock, _on_row(overnight_volume=99999))
+    assert svc.admission.is_ok("SPY")
     assert ws.frames("batch") == []
 
 
@@ -273,8 +326,9 @@ async def test_overnight_baseline_reset_on_opend_reconnect():
     await fake.connect()
     await svc.opend_recovered()
     await svc.drain()
-    assert svc.admission.is_ok("SPY")
+    assert not svc.admission.is_ok("SPY")  # readiness reset with the baseline
     await _push_flush(svc, fake, clock, _on_row(overnight_volume=99999))
+    assert svc.admission.is_ok("SPY")
     assert ws.frames("batch") == []  # first row of the new OpenD session
     await _push_flush(svc, fake, clock, _on_row(overnight_volume=100000))
     assert len(ws.frames("batch")) == 1
@@ -316,8 +370,9 @@ async def test_session_transitions_rth_overnight_closed():
     await svc.poll_session_once()
     await svc.drain()
     assert svc.session == "overnight"
-    assert svc.admission.is_ok("SPY")
+    assert not svc.admission.is_ok("SPY")  # until the first trade row
     await _push_flush(svc, fake, clock, _on_row())  # baseline after the switch
+    assert svc.admission.is_ok("SPY")
     await _push_flush(svc, fake, clock, _on_row(overnight_volume=18000))
     assert ws.frames("batch")[-1]["updates"]["SPY"]["session"] == "overnight"
     n = len(ws.frames("batch"))
@@ -342,3 +397,51 @@ async def test_session_transitions_rth_overnight_closed():
     assert pd["last"] == 762.0
     assert "session" not in pd
     assert pd["timestamp"] == "2026-10-27T13:30:05Z"
+
+
+@pytest.mark.asyncio
+async def test_night1_closed_night2_first_push_not_published():
+    """Nightly rollover: night 2's first push differs from night 1's last
+    value but is a baseline (the session change resets it), and the symbol
+    is pending until it is seen."""
+    clock, wall = Clock(1000.0), Wall(et(2026, 10, 26, 20, 5))  # Mon night
+    fake = FakeOpenD(snapshots=SNAPS, market_us=AHE)
+    svc, ws = await _overnight_service(clock, wall, fake)
+    await _push_flush(svc, fake, clock, _on_row())  # night 1 baseline
+    await _push_flush(svc, fake, clock, _on_row(overnight_volume=18000))
+    assert len(ws.frames("batch")) == 1
+
+    wall.dt = et(2026, 10, 27, 3, 50)  # Tue 03:50: closed
+    await svc.poll_session_once()
+    await svc.drain()
+    assert svc.session is None
+
+    wall.dt = et(2026, 10, 27, 20, 0)  # Tue 20:00: night 2
+    await svc.poll_session_once()
+    await svc.drain()
+    assert svc.session == "overnight"
+    assert _pending(ws) == SESSION_PENDING
+    await _push_flush(svc, fake, clock, _on_row(overnight_volume=250, overnight_price=763.0))
+    assert len(ws.frames("batch")) == 1  # night 2 first push: baseline only
+    assert svc.admission.is_ok("SPY")
+
+
+@pytest.mark.asyncio
+async def test_session_kind_flip_drops_buffered_row():
+    """A row buffered under one session kind is dropped when the poll flips
+    the kind (overnight → rth here), even though the symbol stays ok."""
+    clock, wall = Clock(1000.0), Wall(NOW)
+    fake = FakeOpenD(snapshots=SNAPS, market_us=AHE)
+    svc, ws = await _overnight_service(clock, wall, fake)
+    await _push_flush(svc, fake, clock, _on_row())  # baseline, now ok
+    fake.push([_on_row(overnight_volume=18000)])  # buffered, not flushed
+    assert "SPY" in svc.batcher.pending
+
+    fake.market_us = "MORNING"
+    await svc.poll_session_once()
+    await svc.drain()
+    assert svc.session == "rth"
+    assert svc.admission.is_ok("SPY")
+    clock.advance(0.11)
+    await svc.flush_now()
+    assert ws.frames("batch") == []

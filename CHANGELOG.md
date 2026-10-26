@@ -5,7 +5,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-- **futu-quotes serves the US overnight session.** `futu-first` relay clients now get Futu ticks during Blue Ocean overnight (Sun–Thu 20:00 → 03:50 ET; OpenD reports `AFTER_HOURS_END` or `OVERNIGHT`), not only RTH. Overnight rows use `overnight_price` / `_high_price` / `_low_price` / `_volume`, `close` = the RTH last price, `timestamp` = receipt time, and carry the additive field `session: "overnight"` (RTH rows are unchanged). An overnight row is published only when its overnight volume or price changed, so a cached replay after a subscribe is never shown as fresh. Pre-market and after-hours stay on IB.
+- **futu-quotes serves the US overnight session.** `futu-first` relay clients now get Futu ticks during Blue Ocean overnight (Sun–Thu 20:00 → 03:50 ET; OpenD reports `AFTER_HOURS_END` or `OVERNIGHT`), not only RTH. Overnight rows use `overnight_price` / `_high_price` / `_low_price` / `_volume`, `close` = the RTH last price, `timestamp` = receipt time, and carry the additive field `session: "overnight"` (RTH rows are unchanged). An overnight row is published only when its overnight volume or price changed and its overnight volume is > 0, so a cached replay after a subscribe is never shown as fresh. Overnight, a symbol is `ok` only after one valid overnight trade row was seen (until then `pending/session` on IB), so a symbol with no overnight trading never leaves IB. A missing `session` field means rth. Pre-market and after-hours stay on IB.
 
 ## [0.16.1] — 2026-10-25
 

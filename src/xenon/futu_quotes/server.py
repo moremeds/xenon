@@ -255,7 +255,7 @@ class FutuQuotesService:
         logger.warning("OpenD connection lost")
         self.admission.mark_disconnected()
         self.batcher.clear()  # dead-session ticks must not carry over
-        self.session = None
+        self.session = None  # mark_disconnected also drops overnight readiness
         self.baseline.reset_all()  # overnight baseline is per OpenD session
         self._opend_down.set()
         self._kick()
@@ -499,6 +499,9 @@ class FutuQuotesService:
             self.baseline.reset_all()  # first overnight row is a baseline
         self.session = session
         self.admission.set_session_open(session is not None)
+        self.admission.overnight_trade_seen = (
+            self.baseline.seen if session == "overnight" else None
+        )
         self._kick()
 
     async def _op_quota(self, op: _Op) -> None:
@@ -568,10 +571,14 @@ class FutuQuotesService:
                 continue
             if received_at is not None:
                 out = overnight_row_to_pricedata(sym, row, received_at)
+                if out is None:
+                    continue  # no overnight trade: not ready, not published
+                if not self.baseline.seen(sym):
+                    self._kick()  # first trade row: symbol may become ok
                 # Receipt-time stamps: publish only a changed overnight
                 # volume/price; the first row after (re)subscribe or a reset
                 # is the baseline (see OvernightBaseline ponytail ceiling).
-                if out is None or not self.baseline.changed(sym, row):
+                if not self.baseline.changed(sym, row):
                     continue
             else:
                 out = row_to_pricedata(sym, row)

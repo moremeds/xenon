@@ -24,7 +24,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from datetime import time as dtime
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from xenon.futu_quotes.quote_map import ET
 
@@ -180,6 +180,10 @@ class Admission:
         self.epoch = 0
         self.desired: list[str] = []
         self.session_open = False
+        # Overnight session only (else None): has the service seen a real
+        # overnight trade row for this symbol since the last baseline reset?
+        # A ready symbol is ``ok`` overnight only once this is True.
+        self.overnight_trade_seen: Optional[Callable[[str], bool]] = None
         self.opend_connected = False
         self.symbols: dict[str, SymbolState] = {}
 
@@ -251,6 +255,7 @@ class Admission:
         self._bump_epoch()
         self.opend_connected = False
         self.session_open = False
+        self.overnight_trade_seen = None
         self.provider_own_used = None
         self.provider_remain = None
         self.provider_all_used = None
@@ -428,7 +433,10 @@ class Admission:
             elif not self.session_open:
                 pending.append({"symbol": sym, "reason": "session"})
             elif self.is_ready(st):
-                ok.append(sym)
+                if self._overnight_unseen(sym):
+                    pending.append({"symbol": sym, "reason": "session"})
+                else:
+                    ok.append(sym)
             elif st.op is not None:
                 # subscribe/reconfirm in flight, or an unsubscribe that its
                 # pre-check will decline now that the symbol is wanted again
@@ -599,7 +607,12 @@ class Admission:
             and self.session_open
             and symbol in self.desired
             and self.is_ready(self.state(symbol))
+            and not self._overnight_unseen(symbol)
         )
+
+    def _overnight_unseen(self, symbol: str) -> bool:
+        seen = self.overnight_trade_seen
+        return seen is not None and not seen(symbol)
 
 
 def _as_int(value: Any) -> Optional[int]:

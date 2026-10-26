@@ -14,7 +14,7 @@ Rules (docs/architecture/futu-quotes.md):
   ``high`` / ``low`` / ``volume`` come from the ``overnight_*`` fields,
   ``close`` is the RTH ``last_price``, ``open`` is null and ``timestamp`` is
   the receipt time (Futu carries no overnight time). The row is dropped when
-  ``overnight_price`` is missing, non-finite or ≤ 0.
+  ``overnight_price`` or ``overnight_volume`` is missing, non-finite or ≤ 0.
 """
 
 from __future__ import annotations
@@ -140,11 +140,12 @@ def overnight_row_to_pricedata(
     ``received_at`` is the aware UTC receipt time; it is the timestamp
     because the QUOTE push has no overnight time field (``data_date`` /
     ``data_time`` still name the last RTH quote). Returns ``None`` when
-    ``overnight_price`` is missing, non-finite or ≤ 0 (no overnight trade,
-    e.g. a holiday night).
+    ``overnight_price`` or ``overnight_volume`` is missing, non-finite or
+    ≤ 0 (no overnight trade yet, e.g. a holiday night or a rolled row).
     """
     last = finite_or_none(row.get("overnight_price"))
-    if last is None or last <= 0:
+    volume = finite_or_none(row.get("overnight_volume"))
+    if last is None or last <= 0 or volume is None or volume <= 0:
         return None
     ts = received_at.astimezone(timezone.utc)
     pd: dict = {
@@ -153,7 +154,7 @@ def overnight_row_to_pricedata(
         "lastIsCalculated": False,
         **_NULL_FIELDS,
     }
-    pd["volume"] = _int_or_none(row.get("overnight_volume"))
+    pd["volume"] = int(volume) if volume.is_integer() else volume
     pd["high"] = finite_or_none(row.get("overnight_high_price"))
     pd["low"] = finite_or_none(row.get("overnight_low_price"))
     pd["open"] = None
@@ -167,13 +168,17 @@ def overnight_row_to_pricedata(
 class OvernightBaseline:
     """Per-symbol last ``(overnight_volume, overnight_price)`` seen.
 
-    Overnight rows are stamped with receipt time, so a cached push replayed
-    after a subscribe would look fresh. ``changed`` is True only when the
-    pair differs from the last pair seen for the symbol; the first row after
-    a reset is the baseline and returns False.
+    Callers pass only rows that ``overnight_row_to_pricedata`` accepts (a
+    real overnight trade: price and volume > 0). Overnight rows are stamped
+    with receipt time, so a cached push replayed after a subscribe would
+    look fresh. ``changed`` is True only when the pair differs from the last
+    pair seen for the symbol; the first row after a reset is the baseline
+    and returns False. ``seen`` (a baseline exists) gates overnight
+    readiness: until then the symbol stays ``pending/session`` on IB.
 
-    ponytail: ceiling — a quiet symbol publishes nothing until its next
-    overnight trade changes volume or price, even though it is Futu-``ok``.
+    ponytail: ceiling — the first trade row after every reset is swallowed
+    as the baseline, and an ``ok`` symbol publishes nothing until its next
+    overnight trade changes volume or price.
     """
 
     def __init__(self) -> None:
@@ -187,6 +192,9 @@ class OvernightBaseline:
         prev = self._last.get(symbol)
         self._last[symbol] = key
         return prev is not None and key != prev
+
+    def seen(self, symbol: str) -> bool:
+        return symbol in self._last
 
     def reset(self, symbol: str) -> None:
         self._last.pop(symbol, None)
