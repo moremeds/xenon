@@ -153,6 +153,11 @@ export type OpenOrder = {
   accountEnv?: "paper" | "live";
   brokerAccount?: string;
   futuStatus?: string;
+  /** Futu order terms (contract § Working orders); IB rows omit them. */
+  trailType?: string | null;
+  trailValue?: number | null;
+  trailSpread?: number | null;
+  session?: string | null;
   /** Set by mergeDashboardOrders so the combined dashboard card can label
    *  which broker each working order belongs to (FUTU rows are read-only). */
   broker?: "IB" | "FUTU";

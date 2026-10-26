@@ -7,6 +7,17 @@ import type { PriceData } from "@/lib/pricesProtocol";
 import { optionKey } from "@/lib/pricesProtocol";
 import type { ModifyComboLeg, ModifyOrderRequest } from "@/lib/orderModify";
 import Modal from "./Modal";
+import { isFutuOpenOrder, openOrderActionKey } from "@/lib/futuOpenOrder";
+import {
+  FUTU_MODIFY_NO_CHANGE as FUTU_NO_CHANGE,
+  buildFutuModifyRequest,
+  fmtFutuReference,
+  futuReferenceText,
+  isKnownTrailType,
+  parseStrictDecimal,
+  futuModifyConfirmText,
+  futuModifyFieldsFor,
+} from "@/lib/futuOrderTypes";
 import { getQuoteMetrics } from "@/lib/quoteTelemetry";
 import { applyRestingLimitToQuote } from "@/lib/modifyOrderQuote";
 import { fmtPrice, positionToOrderLegs } from "@/lib/positionUtils";
@@ -249,20 +260,35 @@ export default function ModifyOrderModal({
   const [newQuantity, setNewQuantity] = useState("");
   const [outsideRth, setOutsideRth] = useState(false);
   const [editableLegs, setEditableLegs] = useState<EditableComboLeg[]>([]);
+  // Futu trigger / trail terms (contract § Modify).
+  const [newAux, setNewAux] = useState("");
+  const [newTrailValue, setNewTrailValue] = useState("");
+  const [newTrailSpread, setNewTrailSpread] = useState("");
 
-  // Reset price only when a different order is selected (by permId), not on every re-render
-  const orderPermId = order?.permId ?? null;
+  // Reset only when a different order is selected, not on every re-render.
+  // Keyed by the action key: a Futu permId is always 0, so two Futu orders
+  // share a permId but never a brokerOrderId.
+  const orderKey = order ? openOrderActionKey(order) : null;
   useEffect(() => {
+    const futuOrder = order != null && isFutuOpenOrder(order);
+    // Futu: seed the exact terms so an untouched field is never a change.
+    const seed = (v: number | null | undefined) =>
+      v == null ? "" : futuOrder ? String(v) : v.toFixed(2);
     if (order?.limitPrice != null) {
-      setNewPrice(order.limitPrice.toFixed(2));
+      setNewPrice(seed(order.limitPrice));
+    } else if (futuOrder) {
+      setNewPrice("");
     }
     if (order?.totalQuantity != null) {
       setNewQuantity(String(order.totalQuantity));
     }
+    setNewAux(seed(order?.auxPrice));
+    setNewTrailValue(seed(order?.trailValue));
+    setNewTrailSpread(seed(order?.trailSpread));
     setOutsideRth(false);
     setEditableLegs(buildEditableComboLegs(order));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orderPermId]);
+  }, [orderKey]);
 
   const marketPriceData = useMemo(
     () => (order ? resolveOrderPriceData(order, prices, portfolio) : null),
@@ -281,6 +307,8 @@ export default function ModifyOrderModal({
 
   if (!order) return null;
 
+  const futu = isFutuOpenOrder(order);
+  const futuFields = futu ? futuModifyFieldsFor(order.orderType) : null;
   const currentPrice = order.limitPrice ?? 0;
   const currentQuantity = order.totalQuantity;
   const parsedNew = parseFloat(newPrice);
@@ -303,21 +331,46 @@ export default function ModifyOrderModal({
   const quantityChanged = isValidQuantity && parsedQuantity !== currentQuantity;
   const legsChanged =
     isComboOrder && currentLegsSnapshot !== originalLegsSnapshot;
-  const canSubmit =
-    !loading &&
-    !locked &&
-    (isComboOrder
-      ? Boolean(
-          isValidPrice &&
-          isValidQuantity &&
-          normalizedLegs &&
-          (priceChanged || quantityChanged || legsChanged),
-        )
-      : Boolean(
-          (priceChanged || quantityChanged || outsideRth) &&
-          isValidPrice &&
-          isValidQuantity,
-        ));
+  const futuModify = futu
+    ? buildFutuModifyRequest(order, {
+        quantity: parsedQuantity,
+        // The whole text must be a decimal: `1,5` / `1oops` stay invalid.
+        limitPrice: parseStrictDecimal(newPrice),
+        auxPrice: parseStrictDecimal(newAux),
+        trailValue: parseStrictDecimal(newTrailValue),
+        trailSpread: parseStrictDecimal(newTrailSpread),
+      })
+    : null;
+  const showLimit = !futu || futuFields?.limit === true;
+  const showAux = futuFields?.aux === true;
+  // BID / MID / ASK fill the limit, or the trigger for types without a limit.
+  // Futu keeps the full reference value (never rounded to 2 dp); IB as before.
+  const referenceText = (v: number) =>
+    futu ? futuReferenceText(v) : v.toFixed(2);
+  const referenceCaption = (v: number) =>
+    futu ? fmtFutuReference(v) : v.toFixed(2);
+  const setReference = (v: number) => {
+    if (showLimit) setNewPrice(referenceText(v));
+    else if (showAux) setNewAux(referenceText(v));
+  };
+  // A trail value is editable only with a known unit (RATIO / AMOUNT).
+  const trailUnitKnown = isKnownTrailType(order.trailType);
+  const canSubmit = futuModify
+    ? !loading && !locked && futuModify.ok
+    : !loading &&
+      !locked &&
+      (isComboOrder
+        ? Boolean(
+            isValidPrice &&
+            isValidQuantity &&
+            normalizedLegs &&
+            (priceChanged || quantityChanged || legsChanged),
+          )
+        : Boolean(
+            (priceChanged || quantityChanged || outsideRth) &&
+            isValidPrice &&
+            isValidQuantity,
+          ));
 
   const delta = isValidPrice ? parsedNew - currentPrice : 0;
   const hasPriceData = priceData?.bid != null && priceData?.ask != null;
@@ -333,6 +386,12 @@ export default function ModifyOrderModal({
 
   const submitModify = () => {
     if (!canSubmit) return;
+    // Futu: only the changed fields of the order's type; type, trail type
+    // and session never change.
+    if (futuModify) {
+      if (futuModify.ok) onConfirm(futuModify.request);
+      return;
+    }
 
     // Combo with leg-structure change → cancel+place is unavoidable (IB has no
     // atomic API for restructuring the legs of an existing BAG order).
@@ -384,6 +443,7 @@ export default function ModifyOrderModal({
           </span>
           <span>{order.orderType}</span>
           <span>{order.tif}</span>
+          {futu && order.session && <span>{order.session}</span>}
           <span>{order.totalQuantity}x</span>
         </div>
 
@@ -412,14 +472,16 @@ export default function ModifyOrderModal({
                 />
               )}
 
-            {order.orderType === "STP LMT" && order.auxPrice != null && (
-              <div className="modify-stop-row">
-                <span className="modify-market-label">STOP PRICE</span>
-                <span className="modify-market-value">
-                  {fmtPrice(order.auxPrice)}
-                </span>
-              </div>
-            )}
+            {!futu &&
+              order.orderType === "STP LMT" &&
+              order.auxPrice != null && (
+                <div className="modify-stop-row">
+                  <span className="modify-market-label">STOP PRICE</span>
+                  <span className="modify-market-value">
+                    {fmtPrice(order.auxPrice)}
+                  </span>
+                </div>
+              )}
 
             <div className="modify-price-section">
               <div
@@ -440,24 +502,102 @@ export default function ModifyOrderModal({
                   </div>
                 </label>
 
-                <label className="modify-field" htmlFor="modify-price-input">
-                  <span className="modify-price-label">
-                    {isComboOrder ? "New Net Price" : "New Limit Price"}
-                  </span>
-                  <div className="modify-price-input-row">
-                    <span className="modify-price-prefix">$</span>
-                    <input
-                      id="modify-price-input"
-                      className="modify-price-input"
-                      type="number"
-                      step="0.01"
-                      min={isBagOrder ? undefined : "0.01"}
-                      value={newPrice}
-                      onChange={(e) => setNewPrice(e.target.value)}
-                      autoFocus
-                    />
-                  </div>
-                </label>
+                {showAux && (
+                  <label className="modify-field" htmlFor="modify-aux-input">
+                    <span className="modify-price-label">
+                      New Trigger Price
+                    </span>
+                    <div className="modify-price-input-row">
+                      <span className="modify-price-prefix">$</span>
+                      <input
+                        id="modify-aux-input"
+                        className="modify-price-input"
+                        type="number"
+                        step="any"
+                        min="0.01"
+                        value={newAux}
+                        onChange={(e) => setNewAux(e.target.value)}
+                        autoFocus={!showLimit}
+                      />
+                    </div>
+                  </label>
+                )}
+
+                {showLimit && (
+                  <label className="modify-field" htmlFor="modify-price-input">
+                    <span className="modify-price-label">
+                      {isComboOrder ? "New Net Price" : "New Limit Price"}
+                    </span>
+                    <div className="modify-price-input-row">
+                      <span className="modify-price-prefix">$</span>
+                      <input
+                        id="modify-price-input"
+                        className="modify-price-input"
+                        type="number"
+                        step="0.01"
+                        min={isBagOrder ? undefined : "0.01"}
+                        value={newPrice}
+                        onChange={(e) => setNewPrice(e.target.value)}
+                        autoFocus
+                      />
+                    </div>
+                  </label>
+                )}
+
+                {futuFields?.trail && (
+                  <label
+                    className="modify-field"
+                    htmlFor="modify-trail-value-input"
+                  >
+                    <span className="modify-price-label">
+                      New Trail Value
+                      {trailUnitKnown
+                        ? ` (${order.trailType})`
+                        : " (unit unavailable)"}
+                    </span>
+                    <div className="modify-price-input-row">
+                      <span className="modify-price-prefix">
+                        {order.trailType === "RATIO"
+                          ? "%"
+                          : order.trailType === "AMOUNT"
+                            ? "$"
+                            : "---"}
+                      </span>
+                      <input
+                        id="modify-trail-value-input"
+                        className="modify-price-input"
+                        type="number"
+                        step="any"
+                        min="0.01"
+                        value={newTrailValue}
+                        onChange={(e) => setNewTrailValue(e.target.value)}
+                        disabled={!trailUnitKnown}
+                        autoFocus={trailUnitKnown}
+                      />
+                    </div>
+                  </label>
+                )}
+
+                {futuFields?.spread && (
+                  <label
+                    className="modify-field"
+                    htmlFor="modify-trail-spread-input"
+                  >
+                    <span className="modify-price-label">New Trail Spread</span>
+                    <div className="modify-price-input-row">
+                      <span className="modify-price-prefix">$</span>
+                      <input
+                        id="modify-trail-spread-input"
+                        className="modify-price-input"
+                        type="number"
+                        step="0.001"
+                        min="0"
+                        value={newTrailSpread}
+                        onChange={(e) => setNewTrailSpread(e.target.value)}
+                      />
+                    </div>
+                  </label>
+                )}
               </div>
 
               <div className="modify-quick-section">
@@ -465,29 +605,35 @@ export default function ModifyOrderModal({
                 <div className="modify-quick-buttons">
                   <button
                     className="btn-quick"
-                    disabled={!hasPriceData || bid == null}
-                    onClick={() => bid != null && setNewPrice(bid.toFixed(2))}
+                    disabled={
+                      !hasPriceData || bid == null || !(showLimit || showAux)
+                    }
+                    onClick={() => bid != null && setReference(bid)}
                   >
-                    BID{bid != null ? ` ${bid.toFixed(2)}` : ""}
+                    BID{bid != null ? ` ${referenceCaption(bid)}` : ""}
                   </button>
                   <button
                     className="btn-quick"
-                    disabled={!hasPriceData || mid == null}
-                    onClick={() => mid != null && setNewPrice(mid.toFixed(2))}
+                    disabled={
+                      !hasPriceData || mid == null || !(showLimit || showAux)
+                    }
+                    onClick={() => mid != null && setReference(mid)}
                   >
-                    MID{mid != null ? ` ${mid.toFixed(2)}` : ""}
+                    MID{mid != null ? ` ${referenceCaption(mid)}` : ""}
                   </button>
                   <button
                     className="btn-quick"
-                    disabled={!hasPriceData || ask == null}
-                    onClick={() => ask != null && setNewPrice(ask.toFixed(2))}
+                    disabled={
+                      !hasPriceData || ask == null || !(showLimit || showAux)
+                    }
+                    onClick={() => ask != null && setReference(ask)}
                   >
-                    ASK{ask != null ? ` ${ask.toFixed(2)}` : ""}
+                    ASK{ask != null ? ` ${referenceCaption(ask)}` : ""}
                   </button>
                 </div>
               </div>
 
-              {!isComboOrder && (
+              {!isComboOrder && !futu && (
                 <label className="modify-rth-toggle">
                   <input
                     type="checkbox"
@@ -501,7 +647,7 @@ export default function ModifyOrderModal({
                 </label>
               )}
 
-              {isValidPrice && delta !== 0 && (
+              {showLimit && isValidPrice && delta !== 0 && (
                 <div
                   className={`modify-delta ${delta > 0 ? "positive" : "negative"}`}
                 >
@@ -510,6 +656,20 @@ export default function ModifyOrderModal({
                   {fmtPrice(currentPrice)}
                 </div>
               )}
+
+              {futuModify?.ok && (
+                <p
+                  className="futu-order-confirm"
+                  data-testid="futu-modify-confirm"
+                >
+                  {futuModifyConfirmText(futuModify.changes, order.trailType)}
+                </p>
+              )}
+              {futuModify &&
+                !futuModify.ok &&
+                futuModify.message !== FUTU_NO_CHANGE && (
+                  <p className="order-error">{futuModify.message}</p>
+                )}
             </div>
           </div>
 

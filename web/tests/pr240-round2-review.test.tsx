@@ -105,7 +105,16 @@ const response = (body: unknown, ok = true, status = 200) => ({
   status,
   json: async () => body,
 });
-const health = { futu: { trading: { live: true, paper: true } } };
+// Contract § Order types: clients offer modify only for capabilities[env].modify.
+const health = {
+  futu: {
+    trading: { live: true, paper: true },
+    capabilities: {
+      live: { tuples: ["STK:LMT:DAY:RTH"], modify: ["LMT"] },
+      paper: { tuples: ["STK:LMT:DAY:RTH"], modify: ["LMT"] },
+    },
+  },
+};
 const LIVE_VIEW = "/api/orders?broker=FUTU&account_env=live";
 
 const wrapper = ({ children }: { children: React.ReactNode }) => (

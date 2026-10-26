@@ -107,12 +107,38 @@ async function parseBody(
   }
 }
 
+// Contract docs/architecture/futu-orders.md § Order types: the paper default
+// allowlist, and a REAL env with every static live tuple enabled.
+const PAPER_TUPLES = ["STK:LMT:DAY:RTH", "OPT:LMT:DAY:RTH", "STK:MKT:DAY:RTH"];
+const LIVE_ALL_TUPLES = [
+  ...["DAY", "GTC"].flatMap((tif) =>
+    ["RTH", "ETH", "ALL", "OVERNIGHT"].map((s) => `STK:LMT:${tif}:${s}`),
+  ),
+  "STK:MKT:DAY:RTH",
+  ...["STP", "STP LMT", "MIT", "LIT", "TRAIL", "TRAIL LIMIT"].flatMap((t) =>
+    ["DAY", "GTC"].map((tif) => `STK:${t}:${tif}:RTH`),
+  ),
+  ...["LMT", "STP LMT", "LIT"].flatMap((t) =>
+    ["DAY", "GTC"].map((tif) => `OPT:${t}:${tif}:RTH`),
+  ),
+];
+
 async function installOrderFlowMocks(
   page: Page,
   trading: { paper: boolean; live: boolean },
+  opts: {
+    liveTuples?: string[];
+    /** Start with a working order of these terms (default: none). */
+    workingOrder?: Record<string, unknown>;
+    paperModify?: string[];
+  } = {},
 ) {
   const captured: CapturedRequest[] = [];
-  let working = false;
+  let working = Boolean(opts.workingOrder);
+  let auxPrice: number | null =
+    typeof opts.workingOrder?.auxPrice === "number"
+      ? opts.workingOrder.auxPrice
+      : null;
   let limitPrice = 178.5;
   let quantity = 100;
   let modifySequence = 1;
@@ -130,12 +156,15 @@ async function installOrderFlowMocks(
     totalQuantity: quantity,
     limitPrice,
     modifySequence,
-    auxPrice: null,
+    ...opts.workingOrder,
+    // The trigger follows the modify mock.
+    auxPrice,
     status: "Submitted",
     filled: 0,
     remaining: quantity,
     avgFillPrice: null,
     tif: "DAY",
+    session: "RTH",
     contract: {
       conId: null,
       symbol: "AAPL",
@@ -169,14 +198,23 @@ async function installOrderFlowMocks(
       body: JSON.stringify({
         status: "ok",
         trading_mode: "paper",
-        futu: { trading },
+        futu: {
+          trading,
+          capabilities: {
+            paper: {
+              tuples: PAPER_TUPLES,
+              modify: opts.paperModify ?? ["LMT"],
+            },
+            live: { tuples: opts.liveTuples ?? [], modify: ["LMT"] },
+          },
+        },
       }),
     });
   });
 
   await page.route("**/api/futu/portfolio**", async (route) => {
     const env = new URL(route.request().url()).searchParams.get("account_env");
-    if (env === "live") {
+    if (env === "live" && !opts.liveTuples) {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -235,7 +273,7 @@ async function installOrderFlowMocks(
 
   await page.route("**/api/orders/place**", async (route) => {
     await record(route);
-    assertFutuPaperScope(route.request().url());
+    assertFutuBrokerScope(route.request().url());
     working = true;
     await route.fulfill({
       status: 200,
@@ -262,6 +300,7 @@ async function installOrderFlowMocks(
     assertFutuMutationBody(body);
     if (typeof body.newPrice === "number") limitPrice = body.newPrice;
     if (typeof body.newQuantity === "number") quantity = body.newQuantity;
+    if (typeof body.newAuxPrice === "number") auxPrice = body.newAuxPrice;
     modifySequence =
       typeof body.modifySequence === "number"
         ? body.modifySequence
@@ -487,6 +526,428 @@ test.describe("Futu order ticket", () => {
       fullPage: true,
     });
     expect(captured.some((c) => c.url.includes("/place"))).toBe(false);
+  });
+
+  test("SIMULATE ticket: only LMT / MKT from capabilities; MKT sends no price", async ({
+    page,
+  }) => {
+    const { captured } = await installOrderFlowMocks(page, {
+      paper: true,
+      live: false,
+    });
+    await openFutuTab(page);
+    await page.locator(".position-order-btn").first().click();
+    const dialog = page.getByRole("dialog");
+    const types = dialog.getByRole("group", { name: "Order type" });
+    await expect(types.getByRole("button")).toHaveText(["LMT", "MKT"]);
+    await expect(
+      dialog.getByRole("group", { name: "Time in force" }).getByRole("button"),
+    ).toHaveText(["DAY"]);
+    await expect(dialog.getByText("FILL OUTSIDE RTH")).toHaveCount(0);
+    await types.getByRole("button", { name: "MKT" }).click();
+    await expect(types.getByRole("button", { name: "MKT" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await expect(types.getByRole("button", { name: "LMT" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    await expect(page.locator("#position-order-price")).toHaveCount(0);
+    await expect(page.getByTestId("futu-order-confirm")).toHaveText(
+      "SELL 100 AAPL · MKT · market · DAY · RTH",
+    );
+    await page.screenshot({
+      path: path.join(SCREEN_DIR, "futu-order-types-sim-ticket-2026-10-25.png"),
+      fullPage: true,
+      // Settle the 150 ms button transitions so the shot shows the final state.
+      animations: "disabled",
+    });
+    await page.getByRole("button", { name: "Submit close" }).click();
+    await expect
+      .poll(() => captured.some((c) => c.url.includes("/place")))
+      .toBe(true);
+    const place = captured.find((c) => c.url.includes("/place"))!;
+    assertFutuPaperScope(place.url);
+    expect(place.body).toMatchObject({
+      orderType: "MKT",
+      session: "RTH",
+      tif: "DAY",
+    });
+    expect(place.body?.limitPrice).toBeUndefined();
+    expect(place.body?.auxPrice).toBeUndefined();
+  });
+
+  // Place per type in a mocked REAL env with every static live tuple.
+  const PLACE_CASES: Array<{
+    type: string;
+    fill: Record<string, string>;
+    trailType?: "AMOUNT";
+    session?: string;
+    expected: Record<string, unknown>;
+    confirm: string;
+  }> = [
+    {
+      type: "LMT",
+      fill: { "#position-order-price": "178.50" },
+      session: "ETH",
+      expected: { orderType: "LMT", limitPrice: 178.5, session: "ETH" },
+      confirm: "SELL 100 AAPL · LMT · limit 178.50 · DAY · ETH",
+    },
+    {
+      type: "MKT",
+      fill: {},
+      expected: { orderType: "MKT", session: "RTH" },
+      confirm: "SELL 100 AAPL · MKT · market · DAY · RTH",
+    },
+    {
+      type: "STP",
+      fill: { "#position-order-aux": "170.00" },
+      expected: { orderType: "STP", auxPrice: 170, session: "RTH" },
+      confirm: "SELL 100 AAPL · STP · trigger 170.00 · DAY · RTH",
+    },
+    {
+      type: "STP LMT",
+      fill: {
+        "#position-order-aux": "170.00",
+        "#position-order-price": "169.50",
+      },
+      expected: {
+        orderType: "STP LMT",
+        auxPrice: 170,
+        limitPrice: 169.5,
+        session: "RTH",
+      },
+      confirm:
+        "SELL 100 AAPL · STP LMT · trigger 170.00 · limit 169.50 · DAY · RTH",
+    },
+    {
+      type: "MIT",
+      fill: { "#position-order-aux": "185.00" },
+      expected: { orderType: "MIT", auxPrice: 185, session: "RTH" },
+      confirm: "SELL 100 AAPL · MIT · trigger 185.00 · DAY · RTH",
+    },
+    {
+      type: "LIT",
+      fill: {
+        "#position-order-aux": "185.00",
+        "#position-order-price": "185.50",
+      },
+      expected: {
+        orderType: "LIT",
+        auxPrice: 185,
+        limitPrice: 185.5,
+        session: "RTH",
+      },
+      confirm:
+        "SELL 100 AAPL · LIT · trigger 185.00 · limit 185.50 · DAY · RTH",
+    },
+    {
+      type: "TRAIL",
+      fill: { "#position-order-trail-value": "2.5" },
+      expected: {
+        orderType: "TRAIL",
+        trailType: "RATIO",
+        trailValue: 2.5,
+        session: "RTH",
+      },
+      confirm: "SELL 100 AAPL · TRAIL · trail 2.5% · DAY · RTH",
+    },
+    {
+      type: "TRAIL LIMIT",
+      trailType: "AMOUNT",
+      fill: {
+        "#position-order-trail-value": "1.25",
+        "#position-order-trail-spread": "0.05",
+      },
+      expected: {
+        orderType: "TRAIL LIMIT",
+        trailType: "AMOUNT",
+        trailValue: 1.25,
+        trailSpread: 0.05,
+        session: "RTH",
+      },
+      confirm:
+        "SELL 100 AAPL · TRAIL LIMIT · trail 1.25 · spread 0.05 · DAY · RTH",
+    },
+  ];
+  const TERM_KEYS = [
+    "orderType",
+    "limitPrice",
+    "auxPrice",
+    "trailType",
+    "trailValue",
+    "trailSpread",
+    "session",
+  ];
+
+  for (const c of PLACE_CASES) {
+    test(`REAL place ${c.type}: only the type's fields are sent`, async ({
+      page,
+    }) => {
+      const { captured } = await installOrderFlowMocks(
+        page,
+        { paper: true, live: true },
+        { liveTuples: LIVE_ALL_TUPLES },
+      );
+      await openFutuTab(page);
+      await page.getByTestId("futu-env-real").click();
+      await page.locator(".position-order-btn").first().click();
+      const dialog = page.getByRole("dialog");
+      await dialog
+        .getByRole("group", { name: "Order type" })
+        .getByRole("button", { name: c.type, exact: true })
+        .click();
+      if (c.trailType) {
+        await dialog
+          .getByRole("group", { name: "Trail type" })
+          .getByRole("button", { name: c.trailType })
+          .click();
+      }
+      if (c.session) {
+        await dialog
+          .getByRole("group", { name: "Session" })
+          .getByRole("button", { name: c.session, exact: true })
+          .click();
+      }
+      for (const [sel, value] of Object.entries(c.fill)) {
+        await page.locator(sel).fill(value);
+      }
+      await expect(page.getByTestId("futu-order-confirm")).toHaveText(
+        c.confirm,
+      );
+      await page.screenshot({
+        path: path.join(
+          SCREEN_DIR,
+          `futu-order-types-place-${c.type.toLowerCase().replace(/\s+/g, "-")}-2026-10-25.png`,
+        ),
+        fullPage: true,
+        animations: "disabled",
+      });
+      await page.getByRole("button", { name: "Submit close" }).click();
+      await expect
+        .poll(() => captured.some((r) => r.url.includes("/place")))
+        .toBe(true);
+      const place = captured.find((r) => r.url.includes("/place"))!;
+      expect(new URL(place.url).searchParams.get("account_env")).toBe("live");
+      expect(place.body).toMatchObject({ ...c.expected, tif: "DAY" });
+      for (const key of TERM_KEYS) {
+        if (!(key in c.expected)) expect(place.body?.[key]).toBeUndefined();
+      }
+    });
+  }
+
+  test("REAL with all tuples: STP LMT ticket names trigger and limit", async ({
+    page,
+  }) => {
+    const { captured } = await installOrderFlowMocks(
+      page,
+      { paper: true, live: true },
+      { liveTuples: LIVE_ALL_TUPLES },
+    );
+    await openFutuTab(page);
+    await page.getByTestId("futu-env-real").click();
+    await page.locator(".position-order-btn").first().click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toContainText("REAL");
+    const types = dialog.getByRole("group", { name: "Order type" });
+    await expect(types.getByRole("button")).toHaveText([
+      "LMT",
+      "MKT",
+      "STP",
+      "STP LMT",
+      "MIT",
+      "LIT",
+      "TRAIL",
+      "TRAIL LIMIT",
+    ]);
+    await types.getByRole("button", { name: "STP LMT" }).click();
+    await page.locator("#position-order-aux").fill("170.00");
+    await page.locator("#position-order-price").fill("169.50");
+    await dialog
+      .getByRole("group", { name: "Time in force" })
+      .getByRole("button", { name: "GTC" })
+      .click();
+    await expect(page.getByTestId("futu-order-confirm")).toHaveText(
+      "SELL 100 AAPL · STP LMT · trigger 170.00 · limit 169.50 · GTC · RTH",
+    );
+    await expect(
+      types.getByRole("button", { name: "STP LMT", exact: true }),
+    ).toHaveAttribute("aria-pressed", "true");
+    await expect(
+      dialog
+        .getByRole("group", { name: "Time in force" })
+        .getByRole("button", { name: "GTC" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    await page.screenshot({
+      path: path.join(
+        SCREEN_DIR,
+        "futu-order-types-real-stp-lmt-2026-10-25.png",
+      ),
+      fullPage: true,
+      // Settle the 150 ms button transitions so the shot shows the final state.
+      animations: "disabled",
+    });
+    await types.getByRole("button", { name: "TRAIL LIMIT" }).click();
+    await expect(page.locator("#position-order-price")).toHaveCount(0);
+    await expect(page.locator("#position-order-aux")).toHaveCount(0);
+    await expect(page.locator("#position-order-trail-spread")).toBeVisible();
+    await page.locator("#position-order-trail-value").fill("2.5");
+    await page.locator("#position-order-trail-spread").fill("0.05");
+    await expect(page.getByTestId("futu-order-confirm")).toHaveText(
+      "SELL 100 AAPL · TRAIL LIMIT · trail 2.5% · spread 0.05 · GTC · RTH",
+    );
+    await page.screenshot({
+      path: path.join(
+        SCREEN_DIR,
+        "futu-order-types-real-trail-limit-2026-10-25.png",
+      ),
+      fullPage: true,
+      // Settle the 150 ms button transitions so the shot shows the final state.
+      animations: "disabled",
+    });
+    await types.getByRole("button", { name: "STP LMT" }).click();
+    // A type change clears the terms: the old trigger and limit never return.
+    await expect(page.locator("#position-order-aux")).toHaveValue("");
+    await expect(page.locator("#position-order-price")).toHaveValue("");
+    await expect(
+      page.getByRole("button", { name: "Submit close" }),
+    ).toBeDisabled();
+    await page.locator("#position-order-aux").fill("170.00");
+    await page.locator("#position-order-price").fill("169.50");
+    await page.getByRole("button", { name: "Submit close" }).click();
+    await expect
+      .poll(() => captured.some((c) => c.url.includes("/place")))
+      .toBe(true);
+    const place = captured.find((c) => c.url.includes("/place"))!;
+    expect(new URL(place.url).searchParams.get("account_env")).toBe("live");
+    expect(place.body).toMatchObject({
+      orderType: "STP LMT",
+      auxPrice: 170,
+      limitPrice: 169.5,
+      tif: "GTC",
+      session: "RTH",
+    });
+    expect(place.body?.trailValue).toBeUndefined();
+  });
+
+  test("SIMULATE STP row: modify dialog sends the trigger only", async ({
+    page,
+  }) => {
+    const { captured } = await installOrderFlowMocks(
+      page,
+      { paper: true, live: false },
+      {
+        workingOrder: { orderType: "STP", limitPrice: null, auxPrice: 170 },
+        paperModify: ["LMT", "STP"],
+      },
+    );
+    await openFutuTab(page);
+    await page.goto("/orders");
+    await page.getByRole("button", { name: "MODIFY" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(page.locator("#modify-aux-input")).toHaveValue("170");
+    await expect(page.locator("#modify-price-input")).toHaveCount(0);
+    await expect(dialog.getByText("FILL OUTSIDE RTH")).toHaveCount(0);
+    await page.locator("#modify-aux-input").fill("168.50");
+    await expect(page.getByTestId("futu-modify-confirm")).toHaveText(
+      "trigger 170.00 → 168.50",
+    );
+    await page.screenshot({
+      path: path.join(SCREEN_DIR, "futu-order-types-modify-aux-2026-10-25.png"),
+      fullPage: true,
+      animations: "disabled",
+    });
+    await page.getByRole("button", { name: "Modify Order" }).click();
+    await expect
+      .poll(() => captured.some((c) => c.url.includes("/modify")))
+      .toBe(true);
+    const modify = captured.find((c) => c.url.includes("/modify"))!;
+    assertFutuPaperScope(modify.url);
+    expect(modify.body).toEqual({
+      brokerOrderId: BROKER_ORDER_ID,
+      newAuxPrice: 168.5,
+      modifySequence: 2,
+    });
+  });
+
+  test("SIMULATE STP row with modify=[LMT]: MODIFY off, CANCEL sends", async ({
+    page,
+  }) => {
+    const { captured } = await installOrderFlowMocks(
+      page,
+      { paper: true, live: false },
+      { workingOrder: { orderType: "STP", limitPrice: null, auxPrice: 170 } },
+    );
+    await openFutuTab(page);
+    await page.goto("/orders");
+    await expect(page.getByRole("button", { name: "MODIFY" })).toBeDisabled();
+    // Orders view: type label, no fixed limit, trigger, trail, session.
+    await expect(page.getByTestId("futu-order-trigger")).toHaveText("$170.00");
+    await expect(page.getByTestId("futu-order-trail")).toHaveText("---");
+    await expect(page.getByTestId("futu-order-session")).toHaveText("RTH");
+    await page.screenshot({
+      path: path.join(
+        SCREEN_DIR,
+        "futu-order-types-stp-modify-off-2026-10-25.png",
+      ),
+      fullPage: true,
+      animations: "disabled",
+    });
+    await page.getByRole("button", { name: "CANCEL" }).click();
+    await page.getByRole("button", { name: "Cancel Order" }).click();
+    await expect
+      .poll(() => captured.some((c) => c.url.includes("/cancel")))
+      .toBe(true);
+    const cancel = captured.find((c) => c.url.includes("/cancel"))!;
+    assertFutuPaperScope(cancel.url);
+    expect(cancel.body).toEqual({ brokerOrderId: BROKER_ORDER_ID });
+  });
+
+  test("SIMULATE TRAIL row with unknown trail unit: ---, no trail edit, CANCEL sends", async ({
+    page,
+  }) => {
+    const { captured } = await installOrderFlowMocks(
+      page,
+      { paper: true, live: false },
+      {
+        workingOrder: {
+          orderType: "TRAIL",
+          limitPrice: null,
+          auxPrice: null,
+          trailType: null,
+          trailValue: 2,
+        },
+        paperModify: ["LMT", "TRAIL"],
+      },
+    );
+    await openFutuTab(page);
+    await page.goto("/orders");
+    // Unit unknown: an unavailable marker, never a guessed "$".
+    await expect(page.getByTestId("futu-order-trail")).toHaveText("---");
+    await page.getByRole("button", { name: "MODIFY" }).click();
+    await expect(page.locator("#modify-trail-value-input")).toBeDisabled();
+    const prefix = page
+      .locator(".modify-price-input-row")
+      .filter({ has: page.locator("#modify-trail-value-input") })
+      .locator(".modify-price-prefix");
+    await expect(prefix).toHaveText("---");
+    await page.screenshot({
+      path: path.join(SCREEN_DIR, "futu-trail-unit-unknown-2026-10-26.png"),
+      fullPage: true,
+      animations: "disabled",
+    });
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await page.getByRole("button", { name: "CANCEL" }).click();
+    await page.getByRole("button", { name: "Cancel Order" }).click();
+    await expect
+      .poll(() => captured.some((c) => c.url.includes("/cancel")))
+      .toBe(true);
+    expect(captured.some((c) => c.url.includes("/modify"))).toBe(false);
+    const cancel = captured.find((c) => c.url.includes("/cancel"))!;
+    assertFutuPaperScope(cancel.url);
+    expect(cancel.body).toEqual({ brokerOrderId: BROKER_ORDER_ID });
   });
 
   test("REAL with trading.live=false: no order action buttons", async ({

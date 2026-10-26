@@ -26,6 +26,7 @@ import {
   FUTU_MODIFY_SENT_UNCONFIRMED_COPY,
   futuCancelApiPath,
   futuLockStillHolds,
+  futuManagementLockFor,
   futuManagementLockKey,
   futuModifyApiPath,
   futuOrdersApiPath,
@@ -37,6 +38,7 @@ import {
 } from "@/lib/futuOpenOrder";
 import { ordersScopeKey, resolveFutuEnv } from "@/lib/orderActionScope";
 import { isUncertainFutuManagementResponse } from "@/lib/futuManagementUncertain";
+import { futuModifyTermsText } from "@/lib/futuOrderTypes";
 
 /** Result surfaced to callers of requestCancel/requestModify so the row can
  *  render a FAILED pill (F6.2). `status` is the HTTP status from the Next.js
@@ -148,13 +150,10 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
       if (!order.brokerOrderId) return;
       futuUnconfirmedRef.current.set(
         futuManagementLockKey(env, order.brokerOrderId),
-        {
-          env,
+        futuManagementLockFor(env, {
+          ...order,
           brokerOrderId: order.brokerOrderId,
-          modifySequence: order.modifySequence ?? null,
-          price: order.limitPrice ?? null,
-          qty: order.totalQuantity,
-        },
+        }),
       );
       setFutuUnconfirmedVersion((v) => v + 1);
     },
@@ -771,7 +770,13 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
           message,
         };
       }
-      const { outsideRth, ...requestBody } = request;
+      const {
+        outsideRth,
+        newAuxPrice,
+        newTrailValue,
+        newTrailSpread,
+        ...baseRequest
+      } = request;
       const nextSeq = computeNextModifySequence(
         order,
         actionKey,
@@ -782,18 +787,29 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
         futu && order.brokerOrderId
           ? {
               brokerOrderId: order.brokerOrderId,
-              ...requestBody,
+              ...baseRequest,
+              // FUTU only (contract § Modify); an IB body never carries them.
+              newAuxPrice,
+              newTrailValue,
+              newTrailSpread,
               modifySequence: nextSeq,
             }
           : {
               orderId: order.orderId,
               permId: order.permId,
-              ...requestBody,
+              ...baseRequest,
               outsideRth,
               modifySequence: nextSeq,
             };
+      // Futu trigger / trail edits are field changes too (A6): an aux-only
+      // or trail-only modify must not report success unless confirmed.
       const hasFieldChange =
-        request.newPrice != null || request.newQuantity != null;
+        request.newPrice != null ||
+        request.newQuantity != null ||
+        (futu &&
+          (request.newAuxPrice != null ||
+            request.newTrailValue != null ||
+            request.newTrailSpread != null));
 
       const recordStale = (json: Record<string, unknown>) => {
         const detail = json?.detail;
@@ -825,6 +841,12 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
         return { ok: false, status, reasonCode, message };
       };
       const confirmedMessage = () => {
+        if (futu) {
+          const terms = futuModifyTermsText(request, order.trailType);
+          return terms
+            ? `${order.symbol} order confirmed (${terms})`
+            : `${order.symbol} order confirmed`;
+        }
         const parts: string[] = [];
         if (request.newPrice != null) {
           parts.push(`price $${request.newPrice.toFixed(2)}`);

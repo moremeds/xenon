@@ -13,8 +13,29 @@ import {
 } from "@/lib/placeOrderBodySchema";
 import { buildFastApiPlaceOrderPayload } from "@/lib/order/placeOrderContract";
 import { forwardRequestQuery } from "@/lib/forwardRequestQuery";
+import {
+  FUTU_ONLY_PLACE_FIELDS,
+  futuOrderTermsError,
+  type FutuOrderType,
+} from "@/lib/futuOrderTypes";
 
 export const runtime = "nodejs";
+
+function isFutuScope(request: Request): boolean {
+  const broker = new URL(request.url).searchParams.get("broker");
+  return broker?.toUpperCase() === "FUTU";
+}
+
+function invalidOrderBody(message: string, requestId: string): Response {
+  return setNoStoreResponseHeaders(
+    NextResponse.json(
+      { error: message, reason_code: "INVALID_ORDER_BODY", requestId },
+      { status: 400 },
+    ),
+    requestId,
+  );
+}
+
 const ORDER_PLACE_TIMEOUT_MS = 60_000;
 
 type ComboLeg = {
@@ -31,8 +52,15 @@ type PlaceBody = {
   symbol: string;
   action: "BUY" | "SELL";
   quantity: number;
-  limitPrice: number;
+  limitPrice?: number;
   tif?: "DAY" | "GTC";
+  // FUTU only (contract § Order types); refused on an IB body.
+  orderType?: FutuOrderType;
+  auxPrice?: number;
+  trailType?: "RATIO" | "AMOUNT";
+  trailValue?: number;
+  trailSpread?: number;
+  session?: "RTH" | "ETH" | "ALL" | "OVERNIGHT";
   expiry?: string;
   strike?: number;
   right?: "C" | "P";
@@ -85,7 +113,18 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    const schemaErr = firstPlaceOrderSchemaErrorMessage(parsed);
+    const futu = isFutuScope(request);
+    // An IB body carrying a Futu-only key (any value, even null) is refused,
+    // never stripped (contract § Order types).
+    if (!futu) {
+      const futuField = FUTU_ONLY_PLACE_FIELDS.find((key) => key in parsed);
+      if (futuField)
+        return invalidOrderBody(
+          `${futuField} is only valid for a FUTU order`,
+          requestId,
+        );
+    }
+    const schemaErr = firstPlaceOrderSchemaErrorMessage(parsed, { futu });
     if (schemaErr) {
       return setNoStoreResponseHeaders(
         jsonApiError({
@@ -142,6 +181,13 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
+    // FUTU single-leg: the fields of the order type, every other term absent.
+    const futuSingleLeg = futu && body.type !== "combo";
+    if (futuSingleLeg) {
+      const termsErr = futuOrderTermsError(body);
+      if (termsErr) return invalidOrderBody(termsErr, requestId);
+    }
+
     // Signed combo prices are valid: IB combo pricing preserves credit/debit sign.
     // Single-leg stock/option orders must remain strictly positive.
     const comboSignedPrice = body.type === "combo";
@@ -152,7 +198,7 @@ export async function POST(request: Request): Promise<Response> {
       : body.limitPrice == null ||
         body.limitPrice <= 0 ||
         !Number.isFinite(body.limitPrice);
-    if (limitPriceInvalid) {
+    if (!futuSingleLeg && limitPriceInvalid) {
       return setNoStoreResponseHeaders(
         jsonApiError({
           message: comboSignedPrice
@@ -193,7 +239,7 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    const orderPayload = buildFastApiPlaceOrderPayload(body);
+    const orderPayload = buildFastApiPlaceOrderPayload(body, { futu });
 
     dispatched = true;
     const orderResult = await xenonFetch<Record<string, unknown>>(

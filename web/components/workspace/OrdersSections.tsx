@@ -21,6 +21,7 @@ import { useSort } from "@/lib/useSort";
 import { useTableFilter } from "@/lib/useTableFilter";
 import TableSearch from "../TableSearch";
 import { fmtPrice } from "@/lib/positionUtils";
+import { fmtFutuPrice, futuOrderTermCells } from "@/lib/futuOrderTypes";
 import {
   buildOpenOrderDisplayRows,
   type OpenOrderDisplayRow,
@@ -52,6 +53,7 @@ import { HistoricalTradesSection } from "./HistoricalTradesSection";
 import {
   FUTU_MANAGEMENT_UNCONFIRMED_COPY,
   futuManageableOpenOrder,
+  futuModifiableOpenOrder,
   isFutuOpenOrder,
 } from "@/lib/futuOpenOrder";
 import { useFutuAccountEnv } from "@/lib/futuAccountEnv";
@@ -60,7 +62,11 @@ import {
   scopesMatch,
   type OrderActionScope,
 } from "@/lib/orderActionScope";
-import { futuTradingEnabledForEnv, useFutuTrading } from "@/lib/useFutuTrading";
+import {
+  futuCapabilitiesForEnv,
+  futuTradingEnabledForEnv,
+  useFutuTrading,
+} from "@/lib/useFutuTrading";
 
 export function OrdersSections({
   orders,
@@ -77,6 +83,8 @@ export function OrdersSections({
 }) {
   // Futu is read-only: no order modify/cancel surfaces (mirrors the position table gate).
   const readonly = activeAccount === "futu" && !futuOrderActionsEnabled;
+  // Futu view adds trigger / trail / session columns (contract § Working orders).
+  const futuView = activeAccount === "futu";
   const futuEnv = useFutuAccountEnv();
   const futuTrading = useFutuTrading();
   const viewScope: OrderActionScope = useMemo(
@@ -147,6 +155,26 @@ export function OrdersSections({
     [futuEnv, viewScope, futuTrading, isFutuManagementLocked],
   );
 
+  /** Modify: Futu only for types in `capabilities[env].modify` (cancel
+   *  stays available for every type); IB LMT / STP LMT. */
+  const canModifyOrder = useCallback(
+    (o: OpenOrder) => {
+      if (!canManageOrder(o)) return false;
+      if (isFutuOpenOrder(o)) {
+        const env =
+          o.accountEnv === "paper" || o.accountEnv === "live"
+            ? o.accountEnv
+            : futuEnv;
+        return futuModifiableOpenOrder(
+          o,
+          futuCapabilitiesForEnv(futuTrading, env),
+        );
+      }
+      return o.orderType === "LMT" || o.orderType === "STP LMT";
+    },
+    [canManageOrder, futuEnv, futuTrading],
+  );
+
   const handleCancel = useCallback(async () => {
     if (!cancelTarget || !canManageOrder(cancelTarget)) {
       setCancelTarget(null);
@@ -165,7 +193,7 @@ export function OrdersSections({
 
   const handleModify = useCallback(
     async (request: ModifyOrderRequest) => {
-      if (!modifyTarget || !canManageOrder(modifyTarget.requestOrder)) {
+      if (!modifyTarget || !canModifyOrder(modifyTarget.requestOrder)) {
         setModifyTarget(null);
         return;
       }
@@ -181,7 +209,7 @@ export function OrdersSections({
         setModifyTarget(null);
       }
     },
-    [modifyTarget, requestModify, canManageOrder, isFutuManagementLocked],
+    [modifyTarget, requestModify, canModifyOrder, isFutuManagementLocked],
   );
 
   const handleCancelCombo = useCallback(
@@ -275,11 +303,7 @@ export function OrdersSections({
     );
   }
 
-  const canModify = (o: OpenOrder) => {
-    if (!canManageOrder(o)) return false;
-    if (isFutuOpenOrder(o)) return true;
-    return o.orderType === "LMT" || o.orderType === "STP LMT";
-  };
+  const canModify = canModifyOrder;
   const execCount = orders.executed_count + cancelledOrders.length;
 
   return (
@@ -294,7 +318,7 @@ export function OrdersSections({
       />
       <ModifyOrderModal
         order={
-          modifyTarget && canManageOrder(modifyTarget.requestOrder)
+          modifyTarget && canModifyOrder(modifyTarget.requestOrder)
             ? modifyTarget.modalOrder
             : null
         }
@@ -331,7 +355,7 @@ export function OrdersSections({
           {openOrderRows.length === 0 ? (
             <div className="alert-item">No open orders</div>
           ) : (
-            <table>
+            <table className={futuView ? "futu-orders-table" : undefined}>
               <thead>
                 <tr>
                   <SortTh<OpenOrderKey>
@@ -371,6 +395,12 @@ export function OrdersSections({
                     direction={openSort.sort.direction}
                     onToggle={openSort.toggle}
                   />
+                  {futuView && (
+                    <>
+                      <th className="right">Trigger</th>
+                      <th className="right">Trail</th>
+                    </>
+                  )}
                   <SortTh<OpenOrderKey>
                     label="Last Price"
                     sortKey="lastPrice"
@@ -393,6 +423,7 @@ export function OrdersSections({
                     direction={openSort.sort.direction}
                     onToggle={openSort.toggle}
                   />
+                  {futuView && <th>Session</th>}
                   <th className="actions-th">Actions</th>
                 </tr>
               </thead>
@@ -454,6 +485,12 @@ export function OrdersSections({
                                 : "—"}
                           </span>
                         </td>
+                        {futuView && (
+                          <>
+                            <td className="right">---</td>
+                            <td className="right">---</td>
+                          </>
+                        )}
                         <OrderPriceCell
                           price={resolveOpenOrderComboPrice(o.orders, prices)}
                         />
@@ -471,6 +508,7 @@ export function OrdersSections({
                           )}
                         </td>
                         <td>{o.tif}</td>
+                        {futuView && <td>---</td>}
                         <td className="actions-cell">
                           {futuComboActionsHidden ? null : readonly ? (
                             <span className="cancel-pending-label">
@@ -563,11 +601,29 @@ export function OrdersSections({
                         {rowPendingModify && o.order.orderType === "STP LMT" ? (
                           <span className="status-modifying">Modifying...</span>
                         ) : o.order.limitPrice != null ? (
-                          fmtPrice(o.order.limitPrice)
+                          isFutuOpenOrder(o.order) ? (
+                            fmtFutuPrice(o.order.limitPrice)
+                          ) : (
+                            fmtPrice(o.order.limitPrice)
+                          )
                         ) : (
-                          "—"
+                          // No fixed limit (MKT, STP, MIT, TRAIL, TRAIL LIMIT).
+                          "---"
                         )}
                       </td>
+                      {futuView && (
+                        <>
+                          <td
+                            className="right"
+                            data-testid="futu-order-trigger"
+                          >
+                            {futuOrderTermCells(o.order).trigger}
+                          </td>
+                          <td className="right" data-testid="futu-order-trail">
+                            {futuOrderTermCells(o.order).trail}
+                          </td>
+                        </>
+                      )}
                       <OrderPriceCell
                         price={resolveOrderLastPrice(
                           o.order,
@@ -587,6 +643,11 @@ export function OrdersSections({
                         )}
                       </td>
                       <td>{o.order.tif}</td>
+                      {futuView && (
+                        <td data-testid="futu-order-session">
+                          {futuOrderTermCells(o.order).session}
+                        </td>
+                      )}
                       <td className="actions-cell">
                         {readonly ? (
                           <span className="cancel-pending-label">
@@ -605,8 +666,10 @@ export function OrdersSections({
                               disabled={!canModify(o.order)}
                               title={
                                 canModify(o.order)
-                                  ? "Modify limit price"
-                                  : "Only LMT orders can be modified"
+                                  ? "Modify order"
+                                  : isFutuOpenOrder(o.order)
+                                    ? `Modify of ${o.order.orderType} is off for this Futu environment; cancel instead`
+                                    : "Only LMT orders can be modified"
                               }
                               onClick={() =>
                                 setModifyTarget({
