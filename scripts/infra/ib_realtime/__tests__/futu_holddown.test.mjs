@@ -170,6 +170,43 @@ test("stale on futu rows: fresh row stale:false, aged timestamp stale:true", asy
   opted.close();
 });
 
+test("quiet Futu row flips to stale on the reconcile timer without a new tick", async (t) => {
+  const stack = await startStack({ IB_REALTIME_STALE_TICK_MS: "500" });
+  t.after(stack.close);
+
+  const opted = await stack.connect({ apiKey: API_KEY, quotes: "futu-first" });
+  opted.send(JSON.stringify({ action: "subscribe", symbols: ["SYNQUIET"] }));
+  await stack.admitOnFutu(["SYNQUIET"]);
+  await sleep(HD + 400);
+
+  // One fresh row, then only health frames — the row ages past the threshold
+  // with no new tick, and the reconcile timer must publish the stale flip.
+  const stamp = new Date().toISOString();
+  stack.futuSend({
+    type: "batch",
+    updates: {
+      SYNQUIET: { symbol: "SYNQUIET", last: 12.34, timestamp: stamp },
+    },
+  });
+  await stack.waitFutuValue(opted, "SYNQUIET", 12.34, { timeout: 3000 });
+
+  await stack.waitFor(
+    () =>
+      opted.msgs.some(
+        (m) =>
+          (m.updates?.SYNQUIET?.stale === true &&
+            m.updates?.SYNQUIET?.last === 12.34 &&
+            m.updates?.SYNQUIET?.timestamp === stamp) ||
+          (m.type === "price" &&
+            m.symbol === "SYNQUIET" &&
+            m.data?.stale === true &&
+            m.data?.timestamp === stamp),
+      ),
+    { timeout: 5000 },
+  );
+  opted.close();
+});
+
 test("hydrated cached row carries stale:true once its timestamp ages out", async (t) => {
   const stack = await startStack({ IB_REALTIME_STALE_TICK_MS: "200" });
   t.after(stack.close);

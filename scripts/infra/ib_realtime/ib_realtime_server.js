@@ -802,6 +802,23 @@ function stopBatchFlush() {
 
 function removeBatchBuffer(client) {
   clientBatchBuffers.delete(client);
+  futuStaleServed.delete(client);
+}
+
+// Per-client record of Futu rows already delivered with stale:true, keyed by
+// the row's own timestamp — Map<client, Map<symbol, timestamp>>. A quiet row
+// ages past the threshold between batches, so the reconcile timer republishes
+// the cached row once with stale:true; the timestamp key means each row flips
+// exactly once and a newer row earns its own single flip (D10).
+const futuStaleServed = new Map();
+
+function markFutuStaleServed(client, symbol, timestamp) {
+  let m = futuStaleServed.get(client);
+  if (!m) {
+    m = new Map();
+    futuStaleServed.set(client, m);
+  }
+  m.set(symbol, timestamp ?? "");
 }
 
 function sendMessage(client, payload) {
@@ -1567,10 +1584,20 @@ function activeLineCount() {
 function lineEntries() {
   const out = [];
   for (const [key, state] of symbolStates) {
+    // Merged subscriber tier for the budget (D13): "held" when any subscriber
+    // of the key is held — or when no tier is recorded, matching the untagged
+    // default in subscribeClientToSymbol; "view" only when every recorded
+    // subscriber is view.
+    const tierMap = subscriberTiers.get(key);
+    const held =
+      !tierMap ||
+      tierMap.size === 0 ||
+      [...tierMap.values()].includes("held");
     out.push({
       key,
       tickerId: state.tickerId,
       lastAccessAt: state.lastAccessAt,
+      tier: held ? "held" : "view",
     });
   }
   return out;
@@ -1594,8 +1621,11 @@ function evictLine(key) {
 // incoming symbol. Returns true if there is room to admit `incomingKey`.
 function makeRoomForLine(incomingKey) {
   while (activeLineCount() >= MAX_CONCURRENT_LINES) {
-    const victim = pickEvictable(lineEntries(), incomingKey);
-    if (victim == null) return false; // nothing evictable (all == incoming)
+    const entries = lineEntries();
+    const incomingTier =
+      entries.find((e) => e.key === incomingKey)?.tier ?? "held";
+    const victim = pickEvictable(entries, incomingKey, incomingTier);
+    if (victim == null) return false; // nothing evictable for this tier
     evictLine(victim);
   }
   return true;
@@ -1609,27 +1639,41 @@ function demandedLineEntries(now = Date.now()) {
   });
 }
 
-// A line just freed — re-admit the hottest evicted-but-still-wanted symbol.
+// A line just freed — re-admit the hottest evicted-but-wanted symbol, held
+// before view (D13). When the budget is already full and the top pending key
+// is held, evict the idlest VIEW line to admit it — existing view allocations
+// must not defeat held-first. A pending held key never evicts another held
+// line for this reason (pickEvictable returns null), and a pending view key
+// simply waits for a genuinely free slot, same as before.
 function admitPendingLine() {
-  if (!ibConnected) return;
-  if (activeLineCount() >= MAX_CONCURRENT_LINES) return;
-  const key = pickAdmittable(demandedLineEntries());
-  if (key == null) return;
+  if (!ibConnected) return false;
+  const entries = demandedLineEntries();
+  const key = pickAdmittable(entries);
+  if (key == null) return false;
+  if (activeLineCount() >= MAX_CONCURRENT_LINES) {
+    if (entries.find((e) => e.key === key)?.tier !== "held") return false;
+    const victim = pickEvictable(entries, key, "held");
+    if (victim == null) return false;
+    evictLine(victim);
+    if (activeLineCount() >= MAX_CONCURRENT_LINES) return false;
+  }
   const state = symbolStates.get(key);
-  if (!state || !state.contract || state.tickerId != null) return;
+  if (!state || !state.contract || state.tickerId != null) return false;
   const subs = symbolSubscribers.get(key);
-  if (!subs || subs.size === 0) return; // no longer wanted
+  if (!subs || subs.size === 0) return false; // no longer wanted
   startLiveSubscription(key, state.contract);
+  return state.tickerId != null; // false on a failed admit stops the fill loop
 }
 
 // Fill every free slot with the hottest evicted-but-wanted symbols. Used after a
 // bulk free (client disconnect) where one admitPendingLine() would leave most of
-// the reclaimed capacity idle while evicted symbols stay stale.
+// the reclaimed capacity idle while evicted symbols stay stale. Keeps looping
+// while admitPendingLine makes progress — including a pending held key
+// reclaiming a view line over a full budget.
 function fillFreeLines() {
-  while (activeLineCount() < MAX_CONCURRENT_LINES) {
-    const before = activeLineCount();
-    admitPendingLine();
-    if (activeLineCount() === before) break; // nothing left to admit
+  while (admitPendingLine()) {
+    // Progress guaranteed by the return value; the loop exits when nothing is
+    // pending or no view line can be reclaimed for a held key.
   }
 }
 
@@ -1974,11 +2018,13 @@ function hydrateForClient(client, symbol) {
   if (route === "futu") {
     const data = futuRouting.futuData(symbol);
     if (data) {
+      const stale = futuStale(data, now);
       sendMessage(client, {
         type: "price",
         symbol,
-        data: { ...data, stale: futuStale(data, now) },
+        data: { ...data, stale },
       });
+      if (stale) markFutuStaleServed(client, symbol, data.timestamp);
     }
     return;
   }
@@ -2038,6 +2084,9 @@ function onFutuBatch(updates) {
     for (const client of subs) {
       if (futuRouting.routeFor(client, symbol, now) !== "futu") continue;
       bufferPriceForClient(client, symbol, payload);
+      if (payload.stale === true) {
+        markFutuStaleServed(client, symbol, payload.timestamp);
+      }
     }
   }
 }
@@ -2061,6 +2110,21 @@ function reconcileFutuRoutes() {
       hydrateForClient(client, symbol);
     }
   }
+  // A quiet Futu row ages past the stale threshold without new ticks — the
+  // route doesn't change, so nothing above republishes it. For each
+  // Futu-routed (client, symbol) whose last delivered row was still fresh,
+  // buffer the same cached row once with stale:true — identical values and
+  // timestamp, only the flag flips, and each row flips at most once.
+  for (const [symbol, subs] of symbolSubscribers) {
+    const data = futuRouting.futuData(symbol);
+    if (!data || !futuStale(data, now)) continue;
+    for (const client of subs) {
+      if (futuRouting.routeFor(client, symbol, now) !== "futu") continue;
+      if (futuStaleServed.get(client)?.get(symbol) === data.timestamp) continue;
+      bufferPriceForClient(client, symbol, { ...data, stale: true });
+      markFutuStaleServed(client, symbol, data.timestamp);
+    }
+  }
   for (const [symbol, subs] of symbolSubscribers) {
     if (futuRouting.ibDemand(symbol, subs, now)) continue;
     dropIbLine(symbol);
@@ -2080,6 +2144,18 @@ function restoreSubscriptions() {
   // later chain strikes come in, and an evicted symbol can't tick to re-prove
   // its heat — so it would stay stale after every reconnect.
   const keys = [...symbolSubscribers.keys()].sort((a, b) => {
+    // Held keys restore before view keys (D13), then by recency within tier —
+    // the same merged default-held rule as lineEntries.
+    const heldRank = (k) => {
+      const tierMap = subscriberTiers.get(k);
+      return !tierMap ||
+        tierMap.size === 0 ||
+        [...tierMap.values()].includes("held")
+        ? 0
+        : 1;
+    };
+    const diff = heldRank(a) - heldRank(b);
+    if (diff !== 0) return diff;
     const at = symbolStates.get(a)?.lastAccessAt ?? 0;
     const bt = symbolStates.get(b)?.lastAccessAt ?? 0;
     return bt - at;
