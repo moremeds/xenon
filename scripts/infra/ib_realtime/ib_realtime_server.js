@@ -2022,8 +2022,16 @@ function onFutuBatch(updates) {
     if (data == null || typeof data !== "object") continue;
     if (!futuRouting.isOk(symbol)) continue;
     const payload = { ...data, source: data.source ?? "futu" };
+    const wasLive = futuRouting.futuLive(symbol, now);
     futuRouting.recordTick(symbol, payload);
-    if (!futuRouting.futuLive(symbol, now)) continue;
+    const live = futuRouting.futuLive(symbol, now);
+    if (live && !wasLive) {
+      // This row just made the symbol live — flip routes and hydrate in the
+      // same turn instead of leaving the first row to the reconcile timer
+      // (which races the batch flush and made delivery timing-dependent).
+      reconcileFutuRoutes();
+    }
+    if (!live) continue;
     const subs = symbolSubscribers.get(symbol);
     if (!subs || subs.size === 0) continue;
     payload.stale = futuStale(payload, now);

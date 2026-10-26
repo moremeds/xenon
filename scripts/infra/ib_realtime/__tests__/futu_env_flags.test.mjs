@@ -45,10 +45,7 @@ test("XENON_QUOTES_DEFAULT=futu-first routes every client incl. tickets to Futu"
     updates: { AAPL: { symbol: "AAPL", last: 11.5 } },
   });
   for (const ws of all) {
-    await stack.waitFor(
-      () => ws.batches().some((b) => b.updates?.AAPL?.last === 11.5),
-      { timeout: 3000 },
-    );
+    await stack.waitFutuValue(ws, "AAPL", 11.5, { timeout: 3000 });
   }
   for (const ws of all) ws.close();
 });
@@ -82,17 +79,10 @@ test("XENON_QUOTES_DEFAULT=ib keeps tickets on IB; api-key opt-in unchanged", as
       WMT: { symbol: "WMT", last: 90 },
     },
   });
-  // The first row for a symbol flips the route and is delivered via the
-  // hydration `price` frame (D10); later rows arrive as `batch`. Accept either.
-  await stack.waitFor(
-    () =>
-      opted.msgs.some(
-        (m) =>
-          m.updates?.MSFT?.last === 401 ||
-          (m.symbol === "MSFT" && m.data?.last === 401),
-      ),
-    { timeout: 3000 },
-  );
+  // The first served row for a symbol flips the route and is delivered via
+  // the hydration `price` frame (D10); later rows arrive as `batch`. Wait for
+  // the value via either frame.
+  await stack.waitFutuValue(opted, "MSFT", 401, { timeout: 3000 });
   await sleep(200);
   assert.equal(
     browser.msgs.some(
@@ -167,7 +157,7 @@ test("XENON_FUTU_OPTIONS=0 keeps option keys pinned to IB", async (t) => {
   });
   await sleep(300);
   assert.equal(
-    opted.batches().some((b) => b.updates?.[OPTION_KEY]),
+    stack.hasFutuFrame(opted, OPTION_KEY),
     false,
     "pinned option key received a futu tick",
   );
@@ -210,13 +200,10 @@ test("XENON_FUTU_OPTIONS=1 sends option keys in want and routes their ticks", as
     type: "batch",
     updates: { [OPTION_KEY]: { symbol: OPTION_KEY, last: 5.5 } },
   });
-  await stack.waitFor(
-    () => opted.batches().some((b) => b.updates?.[OPTION_KEY]?.last === 5.5),
-    { timeout: 3000 },
-  );
+  await stack.waitFutuValue(opted, OPTION_KEY, 5.5, { timeout: 3000 });
   await sleep(200);
   assert.equal(
-    browser.batches().some((b) => b.updates?.[OPTION_KEY]),
+    stack.hasFutuFrame(browser, OPTION_KEY),
     false,
     "ib-preference client received the futu option tick",
   );

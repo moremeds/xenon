@@ -187,6 +187,22 @@ export async function startStack(extraEnv = {}) {
     });
   };
 
+  // A served Futu row reaches the client either as a hydration `price` frame
+  // (route flip) or a `batch` update (steady state) — wait for the VALUE,
+  // never the frame kind or the timing of the flip.
+  const futuValue = (ws, symbol, last) =>
+    ws.msgs.some(
+      (m) =>
+        m.updates?.[symbol]?.last === last ||
+        (m.type === "price" && m.symbol === symbol && m.data?.last === last),
+    );
+  const waitFutuValue = (ws, symbol, last, opts) =>
+    waitFor(() => futuValue(ws, symbol, last), opts);
+  // Any frame (price or batch) mentioning the symbol — for negative asserts
+  // that must not pass just because a leaked row rode the `price` channel.
+  const hasFutuFrame = (ws, symbol) =>
+    ws.msgs.some((m) => m.symbol === symbol || m.updates?.[symbol] != null);
+
   const close = () => {
     clearInterval(healthTimer);
     relay?.kill("SIGINT");
@@ -199,5 +215,14 @@ export async function startStack(extraEnv = {}) {
     }
   };
 
-  return { wants, futuSend, connect, admitOnFutu, waitFor, close };
+  return {
+    wants,
+    futuSend,
+    connect,
+    admitOnFutu,
+    waitFor,
+    waitFutuValue,
+    hasFutuFrame,
+    close,
+  };
 }
