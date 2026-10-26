@@ -946,7 +946,11 @@ function startLiveSubscription(key, ibContract) {
   }
 
   // Enforce the IB line budget: evict the idlest live line(s) to make room.
-  makeRoomForLine(key);
+  // When nothing is evictable for this tier (e.g. a view subscribe on a budget
+  // of held lines), do NOT subscribe over-budget — leave tickerId null so the
+  // symbol stays wanted-but-evicted: readers see stale:true via the next
+  // hydrate, and fillFreeLines admits it as soon as a slot frees.
+  if (!makeRoomForLine(key)) return;
 
   try {
     ib.reqMktData(nextTickerId, ibContract, "233,165", false, false);
@@ -1624,7 +1628,9 @@ function makeRoomForLine(incomingKey) {
     const entries = lineEntries();
     const incomingTier =
       entries.find((e) => e.key === incomingKey)?.tier ?? "held";
-    const victim = pickEvictable(entries, incomingKey, incomingTier);
+    // Held lines are evictable only for an incoming held subscribe — a view
+    // subscription never displaces a position (D13).
+    const victim = pickEvictable(entries, incomingKey, incomingTier === "held");
     if (victim == null) return false; // nothing evictable for this tier
     evictLine(victim);
   }
@@ -1652,7 +1658,7 @@ function admitPendingLine() {
   if (key == null) return false;
   if (activeLineCount() >= MAX_CONCURRENT_LINES) {
     if (entries.find((e) => e.key === key)?.tier !== "held") return false;
-    const victim = pickEvictable(entries, key, "held");
+    const victim = pickEvictable(entries, key, false); // reclaim view lines only
     if (victim == null) return false;
     evictLine(victim);
     if (activeLineCount() >= MAX_CONCURRENT_LINES) return false;

@@ -20,20 +20,24 @@
  * Tier overrides recency at the decision boundary (D13): held keys are
  * admitted before view keys and view lines are evicted before held lines,
  * so chain subscriptions can never starve a held position of its line.
- * Recency still orders keys WITHIN a tier.
+ * Recency still orders keys WITHIN a tier; held lines remain evictable only
+ * for an incoming held subscribe (plain LRU on a full held budget).
  */
 
 /**
  * Pick the live line to evict when over budget: the idlest VIEW line first
- * (oldest lastAccessAt), and only when no view line remains the idlest held
- * line — but never for an incoming held key, which waits rather than evicting
- * another held key for held-first reasons. `incomingTier` is the tier of the
- * key being admitted; an incoming view key may still take the idlest held line
- * as a last resort (pre-tier LRU fallback), which is bounded by the
- * pending-held reclaim in admitPendingLine. Returns the key to evict, or null
- * when nothing is evictable for this incoming tier.
+ * (oldest lastAccessAt). Only when no view line remains does `allowHeld`
+ * decide whether the idlest held line is also a candidate:
+ *   - allowHeld=true  → incoming HELD subscribe (makeRoomForLine): a new held
+ *     symbol keeps the pre-tier LRU on a full held budget — the idlest held
+ *     line leaves for it, exactly as before tiers existed.
+ *   - allowHeld=false → incoming VIEW subscribe, and the pending-held reclaim
+ *     in admitPendingLine: held lines are never evictable, so a view
+ *     subscription can never displace a position, and the reclaim only ever
+ *     takes view lines back.
+ * Returns the key to evict, or null when nothing is evictable.
  */
-export function pickEvictable(entries, exceptKey = null, incomingTier = "held") {
+export function pickEvictable(entries, exceptKey = null, allowHeld = false) {
   let oldestViewKey = null;
   let oldestViewAt = Infinity;
   let oldestHeldKey = null;
@@ -53,7 +57,7 @@ export function pickEvictable(entries, exceptKey = null, incomingTier = "held") 
     }
   }
   if (oldestViewKey != null) return oldestViewKey;
-  if (incomingTier === "held") return null;
+  if (!allowHeld) return null;
   return oldestHeldKey;
 }
 

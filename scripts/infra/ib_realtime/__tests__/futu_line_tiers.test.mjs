@@ -113,29 +113,30 @@ test("pickAdmittable admits held pending before newer view pending", () => {
   );
 });
 
-test("pickEvictable takes the idlest view line first, never held for held", () => {
+test("pickEvictable takes the idlest view line first; held only when allowed", () => {
   const entries = [
     { key: "V_OLD", tickerId: 1, lastAccessAt: 10, tier: "view" },
     { key: "V_NEW", tickerId: 2, lastAccessAt: 99, tier: "view" },
     { key: "H_OLD", tickerId: 3, lastAccessAt: 1, tier: "held" },
   ];
   assert.equal(pickEvictable(entries), "V_OLD");
-  // With no view line left, a held incoming never evicts another held line.
+  // With no view line left: allowHeld=false (incoming view, or the pending-held
+  // reclaim) gets nothing — view lines never displace held.
   assert.equal(
     pickEvictable(
       [{ key: "H_OLD", tickerId: 3, lastAccessAt: 1, tier: "held" }],
       null,
-      "held",
+      false,
     ),
     null,
   );
-  // …but view demand may still take the idlest held line as a last resort
-  // (pre-tier LRU fallback).
+  // …while allowHeld=true (incoming held subscribe) keeps the pre-tier LRU:
+  // the idlest held line is evictable.
   assert.equal(
     pickEvictable(
       [{ key: "H_OLD", tickerId: 3, lastAccessAt: 1, tier: "held" }],
       null,
-      "view",
+      true,
     ),
     "H_OLD",
   );
@@ -194,4 +195,105 @@ test("restore path: held keys restore before newer view keys", () => {
   vm.runInContext(`${defs}\nrestoreSubscriptions();`, ctx);
   assert.equal(calls[0], "SYNHELD", "held restored before any view");
   assert.ok(calls.includes("SYNHELD"), "held must be restored");
+});
+
+// The subscribe path runs the real makeRoomForLine + startLiveSubscription,
+// with the broker calls stubbed: evictLine just drops the line (records the
+// victim), ib.reqMktData is a no-op (admission is observable via
+// state.tickerId), ensureSymbolState is a minimal in-memory version.
+function makeSubscribeCtx({ budget, heldLive = [], incoming = [] }) {
+  const subscriberTiers = new Map();
+  const symbolSubscribers = new Map();
+  const symbolStates = new Map();
+  const evictions = [];
+  const add = (key, tier, tickerId, lastAccessAt) => {
+    subscriberTiers.set(key, new Map([["c", tier]]));
+    symbolSubscribers.set(key, new Set(["c"]));
+    symbolStates.set(key, { contract: {}, tickerId, lastAccessAt });
+  };
+  heldLive.forEach(([key, at], i) => add(key, "held", i + 1, at));
+  incoming.forEach(([key, tier]) => add(key, tier, null, 0));
+  const ctx = {
+    subscriberTiers,
+    symbolSubscribers,
+    symbolStates,
+    pickAdmittable,
+    pickEvictable,
+    MAX_CONCURRENT_LINES: budget,
+    ibConnected: true,
+    futuRouting: { ibDemand: () => true },
+    evictLine(key) {
+      evictions.push(key);
+      symbolStates.get(key).tickerId = null;
+    },
+    ensureSymbolState(key, contract) {
+      let s = symbolStates.get(key);
+      if (!s) {
+        s = { contract, tickerId: null, data: {}, lastAccessAt: 0 };
+        symbolStates.set(key, s);
+      }
+      return s;
+    },
+    ib: { reqMktData() {}, cancelMktData() {} },
+    nextRequestId: 0,
+    requestIdToSymbol: new Map(),
+    requestFundamentals() {},
+    resetMdType() {},
+    sendToSymbolSubscribers() {},
+    withStale: (s) => s,
+    Date,
+  };
+  vm.createContext(ctx);
+  const defs = [
+    "activeLineCount",
+    "lineEntries",
+    "demandedLineEntries",
+    "admitPendingLine",
+    "fillFreeLines",
+    "makeRoomForLine",
+    "startLiveSubscription",
+  ]
+    .map(extract)
+    .join("\n");
+  return { ctx, defs, evictions };
+}
+
+test("subscribe path: incoming held on a full held budget evicts idlest held", () => {
+  const { ctx, defs, evictions } = makeSubscribeCtx({
+    budget: 10,
+    heldLive: Array.from({ length: 10 }, (_, i) => [`SYNHELD${i}`, 10 + i]),
+    incoming: [["SYNHELD_NEW", "held"]],
+  });
+  vm.runInContext(`${defs}\nstartLiveSubscription("SYNHELD_NEW", {});`, ctx);
+  assert.deepEqual(
+    evictions,
+    ["SYNHELD0"],
+    "the idlest held line leaves for a new held subscribe (pre-tier LRU)",
+  );
+  assert.notEqual(
+    ctx.symbolStates.get("SYNHELD_NEW").tickerId,
+    null,
+    "new held symbol is live",
+  );
+  assert.equal(vm.runInContext("activeLineCount()", ctx), 10);
+});
+
+test("subscribe path: incoming view on a full held budget gets no line", () => {
+  const { ctx, defs, evictions } = makeSubscribeCtx({
+    budget: 10,
+    heldLive: Array.from({ length: 10 }, (_, i) => [`SYNHELD${i}`, 10 + i]),
+    incoming: [["SYNVIEW_NEW", "view"]],
+  });
+  vm.runInContext(`${defs}\nstartLiveSubscription("SYNVIEW_NEW", {});`, ctx);
+  assert.deepEqual(evictions, [], "view never evicts a held line");
+  assert.equal(
+    ctx.symbolStates.get("SYNVIEW_NEW").tickerId,
+    null,
+    "view symbol stays wanted-but-evicted, not live",
+  );
+  assert.equal(
+    vm.runInContext("activeLineCount()", ctx),
+    10,
+    "line count stays at budget — no over-subscribe",
+  );
 });
