@@ -22,6 +22,13 @@ export type PriceData = {
   impliedVol: number | null;
   undPrice: number | null;
   timestamp: string;
+  /** Relay-stamped when the row is older than the stale threshold (Futu rows;
+   *  absent on fresh rows and on IB-routed data). */
+  stale?: boolean;
+  /** Quote provider — present only on Futu-routed rows. */
+  source?: "futu";
+  /** Futu overnight-session marker for US stock rows (Sun–Thu ET session). */
+  session?: "overnight";
 };
 
 export type FundamentalsData = {
@@ -204,7 +211,19 @@ export type OptionContract = {
   expiry: string; // YYYYMMDD
   strike: number;
   right: "C" | "P";
+  /** Subscription priority tier for the quote relay (contract-x7 D9):
+   *  "held" for portfolio/order legs, "view" for ticker-detail chain legs.
+   *  Absent = held. */
+  tier?: SubscriptionTier;
 };
+
+/** Quote-subscription priority tier. Absent tier = "held" at the relay. */
+export type SubscriptionTier = "held" | "view";
+
+/** Subscribe-frame symbol entry: a bare ticker, or {symbol, tier}. */
+export type SymbolSubscription =
+  | string
+  | { symbol: string; tier: SubscriptionTier };
 
 export function normalizeOptionExpiry(expiry: string): string | null {
   const compact = expiry.trim().replace(/-/g, "");
@@ -229,6 +248,7 @@ export function normalizeOptionContract(
     expiry,
     strike: contract.strike,
     right: contract.right,
+    ...(contract.tier ? { tier: contract.tier } : {}),
   };
 }
 
@@ -262,14 +282,25 @@ export function parseOptionKey(key: string): OptionContract | null {
 export function uniqueOptionContracts(
   contracts: OptionContract[],
 ): OptionContract[] {
-  const seen = new Set<string>();
+  const idxByKey = new Map<string, number>();
   const normalizedContracts: OptionContract[] = [];
   for (const contract of contracts) {
     const normalized = normalizeOptionContract(contract);
     if (!normalized) continue;
     const key = optionKey(normalized);
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const prevIdx = idxByKey.get(key);
+    if (prevIdx != null) {
+      // held > view: a held or bare (absent = held) duplicate replaces a
+      // kept "view" tag on the same contract.
+      if (normalized.tier !== "view") {
+        const { tier: _keptTier, ...rest } = normalizedContracts[prevIdx];
+        normalizedContracts[prevIdx] = normalized.tier
+          ? { ...rest, tier: normalized.tier }
+          : rest;
+      }
+      continue;
+    }
+    idxByKey.set(key, normalizedContracts.length);
     normalizedContracts.push(normalized);
   }
   return normalizedContracts;
@@ -351,4 +382,61 @@ export function normalizeSymbolList(symbols: string[]): string[] {
 
 export function symbolKey(symbols: string[]): string {
   return normalizeSymbolList(symbols).sort().join(",");
+}
+
+/**
+ * Diff key for a subscribe-entry: bare symbols key on the symbol itself;
+ * tiered entries append `:<tier>` so a tier-only change differs (':' never
+ * appears in tickers, forex keys, or option keys).
+ */
+export function symbolEntryKey(entry: SymbolSubscription): string {
+  return typeof entry === "string"
+    ? entry
+    : `${entry.symbol}:${entry.tier}`;
+}
+
+/** Diff key for a contract entry — `optionKey` + `:<tier>` when tagged. */
+export function contractEntryKey(contract: OptionContract): string {
+  const key = optionKey(contract);
+  return contract.tier ? `${key}:${contract.tier}` : key;
+}
+
+/** Bare identity of a diff key produced by {@link symbolEntryKey} or
+ *  {@link contractEntryKey} — strips a trailing `:<tier>`. */
+export function stripEntryTier(key: string): string {
+  return key.replace(/:(held|view)$/, "");
+}
+
+/**
+ * Normalize + dedup a list of symbol subscribe-entries. Duplicate symbols
+ * keep the first entry, upgraded to held when any copy is not "view" (a bare
+ * string means held at the relay). Output entries are bare strings unless
+ * they carry a tier.
+ */
+export function normalizeSymbolSubscriptions(
+  entries: SymbolSubscription[],
+): SymbolSubscription[] {
+  const out: SymbolSubscription[] = [];
+  const idxBySymbol = new Map<string, number>();
+  for (const entry of entries) {
+    const symbol = (typeof entry === "string" ? entry : entry.symbol)
+      .trim()
+      .toUpperCase();
+    if (!symbol) continue;
+    const tier = typeof entry === "string" ? undefined : entry.tier;
+    const prevIdx = idxBySymbol.get(symbol);
+    if (prevIdx != null) {
+      const kept = out[prevIdx];
+      const keptTier = typeof kept === "string" ? undefined : kept.tier;
+      // held > view: only a view-tagged kept entry is upgraded by an
+      // incoming held/bare copy (a bare string means held at the relay).
+      if (keptTier === "view" && tier !== "view") {
+        out[prevIdx] = tier ? { symbol, tier } : symbol;
+      }
+      continue;
+    }
+    idxBySymbol.set(symbol, out.length);
+    out.push(tier ? { symbol, tier } : symbol);
+  }
+  return out;
 }

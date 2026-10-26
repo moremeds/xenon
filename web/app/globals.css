@@ -950,6 +950,18 @@ td.last-price-cell {
   flex-shrink: 0;
 }
 
+/* Minimal stale-quote marker: same warning token as .status-dot-stale. */
+.price-stale-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-left: 4px;
+  border-radius: 999px;
+  background: var(--warning);
+  vertical-align: 0.15em;
+  flex-shrink: 0;
+}
+
 .price-trend-up {
   color: var(--positive);
 }
