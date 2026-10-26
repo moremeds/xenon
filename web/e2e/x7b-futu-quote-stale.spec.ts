@@ -1,13 +1,5 @@
 import { expect, test } from "@playwright/test";
 
-// Chromium's multi-process MachPortRendezvousServer bootstrap is denied in
-// the agent sandbox; single-process mode skips registering it.
-test.use({
-  launchOptions: {
-    args: ["--single-process", "--no-zygote", "--in-process-gpu"],
-  },
-});
-
 // X7b browser E2E (contract-x7 / CLAUDE.md rule 2) — no real relay, no IB, no
 // network: a MockWebSocket replays clearly SYNTHETIC Futu-shaped price rows
 // ({source:"futu", stale:boolean, ...}) and records the subscribe frames the
