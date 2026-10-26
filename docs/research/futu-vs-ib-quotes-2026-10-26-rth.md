@@ -9,6 +9,7 @@ Source: `scripts/research/futu_vs_ib_quotes.py` (X7-0, plan v2.1 section D8). Ev
 - Session mode: `rth`; requested minutes: 12.0; IB poll interval: 30.0 s; IB cycles: 25
 - OpenD: `host.docker.internal:11111`; xenon API: `http://127.0.0.1:8321`
 - Raw samples: `output/research/futu-vs-ib-quotes-2026-10-26-rth-101345.jsonl` (gitignored; 26334 book pushes, 22336 quote pushes, 275 IB samples)
+- Provenance: the run executed inside the prod api container (read-only: no orders, no trade context; IB only through the xenon API endpoints). Tables re-rendered offline with `--from-jsonl` from the stored raw file.
 - Units: price gaps are in cents (dollars x 100). "within 1¢" and "within 5¢" are policy tolerance, not the instrument's tick; the instrument and combo price increments were not verified.
 - Matched time: Futu value = latest Futu push with receipt time at or before the IB sample time. IB `last` is not exposed by the IB endpoints, so "Futu last - IB mid" is only a coarse indicator.
 
