@@ -35,7 +35,7 @@ uv run python -m xenon.futu_quotes
 | `FUTU_QUOTES_HOST`     | `0.0.0.0`      | listen address (internal only — not host-published)                                         |
 | `FUTU_QUOTES_PORT`     | `8767`         | listen port                                                                                 |
 | `FUTU_QUOTE_QUOTA`     | `800`          | local admission ceiling cap, in provider quota units                                        |
-| `FUTU_UNITS_PER_SYMBOL`| `2`            | provider units one held symbol costs (paired QUOTE + ORDER_BOOK)                             |
+| `FUTU_UNITS_PER_SYMBOL`| `2`            | provider units charged per held symbol (paired QUOTE + ORDER_BOOK) — conservative policy: X7-0 calibration measured +1/+1 for stocks and no counter movement for US options (PR #249) |
 | `FUTU_BOOK_STALE_S`    | `0`            | ORDER_BOOK receipt-age cutoff in seconds; `0` = age rule off (Amendment A1), positive re-enables |
 | `FUTU_GREEK_FACTORS`   | unset          | JSON per-field multipliers for option greeks/IV; unset or invalid = those fields stay `null` |
 | `FUTU_OPEND_HOST`      | `127.0.0.1`    | Futu OpenD host                                                                             |
@@ -178,8 +178,9 @@ Liveness uses WebSocket protocol ping/pong: ping every 10 s, pong timeout
 ## Quota
 
 Futu subscription quota is checked two ways, all math in provider units
-(one held symbol = `FUTU_UNITS_PER_SYMBOL`, default 2, for the paired
-QUOTE + ORDER_BOOK subscription):
+(one held symbol is charged `FUTU_UNITS_PER_SYMBOL`, default 2, for the
+paired QUOTE + ORDER_BOOK subscription — a conservative policy, not the
+per-kind measurement):
 
 - **Local ceiling**: `min(FUTU_QUOTE_QUOTA, provider own_used + remain)`,
   recomputed from `query_subscription(is_all_conn=True)` on connect/reconnect,
@@ -194,9 +195,10 @@ QUOTE + ORDER_BOOK subscription):
   `view` never takes a slot while a `held` is quota-blocked. When believed
   usage exceeds the ceiling (or a blocked `held` needs a freed slot) a
   still-wanted `view` is marked for release before any `held`; the mark
-  reports `rejected/quota` immediately but the unsubscribe still waits for
-  the 60 s min-lifetime plus 60 s grace, and retracts if pressure resolves
-  first. A `want` promoting the symbol back to `held` cancels the mark.
+  shows `rejected/quota` from the next evaluation but the unsubscribe still
+  waits for the 60 s min-lifetime plus 60 s grace, and retracts if pressure
+  resolves first. A `want` promoting the symbol back to `held` cancels the
+  mark.
 
 To inspect quota directly against OpenD:
 

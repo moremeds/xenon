@@ -9,8 +9,10 @@ Fixtures live in `scripts/infra/ib_realtime/fixtures/futu_quotes/`. All fixture 
 The IB realtime relay holds at most 85 live IB lines (`IB_REALTIME_MAX_LINES`). Argon subscribes to
 about 176 symbols, so the rest only get a snapshot and go stale. Futu OpenD gives quota per
 (symbol, SubType); this account has 1000 units and each served symbol holds one paired
-QUOTE + ORDER_BOOK subscription (`FUTU_UNITS_PER_SYMBOL`, 2 units). The `futu-quotes` service
-streams US stocks/ETFs and US options from OpenD, and the relay serves them to clients that opt in.
+QUOTE + ORDER_BOOK subscription (`FUTU_UNITS_PER_SYMBOL`, default 2 units — a conservative
+policy: X7-0 calibration measured +1/+1 units for a stock's QUOTE/ORDER_BOOK pair and no
+counter movement for US options). The `futu-quotes` service streams US stocks/ETFs and US
+options from OpenD, and the relay serves them to clients that opt in.
 
 ## Who gets Futu
 
@@ -60,9 +62,10 @@ monotonically, and the service ignores any `gen` lower than the last one it saw 
 Symbols are plain tickers, as the relay uses them, or US option relay keys
 `SYM_YYYYMMDD_STRIKE_RIGHT` (the relay's `optionKey` form). The service maps `AAPL` ↔ `US.AAPL`
 and `AAPL_20261030_150_C` ↔ `US.AAPL261030C150000` (underlying `[A-Z][A-Z0-9]*`, ≤3-decimal
-strike). An option key it cannot map is rejected `not_supported` before any OpenD call. Any
-class-share mapping it cannot verify is rejected with `unknown_symbol`. The relay sends option
-keys only when its option routing is on (`XENON_FUTU_OPTIONS`, relay side).
+strike). An option key it cannot map is rejected `not_supported` before any OpenD call —
+that includes a class-share underlying (`BRK.B_...`), which has no verified Futu option
+code. A class-share *ticker* it cannot verify is rejected with `unknown_symbol`. The relay
+sends option keys only when its option routing is on (`XENON_FUTU_OPTIONS`, relay side).
 
 `tiers` is optional. It marks each wanted symbol `held` or `view` for admission priority;
 a symbol missing from the map — or the whole `tiers` key absent or malformed — means `held`.
@@ -98,7 +101,8 @@ the session changes.
 - `pending.reason`: `subscribing` | `session` | `opend_down` | `backoff`.
 - `rejected.reason`: `quota` | `unknown_symbol` | `not_supported` | `provider_error`. A `quota`
   rejection also covers a still-wanted `view` symbol marked for release under quota pressure:
-  it reports `rejected` (the relay should already treat it as unrouted) while the actual
+  the mark is set after that evaluation's partition is built, so it shows `rejected` from the
+  *next* evaluation (the relay should already treat it as unrouted) while the actual
   unsubscribe waits for the subscription rules below. An ORDER_BOOK refusal for a code lands
   in `not_supported`, as does an option key the service cannot map to a Futu code.
 - After `pending` or `rejected`, the relay serves the symbol from IB. The service re-evaluates
@@ -190,7 +194,8 @@ the session changes.
 
 - One paired `SubType.QUOTE` + `SubType.ORDER_BOOK` subscription per symbol, issued as a single
   OpenD subscribe so ownership is atomic: `FUTU_UNITS_PER_SYMBOL` (default 2) provider quota
-  units. A symbol is held only while both subtypes are held in the current OpenD session; if
+  units per symbol — a conservative policy, not a per-kind measurement (see § Why). A symbol is
+  held only while both subtypes are held in the current OpenD session; if
   OpenD refuses ORDER_BOOK for the code the symbol is rejected `not_supported`. No TICKER.
 - Tiers: each wanted symbol is `held` or `view` (`want.tiers`; absent = `held`). `held`
   candidates are evaluated first — when quota does not fit every wanted symbol, `held` takes

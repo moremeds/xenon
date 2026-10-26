@@ -93,6 +93,12 @@ def futu_code(symbol: str) -> str:
 # verified Futu option code (execution/futu_orders.py `futu_code_for`).
 _OPT_KEY_RE = re.compile(r"([A-Z][A-Z0-9]*)_(\d{8})_([0-9]+(?:\.[0-9]+)?)_([CP])")
 
+# Packed option code with a 1–3-digit strike milli part — the sub-$1 range
+# ``futu_to_ib``'s 4–9-digit heuristic does not classify as an option
+# (strike 0.5 packs to ``500``). ``code_for`` produces these for valid
+# relay keys, so a push of one must unpack back to the exact key.
+_OPT_CODE_SHORT_RE = re.compile(r"^US\.([A-Z][A-Z0-9]*)(\d{6})([CP])(\d{1,3})$")
+
 
 def code_for(symbol: str) -> Optional[str]:
     """Relay symbol → Futu code; ``None`` when no Futu code exists.
@@ -135,6 +141,14 @@ def ticker_of(code: str) -> Optional[str]:
         strike = info["strike"]
         strike_s = str(int(strike)) if strike == int(strike) else str(strike)
         return f"{info['symbol']}_{info['expiry']}_{strike_s}_{info['right']}"
+    m = _OPT_CODE_SHORT_RE.match(code)
+    if m is not None:
+        underlying, yymmdd, right, milli = m.groups()
+        month, day = int(yymmdd[2:4]), int(yymmdd[4:6])
+        frac = milli.rjust(3, "0").rstrip("0")
+        if 1 <= month <= 12 and 1 <= day <= 31 and frac:
+            strike_s = f"0.{frac}"  # JS-number form of a sub-$1 strike
+            return f"{underlying}_20{yymmdd}_{strike_s}_{right}"
     return code[3:]
 
 

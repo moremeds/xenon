@@ -531,6 +531,12 @@ class FutuQuotesService:
             self.batcher.clear()
         if session != self.session:
             self.baseline.reset_all()  # first overnight row is a baseline
+            # A1: the stored book top and the RTH quote template are
+            # session-bound — a quiet book must not ride into the next
+            # session (book age rule off by default means nothing else
+            # would ever expire them).
+            self._book.clear()
+            self._last_quote.clear()
         self.session = session
         self.admission.set_session_open(session is not None)
         self.admission.overnight_trade_seen = (
@@ -627,8 +633,12 @@ class FutuQuotesService:
                 continue
             if received_at is None:
                 # RTH row: remember it as the template book pushes rebuild
-                # from, then overlay the fresh book top if we have one.
-                self._last_quote[sym] = (pd, ts)
+                # from — unless an older row arrived inside this coalesce
+                # window, which must not walk the template backwards —
+                # then overlay the fresh book top if we have one.
+                tpl = self._last_quote.get(sym)
+                if tpl is None or ts >= tpl[1]:
+                    self._last_quote[sym] = (pd, ts)
                 self._apply_book(pd, ts)
                 self._apply_option(pd, sym, row)
             self.batcher.enqueue(pd, ts)  # ordering/mark stays on QUOTE ts
@@ -685,14 +695,20 @@ class FutuQuotesService:
             sym = ticker_of(row.get("code"))
             if sym is None:
                 continue
+            if self.session != "rth":
+                continue  # session-bound state: nothing is stored outside RTH
             fields = order_book_top(row)
             self._book[sym] = {"recv": recv, "fields": fields}
-            if self.session != "rth":
-                continue
             base = self._last_quote.get(sym)
             if base is None or not self.admission.is_ok(sym):
                 continue
             pd, quote_ts = base
+            if self.highwater.seen(sym, quote_ts):
+                # The template slipped behind the flushed mark (e.g. the
+                # mark advanced on an overnight receipt): re-emitting it
+                # would publish an older `last` stamped fresh. Skip the
+                # rebuild; the stored top rides the next real quote.
+                continue
             out = dict(pd)
             out.update(fields)
             merged = max(quote_ts, recv)
