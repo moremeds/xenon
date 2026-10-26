@@ -50,7 +50,8 @@ def _compute_futu_health() -> dict[str, Any]:
     pass, `held_rows` its rows held by FUTU_FILL_UNPRICED / FUTU_FILL_CONFLICT /
     FUTU_NOT_OBSERVED; never another account's row. A DB failure leaves the
     fields None. `trading` = {"paper", "live"} booleans
-    (`order_entry.futu_trading_status`).
+    (`order_entry.futu_trading_status`); `capabilities` = per env the allowed
+    `SEC:TYPE:TIF:SESSION` tuples and modify types (`order_entry.futu_capabilities`).
     The account number is not reported (`/health` is unauthenticated).
     """
     from xenon.api import server
@@ -70,6 +71,8 @@ def _compute_futu_health() -> dict[str, Any]:
         # Per env: would a Futu order pass the guard now (X4b hides order
         # actions otherwise). Booleans only, no account number.
         "trading": order_entry.futu_trading_status(),
+        # Per env: what a client may offer (after the operator allowlists).
+        "capabilities": order_entry.futu_capabilities(),
         # Per observed scope; the account number is not reported.
         "scopes": [
             {

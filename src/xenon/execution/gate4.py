@@ -50,6 +50,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -921,7 +922,7 @@ def _accepted_with_netting(inputs: Gate4Inputs, candidate) -> bool:
     return _evaluate(inputs, candidate, netting=True).accept
 
 
-def _legs_for_body_match(legs_payload):
+def _legs_for_body_match(legs_payload, futu_intent: dict | None = None):
     """Project a legs payload onto the request-owned keys (round 5, item 5).
 
     Whitelist, not blacklist: only what the client's body determines in
@@ -935,13 +936,22 @@ def _legs_for_body_match(legs_payload):
     while the open-order mirror stores IB's stock sentinels (right "?",
     strike 0.0) once it owns the leg list (incident row 36). They are not
     request terms, so a STK leg compares on its identity keys only.
+
+    `futu_intent` (FUTU only, X5 § 3): the frozen placement fingerprint
+    (order type, trigger, trail, session). It joins the projection, never
+    the mutable `futu_terms` / observed `futu_order`, so a replay after a
+    confirmed trigger / trail amend still matches the placement and a replay
+    with another type / trigger / trail / session is a body mismatch.
     """
     if not isinstance(legs_payload, dict):
         return legs_payload
     legs = legs_payload.get("legs")
     if isinstance(legs, list):
         legs = [_request_leg(leg) if isinstance(leg, dict) else leg for leg in legs]
-    return {"legs": legs, "guaranteed": legs_payload.get("guaranteed")}
+    out = {"legs": legs, "guaranteed": legs_payload.get("guaranteed")}
+    if futu_intent is not None:
+        out["futu_intent"] = futu_intent
+    return out
 
 
 def _request_leg(leg: dict) -> dict:
@@ -966,8 +976,13 @@ def _may_be_at_ib(m) -> bool:
 
 def _classify_existing(row, request: RequestRow, legs_payload) -> Gate4Outcome:
     m = row._mapping if hasattr(row, "_mapping") else row
-    body_legs = _legs_for_body_match(m["legs"])
-    if not _request_body_matches(_RowView(m, legs=body_legs), request, _legs_for_body_match(legs_payload)):
+    # The stored row's intent (a pre-X5 Xenon FUTU row → the legacy LMT
+    # intent) vs the request's own `futu_intent`; IB rows carry neither.
+    body_legs = _legs_for_body_match(m["legs"], orders_store.futu_intent_of(m))
+    request_intent = legs_payload.get("futu_intent") if isinstance(legs_payload, dict) else None
+    if not _request_body_matches(
+        _RowView(m, legs=body_legs), request, _legs_for_body_match(legs_payload, request_intent)
+    ):
         # Same attempt id, different body. If that attempt may be at IB, the
         # client must not be told to rebuild and resubmit: the id belongs to
         # an existing order and the new terms were never placed (PR-08).
@@ -1431,6 +1446,8 @@ def settle_modify(
     scope: dict,
     new_qty: int | None = None,
     new_limit_price: Decimal | float | str | None = None,
+    new_futu_terms: Mapping[str, Any] | None = None,
+    futu_observed: Mapping[str, Any] | None = None,
 ) -> bool:
     """Resolve one amend generation against the broker reply.
 
@@ -1440,7 +1457,11 @@ def settle_modify(
     one, and a reply after mirror reconciliation never rewrites quantity.
 
     confirmed → quantity becomes new_qty (quantity amends) and limit_price
-                becomes new_limit_price (when given), amend clears.
+                becomes new_limit_price (when given); a Futu amend's confirmed
+                trigger / trail terms replace `legs.futu_terms` (when given;
+                `legs.futu_intent` is never touched); the confirming read
+                (`futu_observed`, `orders_store._futu_order_info`) replaces
+                `legs.futu_order` unless a newer read is stored; amend clears.
     rejected  → the broker provably did not apply the amend, amend clears.
     uncertain → a quantity amend keeps pending_amend_qty + token so coverage
                 keeps reserving max(old,new); a price-only amend clears its
@@ -1465,7 +1486,18 @@ def settle_modify(
             price = _finite_decimal(new_limit_price)
             if price is not None:
                 values["limit_price"] = price
-        _write_payload(conn, submission_id, orders_store._clear_pending(payload), **values)
+        payload = orders_store._clear_pending(payload)
+        if outcome == "confirmed" and new_futu_terms is not None:
+            payload["futu_terms"] = {k: new_futu_terms.get(k) for k in orders_store.FUTU_TERM_KEYS}
+        if (
+            outcome == "confirmed"
+            and futu_observed is not None
+            and orders_store.futu_read_is_newer(payload.get("futu_order"), futu_observed.get("observed_at"), fallback=True)
+        ):
+            # The whole confirming read: unit and values from one read, ordered
+            # by read start against a newer stored observation (PR #244 R2-1/R2-2).
+            payload["futu_order"] = dict(futu_observed)
+        _write_payload(conn, submission_id, payload, **values)
         return True
 
 

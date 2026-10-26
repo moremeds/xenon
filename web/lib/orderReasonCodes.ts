@@ -235,11 +235,35 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
   },
   FUTU_PRICE_PRECISION: {
     severity: "error",
-    copy: "Limit price is off the Futu tick grid.",
+    copy: "Price or trail value has more decimals than Futu accepts — nothing sent.",
   },
   FUTU_ORDER_TYPE_UNSUPPORTED: {
     severity: "error",
-    copy: "This order type is not supported on Futu.",
+    copy: "This order type is not enabled for this Futu account.",
+  },
+  FUTU_TIF_UNSUPPORTED: {
+    severity: "error",
+    copy: "This time in force is not enabled for this order type on Futu.",
+  },
+  FUTU_SESSION_UNSUPPORTED: {
+    severity: "error",
+    copy: "This trading session is not enabled for this order type on Futu.",
+  },
+  FUTU_ORDER_NOT_MODIFIABLE: {
+    severity: "warn",
+    copy: "Futu modify is not available for this order — cancel it instead.",
+  },
+  TRIGGER_WOULD_FIRE: {
+    severity: "error",
+    copy: "Trigger price is on the wrong side of the market — it would fire at once. Nothing sent.",
+  },
+  MKT_SPREAD_TOO_WIDE: {
+    severity: "error",
+    copy: "Market order refused: the spread is too wide. Use a limit order.",
+  },
+  MKT_NOTIONAL_CAP: {
+    severity: "error",
+    copy: "Market order refused: the order value is above the market-order cap. Use a limit order.",
   },
   FUTU_INVALID_ORDER: {
     severity: "error",
