@@ -1590,6 +1590,9 @@ def _futu_intent_mismatch(row, obs: FutuOrderObservation) -> str | None:
     return None
 
 
+_FUTU_OBSERVED_TERMS = ("aux_price", "trail_type", "trail_value", "trail_spread")
+
+
 def _futu_order_info(obs: FutuOrderObservation) -> dict | None:
     """What Futu last reported about the order, stored in the legs payload
     (`futu_order`, observed and mutable; never `futu_intent` / `futu_terms`):
@@ -1673,6 +1676,11 @@ def _futu_state_values(row, obs: FutuOrderObservation, *, fresh: bool, own: bool
             values["state"] = obs.state
     legs = normalize_legs_payload(row.legs)
     info = _futu_order_info(obs)
+    if info is not None and not fresh:
+        # A read that began before the row's last local write (e.g. a
+        # confirmed amend) keeps the stored observed terms (PR #244 F4).
+        prev = legs.get("futu_order") if isinstance(legs.get("futu_order"), dict) else {}
+        info = {**info, **{k: prev.get(k) for k in _FUTU_OBSERVED_TERMS}}
     if row.reason_code == FUTU_NOT_OBSERVED:
         values["reason_code"] = None
     if own:

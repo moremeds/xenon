@@ -531,6 +531,13 @@ def modify_spec(
             )
         session = str(intent.get("session") or DEFAULT_SESSION)
         trail_type = intent.get("trail_type")
+        if order_type in TRAIL_TYPES and ev.trail_type != trail_type:
+            # The omitted trail value is read in the broker's unit: a changed
+            # or unreadable unit would resend it in the placed unit (PR #244 F1).
+            raise FutuOrderRefused(
+                NOT_MODIFIABLE,
+                f"Futu reports trail type {ev.trail_type or 'unknown'}; Xenon placed {trail_type}; cancel instead",
+            )
         missing = ORDER_UNVERIFIED, 503
     else:
         if label is None:
@@ -538,7 +545,16 @@ def modify_spec(
                 NOT_MODIFIABLE, f"Futu order type {ev.futu_order_type!r} of this order cannot be read; cancel instead"
             )
         order_type = label
-        session = ev.session or DEFAULT_SESSION  # N/A: placed without a session (SDK `Session.NONE`)
+        session = ev.session
+        if session is None:
+            # N/A (SDK `Session.NONE`): RTH only when the legacy flag proves the
+            # order cannot fill outside RTH; True or unreported is unknown
+            # (PR #244 F2). Modify sends no session, so a guess would widen it.
+            if ev.fill_outside_rth is not False:
+                raise FutuOrderRefused(
+                    NOT_MODIFIABLE, "the session of this order cannot be read from Futu; cancel instead"
+                )
+            session = DEFAULT_SESSION
         if session not in SESSIONS:
             raise FutuOrderRefused(NOT_MODIFIABLE, f"Futu session {session!r} of this order cannot be read")
         trail_type = ev.trail_type
@@ -606,6 +622,8 @@ def amend_confirmed(spec: FutuOrderSpec, ev: FutuOrderEvidence | None) -> bool:
     if ev is None or ev.qty is None or ev.qty != spec.quantity:
         return False
     t = spec.order_type
+    if ev.order_type != t or (t in TRAIL_TYPES and ev.trail_type != spec.trail_type):
+        return False  # the values of another type or unit are other terms (PR #244 F3)
     return all(
         (
             t not in LIMIT_TYPES or tick_price(spec, ev.price) == spec.limit_price,
@@ -928,6 +946,7 @@ class FutuOrderEvidence:
     trail_spread: Decimal | None = None
     tif: str | None = None
     session: str | None = None
+    fill_outside_rth: bool | None = None  # legacy flag; None when not reported
 
 
 def _evidence(row: dict) -> FutuOrderEvidence | None:
@@ -954,7 +973,14 @@ def _evidence(row: dict) -> FutuOrderEvidence | None:
         trail_spread=_decimal(row.get("trail_spread")),
         tif=_text(row.get("time_in_force")),
         session=_text(row.get("session")),
+        fill_outside_rth=_flag(row.get("fill_outside_rth")),
     )
+
+
+def _flag(value: Any) -> bool | None:
+    """A reported boolean (Python or numpy bool), else None ('N/A', absent).
+    SDK: trade/trade_query.py:393 (`fill_outside_rth`, 'N/A' when unset)."""
+    return bool(value) if type(value).__name__ in ("bool", "bool_") else None
 
 
 def query_order(ctx: Any, *, order_id: str, account_env: str, acc_id: str) -> FutuOrderEvidence | None:

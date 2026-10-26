@@ -175,7 +175,11 @@ the account-scope lock. Nothing is sent when the IB quote is missing (503
 Xenon cannot be read (400 `FUTU_ORDER_NOT_MODIFIABLE`), a quote rule refuses the
 terms (400 with its code), or Gate 4 refuses the outgoing quantity (400 with
 the coverage reason code, or 409 `MODIFY_PENDING`). A refusal before the send
-leaves the row and its reservation as they were.
+leaves the row and its reservation as they were. `FUTU_ORDER_NOT_MODIFIABLE` also
+covers an outside order whose session Futu reports as N/A without
+`fill_outside_rth` = false, and a trailing order whose trail unit (RATIO /
+AMOUNT) in the read differs from the placed unit or is missing: cancel it, or
+fix the order in the app first.
 
 ## 7. Enable a tuple
 

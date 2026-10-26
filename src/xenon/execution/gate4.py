@@ -1486,6 +1486,10 @@ def settle_modify(
         payload = orders_store._clear_pending(payload)
         if outcome == "confirmed" and new_futu_terms is not None:
             payload["futu_terms"] = {k: new_futu_terms.get(k) for k in orders_store.FUTU_TERM_KEYS}
+            if isinstance(payload.get("futu_order"), dict):
+                # The confirming read showed these terms; an observation that
+                # began before this write keeps them (PR #244 F4).
+                payload["futu_order"] = {**payload["futu_order"], **payload["futu_terms"]}
         _write_payload(conn, submission_id, payload, **values)
         return True
 

@@ -400,8 +400,8 @@ def test_a_pre_x5_unknown_xenon_row_binds_only_a_limit_order(futu, booked, bound
 
 
 EXTERNAL = {
-    "STP LMT": {"order_type": "STOP_LIMIT", "price": 511.0, "aux_price": 510.5},
-    "TRAIL": {"order_type": "TRAILING_STOP", "price": 3.0, "trail_type": "RATIO", "trail_value": 1.5},
+    "STP LMT": {"order_type": "STOP_LIMIT", "price": 511.0, "aux_price": 510.5, "session": "RTH"},
+    "TRAIL": {"order_type": "TRAILING_STOP", "price": 3.0, "trail_type": "RATIO", "trail_value": 1.5, "session": "RTH"},
     "OVERNIGHT LMT": {"order_type": "NORMAL", "price": 500.2, "session": "OVERNIGHT"},
 }
 EXT_OID = "8812345678900007777"
