@@ -1076,6 +1076,14 @@ function unsubscribeClientFromSymbol(client, symbol) {
     clientSet.delete(symbol);
   }
   clientRoutes.get(client)?.delete(symbol);
+  // Drop the stale-flip marker for this (client, symbol) — the mark belongs to
+  // the subscription, and a browsing session must not retain one entry per
+  // symbol it ever visited. Drop the per-client map once it empties.
+  const served = futuStaleServed.get(client);
+  if (served) {
+    served.delete(symbol);
+    if (served.size === 0) futuStaleServed.delete(client);
+  }
   reconcileFutuRoutes(); // want set and IB demand may have changed
 
   return unsubscribed;

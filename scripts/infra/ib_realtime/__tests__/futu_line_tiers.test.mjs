@@ -297,3 +297,65 @@ test("subscribe path: incoming view on a full held budget gets no line", () => {
     "line count stays at budget — no over-subscribe",
   );
 });
+
+// R2-3: the per-client stale-flip marker belongs to the subscription — an
+// unsubscribe must drop that (client, symbol) entry and the empty map, not
+// leave one entry per symbol the session ever browsed.
+test("unsubscribe clears the client's stale marker for that symbol only", () => {
+  const ctx = {
+    symbolSubscribers: new Map([["SYM", new Set(["c"])]]),
+    subscriberTiers: new Map([["SYM", new Map([["c", "held"]])]]),
+    symbolStates: new Map([["SYM", { contract: {}, tickerId: 1, data: {} }]]),
+    clientSymbols: new Map([["c", new Set(["SYM"])]]),
+    clientRoutes: new Map([["c", new Map([["SYM", "futu"]])]]),
+    futuStaleServed: new Map([
+      ["c", new Map([["SYM", "ts1"], ["OTHER", "ts2"]])],
+    ]),
+    stopLiveSubscription() {},
+    admitPendingLine() {
+      return false;
+    },
+    reconcileFutuRoutes() {},
+  };
+  vm.createContext(ctx);
+  vm.runInContext(
+    `${extract("unsubscribeClientFromSymbol")}\nunsubscribeClientFromSymbol("c", "SYM");`,
+    ctx,
+  );
+  assert.equal(
+    ctx.futuStaleServed.get("c")?.has("SYM"),
+    false,
+    "unsubscribed symbol marker cleared",
+  );
+  assert.equal(
+    ctx.futuStaleServed.get("c")?.get("OTHER"),
+    "ts2",
+    "other symbols' markers kept",
+  );
+});
+
+test("unsubscribe drops the empty per-client stale marker map", () => {
+  const ctx = {
+    symbolSubscribers: new Map([["SYM", new Set(["c"])]]),
+    subscriberTiers: new Map([["SYM", new Map([["c", "held"]])]]),
+    symbolStates: new Map([["SYM", { contract: {}, tickerId: 1, data: {} }]]),
+    clientSymbols: new Map([["c", new Set(["SYM"])]]),
+    clientRoutes: new Map([["c", new Map([["SYM", "futu"]])]]),
+    futuStaleServed: new Map([["c", new Map([["SYM", "ts1"]])]]),
+    stopLiveSubscription() {},
+    admitPendingLine() {
+      return false;
+    },
+    reconcileFutuRoutes() {},
+  };
+  vm.createContext(ctx);
+  vm.runInContext(
+    `${extract("unsubscribeClientFromSymbol")}\nunsubscribeClientFromSymbol("c", "SYM");`,
+    ctx,
+  );
+  assert.equal(
+    ctx.futuStaleServed.has("c"),
+    false,
+    "empty per-client map removed",
+  );
+});
