@@ -8,7 +8,6 @@ read at call time.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import json
 import logging
 import os
@@ -631,17 +630,15 @@ def _quote_payload_from_snapshot(ticker: str, con_id: int, snap: dict) -> QuoteP
     )
 
 
-async def _validate_non_combo_quote(body: dict) -> tuple[quote_guard.QuoteVerdict, int]:
-    ticker = str(body.get("symbol", "")).upper()
-    security_type = "STK" if body.get("type") == "stock" else "OPT"
-    action = str(body.get("action", "")).upper()
-    limit_price = Decimal(str(body.get("limitPrice", "0")))
-    now = _now()
+_QUOTE_TERM_FIELDS = ("order_type", "quantity", "limit_price", "aux_price", "trail_type", "trail_value", "trail_spread")
 
-    market = quote_guard.check_market_hours(security_type=security_type, now=now)
-    if not market.accept:
-        return market, 400
 
+async def _quote_payload_for(
+    body: dict,
+) -> tuple[QuotePayload | None, int, quote_guard.QuoteVerdict | None, int]:
+    """The IB quote of a single-leg body: a verified quote token, else a fresh
+    snapshot. `(payload, con_id, None, 0)`, or `(None, 0, refusal, status)`
+    (a bad token, or no IB quote: QUOTE_UNAVAILABLE)."""
     payload: QuotePayload | None = None
     token = body.get("quote_token")
     if token:
@@ -655,6 +652,8 @@ async def _validate_non_combo_quote(body: dict) -> tuple[quote_guard.QuoteVerdic
             payload = None
         except quote_tokens.QuoteTokenInvalid as exc:
             return (
+                None,
+                0,
                 quote_guard.QuoteVerdict(
                     accept=False,
                     reason_code=ReasonCode.STALE_QUOTE,
@@ -664,47 +663,63 @@ async def _validate_non_combo_quote(body: dict) -> tuple[quote_guard.QuoteVerdic
             )
 
     con_id = int(body.get("con_id") or 0)
-    if payload is not None and body.get("type") == "option" and con_id <= 0:
-        try:
+    try:
+        if payload is not None and body.get("type") == "option" and con_id <= 0:
             con_id = await _qualify_order_con_id(body)
-        except HTTPException as exc:
-            return (
-                quote_guard.QuoteVerdict(
-                    accept=False,
-                    reason_code=ReasonCode.QUOTE_UNAVAILABLE,
-                    reason_detail=str(exc.detail),
-                ),
-                exc.status_code if exc.status_code >= 500 else 400,
-            )
-
-    if payload is None:
-        try:
+        if payload is None:
             con_id, snap = await _fetch_order_quote_snapshot(body)
-        except HTTPException as exc:
-            return (
-                quote_guard.QuoteVerdict(
-                    accept=False,
-                    reason_code=ReasonCode.QUOTE_UNAVAILABLE,
-                    reason_detail=str(exc.detail),
-                ),
-                exc.status_code if exc.status_code >= 500 else 400,
-            )
-        payload = _quote_payload_from_snapshot(ticker, con_id, snap)
+            payload = _quote_payload_from_snapshot(str(body.get("symbol", "")), con_id, snap)
+    except HTTPException as exc:
+        return (
+            None,
+            0,
+            quote_guard.QuoteVerdict(
+                accept=False,
+                reason_code=ReasonCode.QUOTE_UNAVAILABLE,
+                reason_detail=str(exc.detail),
+            ),
+            exc.status_code if exc.status_code >= 500 else 400,
+        )
+    return payload, con_id or payload.con_id, None, 0
 
-    expected_con_id = con_id or payload.con_id
-    return (
-        quote_guard.check_payload(
-            payload=payload,
-            con_id=expected_con_id,
-            ticker=ticker,
-            security_type=security_type,
-            action=action,
-            limit_price=limit_price,
-            now=now,
-            tick_rule_lookup=_tick_rule_cache.get,
-        ),
-        400,
+
+def _quote_failures(
+    payload: QuotePayload, con_id: int, ticker: str, security_type: str, action: str, terms: dict
+) -> list[quote_guard.QuoteVerdict]:
+    """The per-type IB quote refusals of full order terms (`_QUOTE_TERM_FIELDS`),
+    [] = pass. Shared by place (`_quote_gate`) and the Futu modify core."""
+    return quote_guard.check_terms(
+        payload=payload,
+        con_id=con_id,
+        ticker=ticker.upper(),
+        security_type=security_type,
+        action=action,
+        now=_now(),
+        tick_rule_lookup=_tick_rule_cache.get,
+        mkt_notional_cap=quote_guard.mkt_notional_cap(),
+        **terms,
     )
+
+
+async def _validate_non_combo_quote(body: dict, futu_spec: Any = None) -> tuple[list[quote_guard.QuoteVerdict], int]:
+    """Quote refusals of a single-leg place body ([] = pass) and their HTTP
+    status. An IB body is LMT; a FUTU body brings its checked spec, whose
+    type picks the rule (`quote_guard.check_terms`)."""
+    ticker = str(body.get("symbol", "")).upper()
+    security_type = "STK" if body.get("type") == "stock" else "OPT"
+    action = str(body.get("action", "")).upper()
+    if futu_spec is None:
+        terms = {"order_type": "LMT", "limit_price": Decimal(str(body.get("limitPrice", "0")))}
+    else:
+        terms = {f: getattr(futu_spec, f) for f in _QUOTE_TERM_FIELDS}
+
+    market = quote_guard.check_market_hours(security_type=security_type, now=_now())
+    if not market.accept:
+        return [market], 400
+    payload, con_id, refusal, status = await _quote_payload_for(body)
+    if refusal is not None:
+        return [refusal], status
+    return _quote_failures(payload, con_id, ticker, security_type, action, terms), 400
 
 
 def _gate4_leg_specs(body: dict) -> list[dict]:
@@ -854,6 +869,11 @@ async def _prepare_place(body: dict, scope: dict | None = None):
             status_code=400,
             content={"detail": "client_attempt_id is required"},
         )
+    futu = scope is not None
+    if not futu:
+        refused = _ib_body_refusal(body)
+        if refused is not None:
+            return _preflight_block_response(_invalid_order_body_response(ValueError(refused)))
     scope = scope or _resolve_scope_kwargs()
     security_type = "STK" if body.get("type") == "stock" else "BAG" if body.get("type") == "combo" else "OPT"
     ticker = str(body.get("symbol", "")).upper()
@@ -861,6 +881,11 @@ async def _prepare_place(body: dict, scope: dict | None = None):
         # One canonical TIF for the reservation, the stored column and the
         # place CLI (PR-03b round 7). Unknown values fail before reserving.
         tif = _canonical_tif(body.get("tif"))
+        # No "0" default: IB always needs a price; a FUTU body without one
+        # is a no-limit type (its fields were checked against the type).
+        limit = body.get("limitPrice")
+        if limit is None and not futu:
+            raise ValueError("limitPrice is required")
         body["tif"] = tif
         req_row = orders_store.RequestRow(
             ticker=ticker,
@@ -875,7 +900,7 @@ async def _prepare_place(body: dict, scope: dict | None = None):
             # share-cover math).
             multiplier=gate4.server_multiplier(ticker),
             con_id=int(body.get("con_id") or 0) or None,
-            limit_price=Decimal(str(body.get("limitPrice", "0"))),
+            limit_price=Decimal(str(limit)) if limit is not None else None,
             tif=tif,
         )
     except (ValueError, TypeError, ValidationError) as exc:
@@ -883,6 +908,33 @@ async def _prepare_place(body: dict, scope: dict | None = None):
     leg_meta = await _resolve_gate4_leg_meta(body) if gate4.needs_contract_meta(body) else None
     candidate, legs_payload = gate4.candidate_from_place_body(body, scope["broker_account"], leg_meta)
     return cid, req_row, candidate, legs_payload, scope
+
+
+# Place-body fields of the Futu order types (X5 § 1). IB stays LMT only.
+_FUTU_ONLY_FIELDS = ("auxPrice", "trailType", "trailValue", "trailSpread", "session")
+
+
+def _order_label(raw: Any) -> str:
+    """Wire `orderType` → Xenon label (whitespace collapsed, upper); absent → LMT."""
+    if raw is None:
+        return "LMT"
+    if not isinstance(raw, str):
+        raise ValueError("orderType must be a string")
+    return " ".join(raw.split()).upper()
+
+
+def _ib_body_refusal(body: dict) -> str | None:
+    """Why an IB place body is refused before any IO: an `orderType` other
+    than LMT or any Futu-only field is a 400, never stripped (X5 § 1)."""
+    try:
+        if _order_label(body.get("orderType")) != "LMT":
+            return "IB orders are limit orders only (orderType LMT)"
+    except ValueError as exc:
+        return str(exc)
+    extra = [k for k in _FUTU_ONLY_FIELDS if body.get(k) is not None]
+    if extra:
+        return f"IB orders take no {', '.join(extra)}"
+    return None
 
 
 def _reservation_refusal(outcome, cid: str, *, replacement: bool) -> JSONResponse | dict | None:
@@ -979,40 +1031,48 @@ def _reservation_refusal(outcome, cid: str, *, replacement: bool) -> JSONRespons
     return None
 
 
-async def _quote_gate(body: dict, submission_id: str) -> JSONResponse | None:
+async def _quote_gate(body: dict, submission_id: str, futu_spec: Any = None) -> JSONResponse | None:
     """F3: quote-token + tick-grid + limit-band + market-hours (IB quotes,
-    for IB and FUTU orders alike). Runs AFTER the reservation so a Gate-4
-    coverage reason always wins over a quote failure; a quote rejection marks
-    the row REJECTED so the reservation releases its cover instead of
-    leaking a PENDING row. None = pass."""
+    for IB and FUTU orders alike; a FUTU order's type picks its rule, X5 § 4).
+    Runs AFTER the reservation so a Gate-4 coverage reason always wins over a
+    quote failure; a quote rejection marks the row REJECTED so the
+    reservation releases its cover instead of leaking a PENDING row. An
+    `acknowledge_limit_override` accepts only overridable refusals
+    (`quote_guard.overridable`), audited as PREFLIGHT_ACK_LIMIT with the
+    FUTU intent fields. None = pass."""
+    _override_detail = None
     if body.get("type") != "combo":
-        qv, quote_status = await _validate_non_combo_quote(body)
-        _override_detail = None
-        if not qv.accept:
-            if qv.reason_code == ReasonCode.LIMIT_OUT_OF_BAND and body.get("acknowledge_limit_override") is True:
-                _override_detail = {
+        failures, quote_status = await _validate_non_combo_quote(body, futu_spec)
+        order_type = futu_spec.order_type if futu_spec is not None else "LMT"
+        hard = [f for f in failures if not quote_guard.overridable(order_type, f)]
+        if failures and not hard and body.get("acknowledge_limit_override") is True:
+            _override_detail = {
+                "reason_detail": "; ".join(f.reason_detail or "" for f in failures),
+                "limit_price": body.get("limitPrice"),
+            }
+            if futu_spec is not None:
+                from xenon.execution import futu_orders
+
+                _override_detail["reason_codes"] = [f.reason_code.value for f in failures if f.reason_code]
+                _override_detail["futu_intent"] = futu_orders.intent_for(futu_spec)
+        elif failures:
+            qv = (hard or failures)[0]
+            orders_store.mark_terminal(
+                submission_id=submission_id,
+                state="REJECTED",
+                reason_code=qv.reason_code.value if qv.reason_code else "QUOTE_REJECT",
+                filled_qty=0,
+                avg_fill_price=None,
+                expected_states=("PENDING",),
+            )
+            return JSONResponse(
+                status_code=quote_status,
+                content={
+                    "detail": qv.reason_detail,
+                    "reason_code": qv.reason_code.value if qv.reason_code else None,
                     "reason_detail": qv.reason_detail,
-                    "limit_price": body.get("limitPrice"),
-                }
-            else:
-                orders_store.mark_terminal(
-                    submission_id=submission_id,
-                    state="REJECTED",
-                    reason_code=qv.reason_code.value if qv.reason_code else "QUOTE_REJECT",
-                    filled_qty=0,
-                    avg_fill_price=None,
-                    expected_states=("PENDING",),
-                )
-                return JSONResponse(
-                    status_code=quote_status,
-                    content={
-                        "detail": qv.reason_detail,
-                        "reason_code": qv.reason_code.value if qv.reason_code else None,
-                        "reason_detail": qv.reason_detail,
-                    },
-                )
-    else:
-        _override_detail = None
+                },
+            )
 
     if _override_detail is not None:
         orders_store.record_event(submission_id, "PREFLIGHT_ACK_LIMIT", _override_detail)
@@ -2094,6 +2154,24 @@ def _futu_guard(kind: str, broker: str, op: str | None, account_env: str | None)
     return scope, None
 
 
+def futu_capabilities() -> dict[str, dict[str, list[str]]]:
+    """/health `futu.capabilities[env]`: the env's allowed place tuples
+    (`SEC:TYPE:TIF:SESSION`, after the operator allowlist) and the order
+    types whose modify is on and that the env can hold (contract § Order
+    types). Clients offer only these; `trading` says whether the env is on."""
+    from xenon.execution import futu_orders, futu_scope
+
+    out: dict[str, dict[str, list[str]]] = {}
+    for env in futu_scope.ACCOUNT_ENVS:
+        tuples = futu_orders.allowed_tuples(env)
+        types = {t[1] for t in tuples}
+        out[env] = {
+            "tuples": sorted(":".join(t) for t in tuples),
+            "modify": sorted(t for t in futu_orders.modify_types() if t in types),
+        }
+    return out
+
+
 def futu_trading_status() -> dict[str, bool]:
     """/health `futu.trading`: per env, would a Futu place pass the guard?
     True only when not read-only, the Futu order worker runs, the env is in
@@ -2220,17 +2298,38 @@ def _futu_spec(body: dict):
     quantity = body.get("quantity")
     if isinstance(quantity, bool) or not isinstance(quantity, int):
         raise futu_orders.FutuOrderRefused(futu_orders.INVALID_ORDER, "quantity must be a whole number")
+    tif, session, trail_type = body.get("tif"), body.get("session"), body.get("trailType")
+    for name, value in (("tif", tif), ("session", session), ("trailType", trail_type)):
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{name} must be a string")
     return futu_orders.FutuOrderSpec(
         sec_type=sec,
         symbol=str(body.get("symbol", "")).upper(),
         action=str(body.get("action", "")).upper(),
         quantity=quantity,
-        limit_price=Decimal(str(body.get("limitPrice"))),
-        tif=body.get("tif") or "DAY",
+        limit_price=_body_decimal(body, "limitPrice"),
+        order_type=_order_label(body.get("orderType")),
+        tif=(tif or "DAY").strip().upper() or "DAY",
         expiry=_normalize_gate_expiry(body.get("expiry")) if sec == "OPT" else None,
         right=((body.get("right") or "").upper() or None) if sec == "OPT" else None,
         strike=Decimal(str(body["strike"])) if sec == "OPT" and body.get("strike") is not None else None,
+        session=(session or futu_orders.DEFAULT_SESSION).strip().upper() or futu_orders.DEFAULT_SESSION,
+        aux_price=_body_decimal(body, "auxPrice"),
+        trail_type=trail_type.strip().upper() if trail_type is not None else None,
+        trail_value=_body_decimal(body, "trailValue"),
+        trail_spread=_body_decimal(body, "trailSpread"),
     )
+
+
+def _body_decimal(body: dict, key: str) -> Decimal | None:
+    """A numeric body field as Decimal (None when absent); raises ValueError /
+    InvalidOperation for a non-number. Range and precision: `check_spec`."""
+    value = body.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
+        raise ValueError(f"{key} must be a number")
+    return Decimal(str(value))
 
 
 def _futu_refusal_response(exc) -> JSONResponse:
@@ -2247,25 +2346,37 @@ async def _futu_place(body: dict, broker: str, account_env: str | None):
     scope, refusal = _futu_guard("order placement", broker, op, account_env)
     if refusal is not None:
         return refusal
-    prep = await _prepare_place(body, scope.as_dict())
-    if isinstance(prep, JSONResponse):
-        return prep
-    cid, req_row, candidate, legs_payload, scope_d = prep
-    # Refuse what the adapter would refuse before a row is reserved.
+    # Body and allowed tuple before any IO and before a row is reserved:
+    # the fields of the type (required / absent → INVALID_ORDER_BODY), then
+    # everything the adapter would refuse (tuple, precision, code).
     try:
         spec = _futu_spec(body)
-        code = futu_orders.futu_code_for(spec)
-        futu_orders.checked_price(spec, spec.limit_price)
+        missing_or_extra = futu_orders.field_error(spec)
+        if missing_or_extra is not None:
+            raise ValueError(missing_or_extra)
+        code = futu_orders.check_spec(spec, scope.account_env).code
     except futu_orders.FutuOrderRefused as exc:
         return _futu_refusal_response(exc)
     except (ValueError, TypeError, InvalidOperation) as exc:
         return _preflight_block_response(_invalid_order_body_response(exc))
+    prep = await _prepare_place(body, scope.as_dict())
+    if isinstance(prep, JSONResponse):
+        return prep
+    cid, req_row, candidate, legs_payload, scope_d = prep
+    # The placement intent is request-owned and frozen; it is written in the
+    # same transaction as the reservation (gate-4 identity + remark bind).
+    intent = futu_orders.intent_for(spec)
     outcome = gate4.reserve_with_coverage(
         "local",
         cid,
         req_row,
         candidate=candidate,
-        legs_payload={**legs_payload, "futu_code": code},
+        legs_payload={
+            **legs_payload,
+            "futu_code": code,
+            "futu_intent": intent,
+            "futu_terms": futu_orders.terms_for(intent),
+        },
         scope=scope_d,
         override_audit=None,
     )
@@ -2273,7 +2384,7 @@ async def _futu_place(body: dict, broker: str, account_env: str | None):
     if refusal is not None:
         return refusal
     submission_id = outcome.submission_id
-    refusal = await _quote_gate(body, submission_id)
+    refusal = await _quote_gate(body, submission_id, futu_spec=spec)
     if refusal is not None:
         return refusal
     return await _futu_place_reserved(spec, code, submission_id, scope)
@@ -2574,6 +2685,39 @@ FUTU_ORDER_UNVERIFIED = "FUTU_ORDER_UNVERIFIED"
 FUTU_ORDER_NOT_WORKING = "FUTU_ORDER_NOT_WORKING"
 
 
+# Modify body field → FutuOrderSpec term (contract § Modify).
+_FUTU_AMEND_FIELDS = {
+    "limit_price": "newPrice",
+    "aux_price": "newAuxPrice",
+    "trail_value": "newTrailValue",
+    "trail_spread": "newTrailSpread",
+}
+
+
+async def _futu_modify_quote(spec: Any) -> tuple[Any, Any]:
+    """Fetch the IB quote of a Futu order's contract before the worker job.
+    Returns `(check, None)`, where `check(full_spec)` lists the place quote
+    refusals of the full outgoing terms (`_quote_failures`), or
+    `(None, refusal)`: no IB quote → 503 QUOTE_UNAVAILABLE, nothing sent."""
+    quote_body = {
+        "type": "stock" if spec.sec_type == "STK" else "option",
+        "symbol": spec.symbol,
+        "expiry": spec.expiry,
+        "strike": spec.strike,
+        "right": spec.right,
+    }
+    payload, con_id, refusal, status = await _quote_payload_for(quote_body)
+    if refusal is not None:
+        code = refusal.reason_code.value if refusal.reason_code else ReasonCode.QUOTE_UNAVAILABLE.value
+        return None, order_error(status, code, {"message": refusal.reason_detail, "http_status": status})
+
+    def check(full: Any) -> list:
+        terms = {f: getattr(full, f) for f in _QUOTE_TERM_FIELDS}
+        return _quote_failures(payload, con_id, full.symbol, full.sec_type, full.action, terms)
+
+    return check, None
+
+
 def _futu_unsent(message: str, reason_code: str, http_status: int, exc: Exception | None = None) -> dict:
     """A refusal on the worker before any send (nothing was sent)."""
     if exc is not None:
@@ -2606,33 +2750,68 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
     if refusal is not None:
         return refusal
     order_id, submission_id = row["broker_order_id"], row["submission_id"]
-    new_price, new_quantity = body.get("newPrice"), body.get("newQuantity")
+    new_quantity = body.get("newQuantity")
     try:
-        if new_price is None and new_quantity is None:
-            raise ValueError("newPrice or newQuantity is required")
+        if all(body.get(k) is None for k in ("newQuantity", *_FUTU_AMEND_FIELDS.values())):
+            raise ValueError(f"one of newQuantity, {', '.join(_FUTU_AMEND_FIELDS.values())} is required")
         if new_quantity is not None and (isinstance(new_quantity, bool) or int(new_quantity) != new_quantity):
             raise ValueError("newQuantity must be a whole number")
         if new_quantity is not None and int(new_quantity) < 1:
             raise ValueError("newQuantity must be at least 1")
         expiry = row.get("expiry")
-        # Identity from the row; quantity / price are set on the worker from
-        # the request, else from a fresh read of the order (never the row).
+        # Placement intent of a Xenon order (a pre-X5 Xenon row → LMT / RTH);
+        # None for an order made outside Xenon: its type, session and terms
+        # come from the fresh read on the worker, never a guess (R2-2).
+        intent = orders_store.futu_intent_of(row)
+        # Identity from the row; type / session from the intent; quantity,
+        # limit and terms are set on the worker from the request, else from a
+        # fresh read of the order (never the row).
         base_spec = futu_orders.FutuOrderSpec(
             sec_type=row["security_type"],
             symbol=row["ticker"],
             action=row["action"],
             quantity=1,
-            limit_price=Decimal(1),
+            limit_price=None,
+            order_type=str(intent["order_type"]) if intent else "LMT",
             tif=row.get("tif") or "DAY",
             expiry=expiry.strftime("%Y%m%d") if expiry is not None else None,
             right=row.get("right"),
             strike=Decimal(str(row["strike"])) if row.get("strike") is not None else None,
+            session=str(intent.get("session") or futu_orders.DEFAULT_SESSION)
+            if intent
+            else futu_orders.DEFAULT_SESSION,
+            trail_type=intent.get("trail_type") if intent else None,
         )
-        req_price = futu_orders.checked_price(base_spec, Decimal(str(new_price))) if new_price is not None else None
+        amend = {term: _body_decimal(body, key) for term, key in _FUTU_AMEND_FIELDS.items()}
+        if intent is not None:
+            # The order's tuple must still be allowed for modify in this env
+            # (an upgrade can withdraw it, e.g. paper GTC); cancel stays
+            # available. An outside order is checked after the fresh read.
+            refusal = futu_orders.allowed(
+                scope.account_env,
+                base_spec.sec_type,
+                base_spec.order_type,
+                base_spec.tif,
+                base_spec.session,
+                op="modify",
+            )
+            if refusal is not None:
+                raise futu_orders.FutuOrderRefused(*refusal)
+            # Fields of the type and their precision before any IO; an
+            # outside order's type is known after the fresh read
+            # (`modify_spec` runs the same check there).
+            amend = futu_orders.checked_amend(base_spec, **amend)
+        elif amend["limit_price"] is not None:
+            amend["limit_price"] = futu_orders.checked_price(base_spec, amend["limit_price"])
     except futu_orders.FutuOrderRefused as exc:
         return order_error(exc.http_status, exc.reason_code, {"message": str(exc), "http_status": exc.http_status})
     except (ValueError, TypeError, InvalidOperation) as exc:
         return order_error(400, ReasonCode.INVALID_ORDER_BODY.value, {"message": str(exc), "http_status": 400})
+    # The IB quote the full outgoing terms are judged against (contract
+    # § Modify); IB down → nothing is sent and the sequence is not used.
+    quote_check, refusal = await _futu_modify_quote(base_spec)
+    if refusal is not None:
+        return refusal
     applied, current = _futu_apply_sequence(submission_id, sequence)
     if not applied:
         return order_error(
@@ -2655,23 +2834,43 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
                 raise _SendWindowClosed()
             mark_sent()
 
-        # Fresh read of this order before the send: Futu modify sends both
-        # quantity and price, so an omitted field takes the broker's current
-        # value (the user may have changed it in the Futu app). No usable
-        # read → nothing is sent.
+        # Fresh read of this order before the send: Futu modify sends the
+        # full terms, so an omitted field takes the broker's current value
+        # (the user may have changed it in the Futu app). No usable read →
+        # nothing is sent.
         try:
             cur = futu_orders.query_order(
                 ctx, order_id=order_id, account_env=scope.account_env, acc_id=scope.broker_account
             )
         except futu_orders.FutuReadFailed as exc:
             return _futu_unsent("Futu order read failed; nothing was sent", FUTU_ORDER_UNVERIFIED, 503, exc)
-        cur_price = futu_orders.tick_price(base_spec, cur.price) if cur is not None else None
-        if cur is None or cur.qty is None or cur.qty != cur.qty.to_integral_value() or cur_price is None:
+        if cur is None:
             return _futu_unsent("Futu did not report this order; nothing was sent", FUTU_ORDER_UNVERIFIED, 503)
         if cur.state in futu_orders.TERMINAL_STATES:
             return _futu_unsent(f"Futu reports the order {cur.state}; nothing was sent", FUTU_ORDER_NOT_WORKING, 409)
-        quantity = qty_amend if qty_amend is not None else int(cur.qty)
-        price = req_price if req_price is not None else cur_price
+        # Full outgoing terms: type / session from the intent (an outside
+        # order: from this read); quantity, limit, trigger and trail from the
+        # request, else the read; no limit for no-limit types.
+        try:
+            spec = futu_orders.modify_spec(base_spec, cur, intent=intent, quantity=qty_amend, **amend)
+            refusal = futu_orders.allowed(
+                scope.account_env, spec.sec_type, spec.order_type, spec.tif, spec.session, op="modify"
+            )
+            if refusal is not None:
+                raise futu_orders.FutuOrderRefused(*refusal)
+        except futu_orders.FutuOrderRefused as exc:
+            return _futu_unsent(str(exc), exc.reason_code, exc.http_status)
+        # The place quote rules of the type on the full outgoing terms (also
+        # an omitted field changed in the Futu app). Modify takes no
+        # override; a refusal sends nothing and opens no amend, so the
+        # reservation is untouched.
+        failures = quote_check(spec)
+        if failures:
+            qv = failures[0]
+            code = qv.reason_code.value if qv.reason_code else ReasonCode.QUOTE_UNAVAILABLE.value
+            return _futu_unsent(qv.reason_detail or "IB quote check refused the change", code, 400)
+        quantity, price = spec.quantity, spec.limit_price
+        gen["spec"] = spec
         # Gate 4 reserves the full outgoing quantity under the scope lock,
         # also for a price-only modify: pending_amend_qty pins max(old, new)
         # until settle, so an observation cannot lower the reservation
@@ -2695,7 +2894,7 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
         try:
             res = futu_orders.modify(
                 ctx,
-                dataclasses.replace(base_spec, quantity=quantity, limit_price=price),
+                spec,
                 order_id=order_id,
                 account_env=scope.account_env,
                 acc_id=scope.broker_account,
@@ -2723,6 +2922,7 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
             "price": ev.price if ev is not None else None,
             "sent_qty": quantity,
             "sent_price": price,
+            "terms_match": futu_orders.amend_confirmed(spec, ev),
         }
 
     def finish(reply: dict) -> Any:
@@ -2747,19 +2947,27 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
                     scope_d,
                 )
             return _futu_manage_error(reply, "modify", applied_sequence=sequence)
-        got_qty, sent_qty, sent_price = reply.get("qty"), reply["sent_qty"], reply["sent_price"]
-        # Same tick on the price grid (a sub-dollar stock tick is 0.0001), never a tolerance.
-        confirmed = (
-            got_qty is not None
-            and got_qty == sent_qty
-            and futu_orders.tick_price(base_spec, reply.get("price")) == sent_price
-        )
+        sent_qty, sent_price = reply["sent_qty"], reply["sent_price"]
+        # Every sent field on its own grid (`futu_orders.amend_confirmed`),
+        # never a tolerance and never a derived broker price.
+        confirmed = reply.get("terms_match") is True
         # Settle only on fresh evidence of the new terms; otherwise the
         # amend stays uncertain and keeps max(old, outgoing) until an
         # operator resolves it (runbook § 5).
         if confirmed:
+            from xenon.api.services import futu_observation
+
+            read_at = reply.get("read_at")
+            obs = futu_observation.observation_from_row(reply["row"], scope, read_at) if reply.get("row") else None
             gate4.settle_modify(
-                submission_id, gen.get("amend_id"), "confirmed", scope_d, new_qty=sent_qty, new_limit_price=sent_price
+                submission_id,
+                gen.get("amend_id"),
+                "confirmed",
+                scope_d,
+                new_qty=sent_qty,
+                new_limit_price=sent_price,
+                new_futu_terms=futu_orders.terms_for(futu_orders.intent_for(gen["spec"])),
+                futu_observed=orders_store._futu_order_info(obs, read_at) if obs is not None else None,
             )
         else:
             gate4.settle_modify(submission_id, gen.get("amend_id"), "uncertain", scope_d)
@@ -2769,7 +2977,7 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
             "brokerOrderId": order_id,
             "confirmed": confirmed,
             "confirmedQuantity": int(sent_qty) if confirmed else None,
-            "confirmedPrice": str(sent_price) if confirmed else None,
+            "confirmedPrice": str(sent_price) if confirmed and sent_price is not None else None,
             "applied_sequence": sequence,
             "message": "Modify confirmed by Futu"
             if confirmed

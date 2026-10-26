@@ -138,6 +138,12 @@ def _decimal(value: Any) -> Decimal | None:
         return None
 
 
+def _nonneg_decimal(value: Any) -> Decimal | None:
+    """Like `_decimal`, but 0 stays 0 (a trail spread of 0 = limit at the trigger)."""
+    f = _num(value)
+    return Decimal(str(f)) if f is not None and f >= 0 else None
+
+
 def _rows(data: Any) -> list[dict]:
     if data is None:
         return []
@@ -331,6 +337,11 @@ def _order_observation(
         leg = coverage.Leg(action="BUY", sym=inst["sym"], sec="STK", ratio=1)
         legs = gate4.legs_payload_for(legs=[leg], guaranteed=None, account=scope.broker_account)
         meta = None
+    order_type = _text(row.get("order_type"))
+    label = orders_store.FUTU_ORDER_LABELS.get(order_type or "")
+    # A type without a fixed user limit (MKT, STP, MIT, TRAIL, TRAIL LIMIT):
+    # Futu's `price` is an SDK placeholder, never stored as a limit (X5 § 3).
+    has_limit = label is None or label in orders_store.FUTU_LIMIT_LABELS
     return orders_store.FutuOrderObservation(
         order_id=_text(row.get("order_id")),
         remark=_text(row.get("remark")),
@@ -338,7 +349,7 @@ def _order_observation(
         security_type=inst["sec"],
         action=action,
         quantity=qty,
-        limit_price=_decimal(row.get("price")),
+        limit_price=_decimal(row.get("price")) if has_limit else None,
         state=FUTU_STATUS_TO_STATE.get(status, "UNKNOWN"),
         legs=legs,
         dealt_qty=dealt,
@@ -351,9 +362,13 @@ def _order_observation(
         right=inst.get("right"),
         expiry=inst.get("exp"),
         con_id=meta["con_id"] if meta else None,
-        order_type=_text(row.get("order_type")),
+        order_type=order_type,
         tif=_text(row.get("time_in_force")),
         aux_price=_decimal(row.get("aux_price")),
+        trail_type=_text(row.get("trail_type")),
+        trail_value=_decimal(row.get("trail_value")),
+        trail_spread=_nonneg_decimal(row.get("trail_spread")),
+        session=_text(row.get("session")),
         futu_status=status or None,
         futu_code=_text(row.get("code")),
         fill_metadata={

@@ -7,9 +7,11 @@ from __future__ import annotations
 import inspect
 import logging
 from decimal import Decimal
+from unittest.mock import create_autospec
 
 import pandas as pd
 import pytest
+from futu import OpenSecTradeContext
 
 from xenon.execution import futu_orders as fo
 from xenon.execution.futu_orders import FutuOrderRefused, FutuOrderSpec
@@ -18,7 +20,22 @@ ACC = "281756479345015383"
 SECRET = "0123456789abcdef0123456789ABCDEF"  # made-up, format-valid
 REAL_ENV = {fo.PWD_MD5_ENV: SECRET}
 
-ORDER_COLS = ["code", "order_id", "order_status", "qty", "price", "dealt_qty", "remark"]
+ORDER_COLS = [
+    "code",
+    "order_id",
+    "order_status",
+    "qty",
+    "price",
+    "dealt_qty",
+    "remark",
+    "order_type",
+    "time_in_force",
+    "session",
+    "aux_price",
+    "trail_type",
+    "trail_value",
+    "trail_spread",
+]
 
 
 def _frame(rows):
@@ -26,43 +43,49 @@ def _frame(rows):
 
 
 class FakeCtx:
-    """OpenSecTradeContext double; records (name, args, kwargs) and the
-    position of `mark` events in one ordered log."""
+    """OpenSecTradeContext double over `create_autospec` of the installed SDK
+    class: every call is bound against the real method signature first (an
+    unsupported keyword raises TypeError), then recorded as (name, args,
+    kwargs) with the position of `mark` events in one ordered log."""
+
+    DEFAULTS = {
+        "unlock_trade": lambda kw: (0, None),
+        "place_order": lambda kw: (
+            0,
+            _frame([{"order_id": "8801", "code": kw.get("code"), "order_status": "SUBMITTING"}]),
+        ),
+        "modify_order": lambda kw: (0, pd.DataFrame([{"trd_env": "SIMULATE", "order_id": "8801"}])),
+        "order_list_query": lambda kw: (0, _frame([])),
+        "history_order_list_query": lambda kw: (0, _frame([])),
+    }
 
     def __init__(self):
         self.log: list[tuple] = []
         self.replies: dict[str, object] = {}
+        self.sdk = create_autospec(OpenSecTradeContext, instance=True)
+        for name in self.DEFAULTS:
+            getattr(self.sdk, name).side_effect = self._recorder(name)
 
-    def _call(self, name, args, kwargs, default):
-        self.log.append((name, args, kwargs))
-        reply = self.replies.get(name, default)
-        if isinstance(reply, BaseException):
-            raise reply
-        return reply
+    def _recorder(self, name):
+        def call(*args, **kwargs):
+            self.log.append((name, args, kwargs))
+            reply = self.replies.get(name, self.DEFAULTS[name](kwargs))
+            if isinstance(reply, BaseException):
+                raise reply
+            return reply
+
+        return call
+
+    def __getattr__(self, name):
+        if name == "sdk":
+            raise AttributeError(name)
+        return getattr(self.sdk, name)
 
     def mark(self):
         self.log.append(("mark", (), {}))
 
     def names(self):
         return [entry[0] for entry in self.log]
-
-    def unlock_trade(self, *args, **kwargs):
-        return self._call("unlock_trade", args, kwargs, (0, None))
-
-    def place_order(self, *args, **kwargs):
-        default = (0, _frame([{"order_id": "8801", "code": kwargs.get("code"), "order_status": "SUBMITTING"}]))
-        return self._call("place_order", args, kwargs, default)
-
-    def modify_order(self, *args, **kwargs):
-        return self._call(
-            "modify_order", args, kwargs, (0, pd.DataFrame([{"trd_env": "SIMULATE", "order_id": "8801"}]))
-        )
-
-    def order_list_query(self, *args, **kwargs):
-        return self._call("order_list_query", args, kwargs, (0, _frame([])))
-
-    def history_order_list_query(self, *args, **kwargs):
-        return self._call("history_order_list_query", args, kwargs, (0, _frame([])))
 
 
 MUTATIONS = {"place_order", "modify_order"}
@@ -130,15 +153,6 @@ def test_every_sdk_order_status_maps_and_pending_or_unknown_is_unknown():
 # ---------------------------------------------------------------------------
 # Limit only, price precision, remark, code (contract items 2-3)
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("order_type", ["MKT", "STP", "STP LMT", "TRAIL"])
-def test_non_limit_orders_are_refused_before_any_call(order_type):
-    ctx = FakeCtx()
-    with pytest.raises(FutuOrderRefused) as exc:
-        _place(ctx, _stk(order_type=order_type))
-    assert exc.value.reason_code == fo.UNSUPPORTED_ORDER_TYPE and 400 <= exc.value.http_status < 500
-    assert ctx.log == []
 
 
 @pytest.mark.parametrize(
