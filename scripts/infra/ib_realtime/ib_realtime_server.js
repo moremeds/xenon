@@ -604,13 +604,23 @@ const liveness = createLiveness({
 });
 
 /* ─── Futu Provider Routing ────────────────────────────────────────────────
- * Service clients authenticated via X-API-Key may opt into Futu-first quotes
- * with ?quotes=futu-first on the upgrade URL; every other connection keeps
- * the IB route. Enabled only when FUTU_QUOTES_URL is set — unset means the
- * relay behaves exactly as before (no upstream socket, all routes "ib").
+ * XENON_QUOTES_DEFAULT=ib|futu-first (default ib) sets the quote preference
+ * for every client, browser ticket connections included; service clients
+ * authenticated via X-API-Key may still opt into Futu-first with
+ * ?quotes=futu-first (there is no ?quotes=ib). Enabled only when
+ * FUTU_QUOTES_URL is set — unset means the relay behaves exactly as before
+ * (no upstream socket, all routes "ib"). Both env flags are read once at
+ * startup: a flip needs a relay restart and reaches existing sockets only on
+ * reconnect.
  */
 const FUTU_QUOTES_URL = process.env.FUTU_QUOTES_URL || "";
 const FUTU_RECONCILE_MS = Number(process.env.FUTU_RECONCILE_MS) || 5_000;
+const XENON_QUOTES_DEFAULT =
+  process.env.XENON_QUOTES_DEFAULT === "futu-first" ? "futu-first" : "ib";
+// XENON_FUTU_OPTIONS=1 lets option contract keys route to Futu like stocks
+// (they enter `want`); 0/unset keeps them pinned to IB. Indexes, forex and
+// non-US native venues stay pinned either way.
+const XENON_FUTU_OPTIONS = process.env.XENON_FUTU_OPTIONS === "1";
 const futuRouting = createFutuRouting({
   holdDownMs: Number(process.env.FUTU_HOLD_DOWN_MS) || FUTU_HOLD_DOWN_MS,
 });
@@ -2062,7 +2072,8 @@ async function handleClientMessage(client, data) {
       // Option contract subscriptions
       for (const c of contracts) {
         const key = optionKey(c);
-        futuRouting.pinIbOnly(key); // options never route to Futu
+        // Options stay on IB unless XENON_FUTU_OPTIONS=1.
+        if (!XENON_FUTU_OPTIONS) futuRouting.pinIbOnly(key);
         subscribeClientToSymbol(client, key);
         const ibContract = optionContract(
           c.symbol,
@@ -2619,13 +2630,13 @@ wss.on("connection", (client, req) => {
     subId = null;
   }
   // ?quotes=futu-first is honoured only for X-API-Key-authenticated upgrades.
-  // Ticket-authed connections (browsers and server-side ticket clients) always
-  // keep the IB route. Other query params are preserved and ignored as today.
+  // Every other connection takes the XENON_QUOTES_DEFAULT route (ib unless
+  // the env flips it) — there is no ?quotes=ib opt-out either.
   futuRouting.setPref(
     client,
     clientAuth.get(client) === "api-key" && quotesParam === "futu-first"
       ? "futu-first"
-      : "ib",
+      : XENON_QUOTES_DEFAULT,
   );
   if (subId) {
     clientId.set(client, subId);
