@@ -1,17 +1,22 @@
 # futu-quotes — Futu OpenD quote feed for the realtime relay
 
-`xenon-futu-quotes` streams US stock/ETF `SubType.QUOTE` subscriptions from a
-local Futu OpenD into the `ib_realtime` relay over one internal WebSocket, so
+`xenon-futu-quotes` streams US stock/ETF/option quotes from a local Futu
+OpenD into the `ib_realtime` relay over one internal WebSocket — each
+symbol one paired `SubType.QUOTE` + `SubType.ORDER_BOOK` subscription — so
 live ticking prices come from Futu instead of overloading the IB realtime
 relay. The relay is the service's only client; browsers and ordinary API-key
 connections stay on IB. Opt-in is `?quotes=futu-first` on the relay
 connection. Authoritative protocol/architecture contract:
 `docs/architecture/futu-quotes.md`.
 
-**Scope guard:** quotes only. No orders, no ORDER_BOOK/TICKER subtypes, no
-non-US symbols. Sessions served: RTH and the US overnight session (Blue
-Ocean, Sun–Thu 20:00 → 03:50 ET). Pre-market and after-hours stay on IB.
-Indexes and options are rejected `not_supported`.
+**Scope guard:** quotes only. No orders, no TICKER subtype, no non-US
+symbols. Sessions served: RTH and the US overnight session (Blue Ocean,
+Sun–Thu 20:00 → 03:50 ET); options are RTH only and never go overnight.
+Pre-market and after-hours stay on IB. Indexes are rejected
+`not_supported`, as is any option key the service cannot map to a Futu
+code (`SYM_YYYYMMDD_STRIKE_RIGHT` → `US.<UND><YYMMDD><C|P><strike×1000>`,
+relayed only when the relay's `XENON_FUTU_OPTIONS` is on) or any code
+whose ORDER_BOOK leg OpenD refuses.
 
 ## Run
 
@@ -25,18 +30,33 @@ uv run python -m xenon.futu_quotes
 
 ## Env vars
 
-| Var                | Default        | Meaning                                             |
-| ------------------ | -------------- | --------------------------------------------------- |
-| `FUTU_QUOTES_HOST` | `0.0.0.0`      | listen address (internal only — not host-published) |
-| `FUTU_QUOTES_PORT` | `8767`         | listen port                                         |
-| `FUTU_QUOTE_QUOTA` | `800`          | local admission ceiling cap                         |
-| `FUTU_OPEND_HOST`  | `127.0.0.1`    | Futu OpenD host                                     |
-| `FUTU_OPEND_PORT`  | `11111`        | Futu OpenD port                                     |
+| Var                    | Default        | Meaning                                                                                     |
+| ---------------------- | -------------- | ------------------------------------------------------------------------------------------- |
+| `FUTU_QUOTES_HOST`     | `0.0.0.0`      | listen address (internal only — not host-published)                                         |
+| `FUTU_QUOTES_PORT`     | `8767`         | listen port                                                                                 |
+| `FUTU_QUOTE_QUOTA`     | `800`          | local admission ceiling cap, in provider quota units                                        |
+| `FUTU_UNITS_PER_SYMBOL`| `2`            | provider units one held symbol costs (paired QUOTE + ORDER_BOOK)                             |
+| `FUTU_BOOK_STALE_S`    | `0`            | ORDER_BOOK receipt-age cutoff in seconds; `0` = age rule off (Amendment A1), positive re-enables |
+| `FUTU_GREEK_FACTORS`   | unset          | JSON per-field multipliers for option greeks/IV; unset or invalid = those fields stay `null` |
+| `FUTU_OPEND_HOST`      | `127.0.0.1`    | Futu OpenD host                                                                             |
+| `FUTU_OPEND_PORT`      | `11111`        | Futu OpenD port                                                                             |
+
+`FUTU_GREEK_FACTORS` maps each emitted greek key to the factor applied to
+Futu's raw QUOTE push value — `impliedVol`←`implied_volatility`×`iv`,
+`delta`←`delta`, `gamma`←`gamma`, `theta`←`theta`, `vega`←`vega`. The
+calibrated value is `{"iv":0.01,"delta":1,"gamma":1,"vega":1,"theta":1}`
+(`iv` 0.01 turns Futu's percent IV into the fraction `PriceData` expects;
+X7-0 calibration, PR #249 — not merged yet). Missing keys or non-finite
+values leave that field `null`; `undPrice` needs no factor — it is the
+held underlying's latest Futu `last`.
 
 ## Wire protocol
 
-Inbound: `{"action": "want", "gen": N, "symbols": [...]}` — the complete
-desired set; gen is a per-connection monotonic counter starting at 1.
+Inbound: `{"action": "want", "gen": N, "symbols": [...],
+"tiers": {"<sym>": "held"|"view"}}` — the complete desired set; gen is a
+per-connection monotonic counter starting at 1. `tiers` is optional; a
+symbol missing from it (or the whole key absent/malformed) means `held`.
+`symbols` may carry option relay keys `SYM_YYYYMMDD_STRIKE_RIGHT`.
 
 Outbound:
 
@@ -46,8 +66,12 @@ Outbound:
   `unknown_symbol`, `not_supported`, `provider_error`.
 - `batch` — `{updates: {symbol: PriceData}}`, last-value coalesced, at most
   one batch per 100 ms. Every update carries `source: "futu"`. RTH updates
-  carry a UTC `timestamp` derived from Futu's ET wall clock (DST-safe);
-  overnight updates carry `session: "overnight"` and the receipt time. A
+  carry a UTC `timestamp` derived from Futu's ET wall clock (DST-safe) —
+  or `max(quote ts, book receipt)` when a book push re-emitted the row;
+  `bid`/`ask`/`bidSize`/`askSize` come from the ORDER_BOOK top level
+  (`null` pre-book and outside RTH; `FUTU_BOOK_STALE_S` above). Option
+  rows add factored greeks/IV and `undPrice` (see env table); overnight
+  updates carry `session: "overnight"` and the receipt time. A
   missing `session` field means `rth`. A per-symbol high-water mark drops
   replayed stale RTH quotes; the overnight baseline drops unchanged
   overnight rows.
@@ -96,9 +120,10 @@ Liveness uses WebSocket protocol ping/pong: ping every 10 s, pong timeout
   761.08 → 761.25, volume 17485 → 18132 within about 60 s). There is no
   overnight timestamp field. `subscribe(session=)` does not affect QUOTE.
 - Unsubscribe discipline: a symbol is unsubscribed only after it leaves the
-  desired set, ≥60 s after subscribe plus a further 60 s grace; "too early"
-  provider rejections are retried. Re-adds inside the grace window cancel
-  the unsubscribe.
+  desired set or is marked for quota-pressure eviction (see § Quota), ≥60 s
+  after subscribe plus a further 60 s grace; "too early"
+  provider rejections are retried. Re-adds inside the grace window — and
+  resolved quota pressure — cancel the unsubscribe.
 - Operation fencing: every provider operation (snapshot verify, subscribe,
   unsubscribe, session poll, quota poll) runs on **one worker, one at a
   time**, in queue order. Each op carries the OpenD session epoch and a
@@ -152,15 +177,26 @@ Liveness uses WebSocket protocol ping/pong: ping every 10 s, pong timeout
 
 ## Quota
 
-Futu subscription quota is checked two ways:
+Futu subscription quota is checked two ways, all math in provider units
+(one held symbol = `FUTU_UNITS_PER_SYMBOL`, default 2, for the paired
+QUOTE + ORDER_BOOK subscription):
 
-- **Local ceiling**: `min(FUTU_QUOTE_QUOTA, own_used + remain)`, recomputed
-  from `query_subscription(is_all_conn=True)` on connect/reconnect, after
-  any provider rejection, and every 5 min. Symbols over the ceiling are
-  `rejected/quota` and retried with bounded backoff.
+- **Local ceiling**: `min(FUTU_QUOTE_QUOTA, provider own_used + remain)`,
+  recomputed from `query_subscription(is_all_conn=True)` on connect/reconnect,
+  after any provider rejection, and every 5 min. Symbols over the ceiling are
+  `rejected/quota` and retried with bounded backoff. The health frame's
+  `own_used` counts this service's held symbols; `ceiling`/`remain`/
+  `all_used` are provider units.
 - **Provider rejection is authoritative** — a `quota` error from
   `subscribe()` rejects the symbol and triggers an immediate quota refresh
   even when the local count is below the ceiling.
+- **Tiers under pressure**: `held` candidates admit before `view`, and a
+  `view` never takes a slot while a `held` is quota-blocked. When believed
+  usage exceeds the ceiling (or a blocked `held` needs a freed slot) a
+  still-wanted `view` is marked for release before any `held`; the mark
+  reports `rejected/quota` immediately but the unsubscribe still waits for
+  the 60 s min-lifetime plus 60 s grace, and retracts if pressure resolves
+  first. A `want` promoting the symbol back to `held` cancels the mark.
 
 To inspect quota directly against OpenD:
 
@@ -199,8 +235,9 @@ and confirm ticks flow for a liquid symbol.
 | ----------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | All symbols `pending/session`             | `market_us` is not MORNING/AFTERNOON, or `get_global_state` is failing (OpenD up but degraded)   |
 | All symbols `pending/opend_down`          | OpenD socket dead — look for `OpenD connection lost`; supervisor reconnects automatically        |
-| Symbols `rejected/quota`                  | `health.quota` block + the `query_subscription` snippet above; raise `FUTU_QUOTE_QUOTA` only if provider headroom exists |
+| Symbols `rejected/quota`                  | `health.quota` block + the `query_subscription` snippet above; raise `FUTU_QUOTE_QUOTA` only if provider headroom exists. A `view` symbol sitting at `rejected/quota` while still wanted may be marked for eviction — check whether a `held` candidate is blocked |
 | Symbol `rejected/unknown_symbol`          | OpenD said the code does not exist: Futu code spelling (`US.<ticker>`); class-share spellings the provider cannot parse land here permanently |
+| Symbol `rejected/not_supported`           | Unmappable option relay key, or OpenD refused the ORDER_BOOK leg — the symbol is terminal for this service and stays on IB |
 | Symbol stays `pending/backoff`            | Snapshot verify keeps failing with a generic/transient provider error; check OpenD logs and rate limits |
 | Relay sees stale/delayed ticks            | `batch` cadence is 100 ms; check `timestamp` (source ET time) vs receive time                    |
 | No frames at all                          | WebSocket ping/pong — service pings every 10 s, drops silent conns after 20 s                    |

@@ -52,7 +52,7 @@ Every execution/portfolio row carries `broker`, `account_env`, `broker_account` 
 ## Data Sources
 
 1. **Interactive Brokers** — real-time quotes, chains, execution, live portfolio. Primary.
-2. **Futu OpenD** — read-only positions snapshot for the Futu account tab, and RTH US stock/ETF quotes for opted-in relay service clients (`futu-quotes`; quota 1 per symbol, ceiling `FUTU_QUOTE_QUOTA`=800).
+2. **Futu OpenD** — read-only positions snapshot for the Futu account tab, and US stock/ETF/option quotes for opted-in relay service clients (`futu-quotes`; one QUOTE+ORDER_BOOK pair per symbol, 2 quota units per stock, ceiling `FUTU_QUOTE_QUOTA`=800).
 3. **Unusual Whales (`$UW_TOKEN`)** — dark-pool flow for `xenon-portfolio-report`, analyst ratings for the Ratings tab (FastAPI `GET /ticker/ratings`, `src/xenon/api/routes/ratings.py`), and ticker info / news / seasonality / previous-close routes in Next.js. Not used for signal generation (removed in the pure-portfolio pivot).
 4. **IB Flex Query** — historical fills audit overlay (`xenon-blotter-history`).
 
