@@ -22,7 +22,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from datetime import datetime, timedelta, timezone
+from datetime import time as dtime
+from typing import Any, Callable, Optional
+
+from xenon.futu_quotes.quote_map import ET
 
 MIN_LIFETIME_S = 60.0
 UNSUB_GRACE_S = 60.0
@@ -34,9 +38,45 @@ UNSUB_RETRY_CAP_S = 120.0
 PENDING_REASONS = ("subscribing", "session", "opend_down", "backoff")
 REJECTED_REASONS = ("quota", "unknown_symbol", "not_supported", "provider_error")
 
-_OPEN_US_STATES = frozenset({"MORNING", "AFTERNOON"})
+_RTH_US_STATES = frozenset({"MORNING", "AFTERNOON"})
+# Blue Ocean overnight: starts Sun-Thu 20:00 ET, ends next day 03:50 ET.
+# Live OpenD (SDK 10.03) reports AFTER_HOURS_END in that window, not OVERNIGHT.
+_OVERNIGHT_START = dtime(20, 0)
+_OVERNIGHT_END = dtime(3, 50)
+_OVERNIGHT_START_WEEKDAYS = frozenset({6, 0, 1, 2, 3})  # Sun, Mon, Tue, Wed, Thu
 # Subscribe answers that prove OpenD holds nothing; anything else is uncertain.
 _DEFINITE_SUB_REJECTIONS = frozenset({"quota", "unknown_symbol", "not_supported"})
+
+
+def us_session(market_us: Any, now_utc: datetime) -> Optional[str]:
+    """US session from ``get_global_state().market_us`` and the wall clock.
+
+    ``"rth"`` for MORNING/AFTERNOON; ``"overnight"`` for OVERNIGHT, or for
+    AFTER_HOURS_END while the ET clock is inside Sun-Thu 20:00 → next day
+    03:50; ``None`` (closed) for everything else, including unknown states.
+    """
+    state = str(market_us or "").upper()
+    if state in _RTH_US_STATES:
+        return "rth"
+    if state == "OVERNIGHT":
+        return "overnight"
+    if state == "AFTER_HOURS_END" and _in_overnight_window(now_utc):
+        return "overnight"
+    return None
+
+
+def _in_overnight_window(now_utc: datetime) -> bool:
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    et = now_utc.astimezone(ET)
+    t = et.time()
+    if t >= _OVERNIGHT_START:
+        start_day = et.date()
+    elif t < _OVERNIGHT_END:
+        start_day = et.date() - timedelta(days=1)
+    else:
+        return False
+    return start_day.weekday() in _OVERNIGHT_START_WEEKDAYS
 
 
 def futu_code(symbol: str) -> str:
@@ -140,6 +180,10 @@ class Admission:
         self.epoch = 0
         self.desired: list[str] = []
         self.session_open = False
+        # Overnight session only (else None): has the service seen a real
+        # overnight trade row for this symbol since the last baseline reset?
+        # A ready symbol is ``ok`` overnight only once this is True.
+        self.overnight_trade_seen: Optional[Callable[[str], bool]] = None
         self.opend_connected = False
         self.symbols: dict[str, SymbolState] = {}
 
@@ -201,11 +245,6 @@ class Admission:
     def set_session_open(self, open_: bool) -> None:
         self.session_open = open_
 
-    @staticmethod
-    def session_is_open(market_us: Any) -> bool:
-        """get_global_state().market_us → RTH flag; unknown ⇒ closed."""
-        return str(market_us or "").upper() in _OPEN_US_STATES
-
     def _bump_epoch(self) -> None:
         """New OpenD session: every reservation belongs to the old one."""
         self.epoch += 1
@@ -216,6 +255,7 @@ class Admission:
         self._bump_epoch()
         self.opend_connected = False
         self.session_open = False
+        self.overnight_trade_seen = None
         self.provider_own_used = None
         self.provider_remain = None
         self.provider_all_used = None
@@ -393,7 +433,10 @@ class Admission:
             elif not self.session_open:
                 pending.append({"symbol": sym, "reason": "session"})
             elif self.is_ready(st):
-                ok.append(sym)
+                if self._overnight_unseen(sym):
+                    pending.append({"symbol": sym, "reason": "session"})
+                else:
+                    ok.append(sym)
             elif st.op is not None:
                 # subscribe/reconfirm in flight, or an unsubscribe that its
                 # pre-check will decline now that the symbol is wanted again
@@ -564,7 +607,12 @@ class Admission:
             and self.session_open
             and symbol in self.desired
             and self.is_ready(self.state(symbol))
+            and not self._overnight_unseen(symbol)
         )
+
+    def _overnight_unseen(self, symbol: str) -> bool:
+        seen = self.overnight_trade_seen
+        return seen is not None and not seen(symbol)
 
 
 def _as_int(value: Any) -> Optional[int]:

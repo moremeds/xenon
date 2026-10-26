@@ -9,8 +9,9 @@ connection. Authoritative protocol/architecture contract:
 `docs/architecture/futu-quotes.md`.
 
 **Scope guard:** quotes only. No orders, no ORDER_BOOK/TICKER subtypes, no
-non-US symbols, no extended-hours symbols — those stay on IB. Indexes and
-options are rejected `not_supported`.
+non-US symbols. Sessions served: RTH and the US overnight session (Blue
+Ocean, Sun–Thu 20:00 → 03:50 ET). Pre-market and after-hours stay on IB.
+Indexes and options are rejected `not_supported`.
 
 ## Run
 
@@ -44,9 +45,12 @@ Outbound:
   `session`, `opend_down`, `backoff`. rejected reasons: `quota`,
   `unknown_symbol`, `not_supported`, `provider_error`.
 - `batch` — `{updates: {symbol: PriceData}}`, last-value coalesced, at most
-  one batch per 100 ms. Every update carries `source: "futu"` and a UTC
-  `timestamp` derived from Futu's ET wall clock (DST-safe). A per-symbol
-  high-water mark drops replayed stale quotes.
+  one batch per 100 ms. Every update carries `source: "futu"`. RTH updates
+  carry a UTC `timestamp` derived from Futu's ET wall clock (DST-safe);
+  overnight updates carry `session: "overnight"` and the receipt time. A
+  missing `session` field means `rth`. A per-symbol high-water mark drops
+  replayed stale RTH quotes; the overnight baseline drops unchanged
+  overnight rows.
 - `health` — `{opend_connected, quota: {ceiling, own_used, all_used,
   remain}}`, every 5 s and on change. Relay treats 15 s without `health`
   as Futu-down.
@@ -61,9 +65,36 @@ Liveness uses WebSocket protocol ping/pong: ping every 10 s, pong timeout
   (`pending/opend_down`), then reconnects with 1→30 s backoff and
   **resubscribes the complete desired set** (subscriptions are never assumed
   to survive reconnect).
-- US session is open only when `get_global_state().market_us` is `MORNING`
-  or `AFTERNOON`, polled every 30 s; unknown/failed counts as closed and
-  wanted symbols sit at `pending/session`.
+- US session (`admission.us_session`, polled every 30 s with the wall
+  clock): `rth` when `market_us` is `MORNING` or `AFTERNOON`; `overnight`
+  when it is `OVERNIGHT`, or `AFTER_HOURS_END` while ET is inside Sun–Thu
+  20:00 → next day 03:50. Anything else (pre-market, after-hours, weekend,
+  unknown/failed) counts as closed and wanted symbols sit at
+  `pending/session`. A clock edge is picked up by the next poll (≤ 30 s).
+- Overnight ticks: `last`/`high`/`low`/`volume` from `overnight_*`,
+  `close` = RTH `last_price`, `open` null, `timestamp` = receipt time,
+  `session: "overnight"`. A row with `overnight_price` or
+  `overnight_volume` missing or ≤ 0 is dropped. A row is published only
+  when `overnight_volume` or `overnight_price` changed; the first row
+  after a subscribe, OpenD reconnect, relay-owner change or session change
+  is a baseline.
+- Overnight readiness: a subscribed symbol is `ok` overnight only after
+  the service has seen one valid trade row for it (price and volume > 0)
+  since the last baseline reset; until then it stays `pending/session`
+  and the relay keeps it on IB. A symbol with no overnight trading never
+  leaves IB. A ready but quiet symbol (relay routes it to Futu and drops
+  its IB line) gets no tick until its next overnight trade.
+- Overnight latency per symbol after 20:00 ET: session poll (≤ 30 s) +
+  first trade row (readiness) + relay hold-down (60 s) + next changed
+  trade row. Until then the client stays on IB. After 03:50 ET rows are
+  still accepted for up to 30 s (until the next poll).
+- Live evidence (2026-10-25 Sun 20:25–20:27 ET, prod `xenon-futu-quotes-1`,
+  SDK 10.03.6308, read-only probe): `market_us` = `AFTER_HOURS_END`, not
+  `OVERNIGHT`. QUOTE pushes kept firing every few seconds; `last_price` and
+  `data_date/data_time` stayed at Friday's RTH close (`2026-10-23
+  16:00:00.x`), while `overnight_price`/`overnight_volume` ticked (SPY
+  761.08 → 761.25, volume 17485 → 18132 within about 60 s). There is no
+  overnight timestamp field. `subscribe(session=)` does not affect QUOTE.
 - Unsubscribe discipline: a symbol is unsubscribed only after it leaves the
   desired set, ≥60 s after subscribe plus a further 60 s grace; "too early"
   provider rejections are retried. Re-adds inside the grace window cancel
