@@ -702,8 +702,17 @@ async def _settled_service(
     return svc
 
 
-async def _want(svc: FutuQuotesService, ws: FakeWS, gen: int, symbols: list[str]) -> None:
-    await svc.on_ws_message(ws, json.dumps({"action": "want", "gen": gen, "symbols": symbols}))
+async def _want(
+    svc: FutuQuotesService,
+    ws: FakeWS,
+    gen: int,
+    symbols: list[str],
+    tiers: dict | None = None,
+) -> None:
+    msg: dict = {"action": "want", "gen": gen, "symbols": symbols}
+    if tiers is not None:
+        msg["tiers"] = tiers
+    await svc.on_ws_message(ws, json.dumps(msg))
 
 
 # ---------------------------------------------------------------------------

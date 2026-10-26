@@ -3,7 +3,9 @@
 One internal WebSocket for the ib_realtime relay (its only client). Frames
 per ``docs/architecture/futu-quotes.md``:
 
-- in:  ``{"action": "want", "gen": N, "symbols": [...]}``
+- in:  ``{"action": "want", "gen": N, "symbols": [...],
+         "tiers": {"<sym>": "held"|"view"}}`` (``tiers`` optional;
+         a symbol missing from it = ``held``)
 - out: ``assign`` / ``batch`` / ``health``
 
 The service owns an ``OpenDLike`` (real ``FutuOpenD`` in prod, fake in
@@ -231,8 +233,13 @@ class FutuQuotesService:
         symbols = msg.get("symbols")
         if not isinstance(symbols, list):
             symbols = []
+        tiers = msg.get("tiers")
+        if not isinstance(tiers, dict):
+            tiers = None
         prev = set(self.admission.desired)
-        self.admission.set_desired(gen, [s for s in symbols if isinstance(s, str)])
+        self.admission.set_desired(
+            gen, [s for s in symbols if isinstance(s, str)], tiers
+        )
         # A removed symbol loses its buffered quote AT the transition — a
         # later re-add before any evaluation must not revive it.
         for s in prev.difference(self.admission.desired):
