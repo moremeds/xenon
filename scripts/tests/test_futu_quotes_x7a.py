@@ -243,12 +243,13 @@ async def test_book_push_without_prior_quote_emits_nothing():
 
 @pytest.mark.asyncio
 async def test_stale_book_nulls_fields_and_keeps_quote_ts():
-    """Book older than FUTU_BOOK_STALE_S (10 s) → the four fields go back
-    to null and timestamp is the QUOTE ts again."""
+    """With a positive FUTU_BOOK_STALE_S (A1 opt-in), a book older than the
+    cutoff → the four fields go back to null and timestamp is the QUOTE
+    ts again."""
     clock = Clock(1000.0)
     wall = Wall(datetime(2026, 10, 23, 14, 30, 0, tzinfo=timezone.utc))
     fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS)
-    svc = await _settled_service(fake, clock=clock, wall=wall)
+    svc = await _settled_service(fake, clock=clock, wall=wall, book_stale_s=10.0)
     ws = FakeWS()
     await svc.on_ws_connect(ws)
     await _want(svc, ws, 1, ["AAPL"])
@@ -274,6 +275,42 @@ async def test_stale_book_nulls_fields_and_keeps_quote_ts():
         None,
     )
     assert upd["timestamp"] == "2026-10-23T14:30:06Z"
+
+
+@pytest.mark.asyncio
+async def test_book_age_rule_off_by_default():
+    """Amendment A1: FUTU_BOOK_STALE_S defaults to 0 = age rule off. An old
+    book on a still-held pair keeps overlaying in RTH (Futu only pushes
+    ORDER_BOOK on change; quiet ≠ invalid)."""
+    clock = Clock(1000.0)
+    wall = Wall(datetime(2026, 10, 23, 14, 30, 0, tzinfo=timezone.utc))
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS)
+    svc = await _settled_service(fake, clock=clock, wall=wall)
+    ws = FakeWS()
+    await svc.on_ws_connect(ws)
+    await _want(svc, ws, 1, ["AAPL"])
+    await svc.drain()
+
+    fake.push_book([_book_row("US.AAPL")])
+    fake.push([_raw_row("US.AAPL", 101.25)])
+    clock.advance(0.2)
+    await svc.flush_now()
+    assert ws.last("batch")["updates"]["AAPL"]["bid"] == 101.20
+
+    # 60 s with no book push: the pair is still held in this OpenD session,
+    # so the book top still overlays and timestamp lifts to the receipt.
+    wall.dt = datetime(2026, 10, 23, 14, 31, 0, tzinfo=timezone.utc)
+    fake.push([_raw_row("US.AAPL", 101.4, time_="10:30:55")])
+    clock.advance(0.2)
+    await svc.flush_now()
+    upd = ws.last("batch")["updates"]["AAPL"]
+    assert (upd["bid"], upd["ask"], upd["bidSize"], upd["askSize"]) == (
+        101.20,
+        101.30,
+        300,
+        400,
+    )
+    assert upd["timestamp"] == "2026-10-23T14:30:55Z"
 
 
 @pytest.mark.asyncio

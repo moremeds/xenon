@@ -139,7 +139,7 @@ class FutuQuotesService:
         clock: Callable[[], float] = time.monotonic,
         batch_window_s: float = 0.1,
         wall: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-        book_stale_s: float = 10.0,
+        book_stale_s: float = 0.0,
         units_per_symbol: int = 2,
     ) -> None:
         self.opend = opend
@@ -156,7 +156,9 @@ class FutuQuotesService:
         self.highwater = HighWaterMark()
         # Wall clock (aware UTC): session rule + overnight receipt stamps.
         self.wall = wall
-        # ORDER_BOOK top is nulled on emitted rows when older than this.
+        # ORDER_BOOK age cutoff (Amendment A1): 0 = off — a held pair keeps
+        # its book top until a push, disconnect or unsubscribe replaces it;
+        # a positive value re-enables the receipt-age null.
         self.book_stale_s = book_stale_s
         # Per-symbol last ORDER_BOOK top {fields, recv} and last emitted
         # RTH quote (pd, quote_ts) — the template book pushes rebuild from.
@@ -618,16 +620,20 @@ class FutuQuotesService:
         self._schedule_flush()
 
     def _apply_book(self, pd: dict, quote_ts: datetime) -> None:
-        """Overlay the fresh ORDER_BOOK top onto an RTH row, in place.
+        """Overlay the ORDER_BOOK top onto an RTH row, in place.
 
-        The four book fields stay NULL when the book is stale
-        (> ``book_stale_s`` old) or the session is not RTH; a fresh book
-        also lifts ``timestamp`` to ``max(quote_ts, book receipt)``.
+        The four book fields stay NULL when the session is not RTH or —
+        only when ``book_stale_s`` > 0 (A1: default 0 = age rule off) — the
+        book receipt is older than the cutoff. A fresh book also lifts
+        ``timestamp`` to ``max(quote_ts, book receipt)``.
         """
         book = self._book.get(pd["symbol"])
         if book is None or self.session != "rth":
             return
-        if (self.wall() - book["recv"]).total_seconds() > self.book_stale_s:
+        if (
+            self.book_stale_s > 0
+            and (self.wall() - book["recv"]).total_seconds() > self.book_stale_s
+        ):
             return
         pd.update(book["fields"])
         merged = max(quote_ts, book["recv"])
@@ -788,7 +794,7 @@ async def run_forever(
     quota_poll_s: float = 300.0,
     health_s: float = 5.0,
     unsub_tick_s: float = 1.0,
-    book_stale_s: float = 10.0,
+    book_stale_s: float = 0.0,
     units_per_symbol: int = 2,
 ) -> None:
     """Serve the internal relay WebSocket until cancelled."""
