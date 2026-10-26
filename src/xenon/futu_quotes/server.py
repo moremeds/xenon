@@ -22,12 +22,13 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from xenon.futu_quotes.admission import (
     Admission,
     ticker_of,
+    us_session,
 )
 from xenon.futu_quotes.opend import (
     OpenDDownError,
@@ -40,6 +41,8 @@ from xenon.futu_quotes.opend import (
 )
 from xenon.futu_quotes.quote_map import (
     HighWaterMark,
+    OvernightBaseline,
+    overnight_row_to_pricedata,
     row_to_pricedata,
 )
 
@@ -134,6 +137,7 @@ class FutuQuotesService:
         quota_cap: int = 800,
         clock: Callable[[], float] = time.monotonic,
         batch_window_s: float = 0.1,
+        wall: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self.opend = opend
         opend.on_quote_rows = self._on_quote_rows
@@ -144,6 +148,11 @@ class FutuQuotesService:
         self.admission = Admission(quota_cap=quota_cap, now=clock)
         self.batcher = Batcher(batch_window_s, clock)
         self.highwater = HighWaterMark()
+        # Wall clock (aware UTC): session rule + overnight receipt stamps.
+        self.wall = wall
+        # US session from the last poll: "rth" | "overnight" | None (closed).
+        self.session: Optional[str] = None
+        self.baseline = OvernightBaseline()
 
         self.conn: Any = None
         self._tasks: set[asyncio.Task] = set()
@@ -172,6 +181,7 @@ class FutuQuotesService:
         # or replay judgement.
         self.batcher.clear()
         self.highwater.reset_all()
+        self.baseline.reset_all()
         if old is not None and old is not ws:
             try:
                 await old.close()
@@ -245,6 +255,8 @@ class FutuQuotesService:
         logger.warning("OpenD connection lost")
         self.admission.mark_disconnected()
         self.batcher.clear()  # dead-session ticks must not carry over
+        self.session = None
+        self.baseline.reset_all()  # overnight baseline is per OpenD session
         self._opend_down.set()
         self._kick()
 
@@ -264,6 +276,7 @@ class FutuQuotesService:
         self._opend_down.clear()
         self.admission.mark_connected()  # new epoch: nothing is ready yet
         self.batcher.clear()
+        self.baseline.reset_all()
         await self.refresh_quota_once()
         await self.poll_session_once()
         self._kick()
@@ -463,23 +476,29 @@ class FutuQuotesService:
             # Released: its buffered quote belongs to the old subscription —
             # drop it now, before an evaluation can resubscribe the symbol.
             self.highwater.reset(sym)
+            self.baseline.reset(sym)
             self.batcher.drop(sym)
         self._kick()
 
     async def _op_session(self, op: _Op) -> None:
         try:
             gs = await self.opend.get_global_state()
-            open_ = Admission.session_is_open(gs.get("market_us"))
+            session = us_session(gs.get("market_us"), self.wall())
         except OpenDDownError:
             self._down_from(op)
             return
         except OpenDError:
-            open_ = False
+            session = None
         if self._stale(op):
             return  # stale-session poll result
-        if not open_:
-            self.batcher.clear()  # session closed: nothing is ok any more
-        self.admission.set_session_open(open_)
+        if session is None or session != self.session:
+            # Closed (nothing is ok any more) or rth<->overnight: buffered
+            # rows were mapped for the old session.
+            self.batcher.clear()
+        if session != self.session:
+            self.baseline.reset_all()  # first overnight row is a baseline
+        self.session = session
+        self.admission.set_session_open(session is not None)
         self._kick()
 
     async def _op_quota(self, op: _Op) -> None:
@@ -511,7 +530,7 @@ class FutuQuotesService:
         await asyncio.shield(op.done)
 
     async def poll_session_once(self) -> None:
-        """get_global_state().market_us ∈ {MORNING, AFTERNOON} ⇒ open."""
+        """``us_session(market_us, wall)`` is rth or overnight ⇒ open."""
         await self._poll("session")
 
     async def refresh_quota_once(self) -> None:
@@ -542,11 +561,20 @@ class FutuQuotesService:
 
     def _on_quote_rows(self, rows: list[dict]) -> None:
         """QUOTE push rows (already on the loop thread)."""
+        received_at = self.wall() if self.session == "overnight" else None
         for row in rows:
             sym = ticker_of(row.get("code"))
             if sym is None:
                 continue
-            out = row_to_pricedata(sym, row)
+            if received_at is not None:
+                out = overnight_row_to_pricedata(sym, row, received_at)
+                # Receipt-time stamps: publish only a changed overnight
+                # volume/price; the first row after (re)subscribe or a reset
+                # is the baseline (see OvernightBaseline ponytail ceiling).
+                if out is None or not self.baseline.changed(sym, row):
+                    continue
+            else:
+                out = row_to_pricedata(sym, row)
             if out is None:
                 continue
             pd, ts = out

@@ -10,6 +10,11 @@ Rules (docs/architecture/futu-quotes.md):
 - The whole quote is dropped only when ``last`` or the timestamp is invalid.
 - A per-symbol high-water mark drops quotes older than the last one
   forwarded; the mark resets when the symbol is unsubscribed.
+- US overnight session (``overnight_row_to_pricedata``): ``last`` /
+  ``high`` / ``low`` / ``volume`` come from the ``overnight_*`` fields,
+  ``close`` is the RTH ``last_price``, ``open`` is null and ``timestamp`` is
+  the receipt time (Futu carries no overnight time). The row is dropped when
+  ``overnight_price`` is missing, non-finite or ≤ 0.
 """
 
 from __future__ import annotations
@@ -125,6 +130,69 @@ def row_to_pricedata(ticker: str, row: Mapping[str, Any]) -> Optional[tuple[dict
     pd["timestamp"] = ts.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
     pd["source"] = "futu"
     return pd, ts
+
+
+def overnight_row_to_pricedata(
+    ticker: str, row: Mapping[str, Any], received_at: datetime
+) -> Optional[tuple[dict, datetime]]:
+    """Map one Futu QUOTE row in the US overnight session.
+
+    ``received_at`` is the aware UTC receipt time; it is the timestamp
+    because the QUOTE push has no overnight time field (``data_date`` /
+    ``data_time`` still name the last RTH quote). Returns ``None`` when
+    ``overnight_price`` is missing, non-finite or ≤ 0 (no overnight trade,
+    e.g. a holiday night).
+    """
+    last = finite_or_none(row.get("overnight_price"))
+    if last is None or last <= 0:
+        return None
+    ts = received_at.astimezone(timezone.utc)
+    pd: dict = {
+        "symbol": ticker,
+        "last": last,
+        "lastIsCalculated": False,
+        **_NULL_FIELDS,
+    }
+    pd["volume"] = _int_or_none(row.get("overnight_volume"))
+    pd["high"] = finite_or_none(row.get("overnight_high_price"))
+    pd["low"] = finite_or_none(row.get("overnight_low_price"))
+    pd["open"] = None
+    pd["close"] = finite_or_none(row.get("last_price"))  # latest RTH close
+    pd["timestamp"] = ts.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+    pd["source"] = "futu"
+    pd["session"] = "overnight"
+    return pd, ts
+
+
+class OvernightBaseline:
+    """Per-symbol last ``(overnight_volume, overnight_price)`` seen.
+
+    Overnight rows are stamped with receipt time, so a cached push replayed
+    after a subscribe would look fresh. ``changed`` is True only when the
+    pair differs from the last pair seen for the symbol; the first row after
+    a reset is the baseline and returns False.
+
+    ponytail: ceiling — a quiet symbol publishes nothing until its next
+    overnight trade changes volume or price, even though it is Futu-``ok``.
+    """
+
+    def __init__(self) -> None:
+        self._last: dict[str, tuple[Optional[float], Optional[float]]] = {}
+
+    def changed(self, symbol: str, row: Mapping[str, Any]) -> bool:
+        key = (
+            finite_or_none(row.get("overnight_volume")),
+            finite_or_none(row.get("overnight_price")),
+        )
+        prev = self._last.get(symbol)
+        self._last[symbol] = key
+        return prev is not None and key != prev
+
+    def reset(self, symbol: str) -> None:
+        self._last.pop(symbol, None)
+
+    def reset_all(self) -> None:
+        self._last.clear()
 
 
 class HighWaterMark:

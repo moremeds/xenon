@@ -20,6 +20,7 @@ from xenon.futu_quotes.admission import (
     Admission,
     futu_code,
     ticker_of,
+    us_session,
 )
 from xenon.futu_quotes import opend as opend_mod
 from xenon.futu_quotes.opend import (
@@ -386,13 +387,15 @@ def test_admission_is_ok_fencing():
 
 
 def test_admission_session_is_open_states():
-    assert Admission.session_is_open("MORNING")
-    assert Admission.session_is_open("AFTERNOON")
-    assert not Admission.session_is_open("CLOSED")
-    assert not Admission.session_is_open("PRE_MARKET_BEGIN")
-    assert not Admission.session_is_open("OVERNIGHT")
-    assert not Admission.session_is_open(None)
-    assert not Admission.session_is_open("")
+    # RTH states are open at any clock; overnight rules live in
+    # test_futu_quotes_overnight.py.
+    noon = datetime(2026, 10, 21, 16, 0, tzinfo=timezone.utc)
+    assert us_session("MORNING", noon) == "rth"
+    assert us_session("AFTERNOON", noon) == "rth"
+    assert us_session("CLOSED", noon) is None
+    assert us_session("PRE_MARKET_BEGIN", noon) is None
+    assert us_session(None, noon) is None
+    assert us_session("", noon) is None
 
 
 def test_admission_quota_report_disconnected():

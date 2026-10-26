@@ -15,10 +15,18 @@ OpenD, and the relay serves them to clients that opt in.
 - A relay connection opts in with `?quotes=futu-first` on the upgrade URL. The relay honours it
   only on connections that authenticated with `X-API-Key` (service clients). Browser/ticket
   clients and API-key clients without the flag stay on IB.
-- Futu serves US stocks and ETFs only while `get_global_state().market_us` is `MORNING` or
-  `AFTERNOON`, polled every 30 s. Futu's own state covers holidays and early closes. A failed or
-  unknown state counts as closed: symbols go `pending` with reason `session` and stay on IB. Indexes,
-  options, non-US symbols, ETH and anything Futu rejects stay on IB.
+- Futu serves US stocks and ETFs in two sessions. The service polls
+  `get_global_state().market_us` every 30 s and reads its wall clock (UTC, converted to
+  America/New_York) at each poll (`admission.us_session`):
+  - `rth`: `market_us` is `MORNING` or `AFTERNOON`, at any clock. Futu's own state covers holidays
+    and early closes.
+  - `overnight` (Blue Ocean): `market_us` is `OVERNIGHT`, or `AFTER_HOURS_END` while the ET clock is
+    inside Sun–Thu 20:00 → next day 03:50. Live OpenD (SDK 10.03.6308) reports `AFTER_HOURS_END`
+    in this window, not `OVERNIGHT`.
+  - Every other state (pre-market, after-hours, weekend, failed or unknown) counts as closed:
+    symbols go `pending` with reason `session` and stay on IB. A clock edge (20:00, 03:50) takes
+    effect at the next poll, so up to 30 s late.
+- Indexes, options, non-US symbols and anything Futu rejects stay on IB in every session.
 
 ## Transport
 
@@ -61,7 +69,7 @@ the session changes.
 
 - For the latest `want`, `ok`, `pending` and `rejected` are disjoint and together list every wanted
   symbol. `pending` and `rejected` items are `{symbol, reason}`.
-- `ok`: subscribed on OpenD while the session is RTH. The relay serves a symbol from Futu only when
+- `ok`: subscribed on OpenD while the session is `rth` or `overnight`. The relay serves a symbol from Futu only when
   it is in `ok` of the latest `gen` of the active connection.
 - Assignment transitions are serialized. A late completion of an older subscribe never changes the
   assignment for a newer `gen`.
@@ -85,10 +93,21 @@ the session changes.
   only for a symbol it currently routes to Futu.
 - Each value is a full `PriceData` (`web/lib/pricesProtocol.ts`) plus `source: "futu"`. Fields
   Futu's QUOTE push does not carry are `null`: bid, ask, sizes, greeks, 52-week and avgVolume.
-- Filled fields: `last`, `volume`, `open`, `high`, `low`, `close` (previous close) and `timestamp`.
-- `timestamp` is ISO-8601 UTC with a `Z` suffix. It comes from the quote's own `data_date` +
+- RTH rows fill `last`, `volume`, `open`, `high`, `low`, `close` (previous close) and `timestamp`.
+  They carry no `session` field (absent means `rth`).
+- RTH `timestamp` is ISO-8601 UTC with a `Z` suffix. It comes from the quote's own `data_date` +
   `data_time`, read as America/New_York with DST handling. It is never the receive, flush or
   reconnect time.
+- Overnight rows add `session: "overnight"`. `last` / `high` / `low` / `volume` are
+  `overnight_price` / `overnight_high_price` / `overnight_low_price` / `overnight_volume`; `close`
+  is the RTH `last_price` (the most recent regular close); `open` is `null`. During overnight the
+  QUOTE push keeps `last_price` and `data_date`/`data_time` at the last RTH quote, and Futu has no
+  overnight time field, so `timestamp` is the service's receipt time (UTC). A row with a missing,
+  non-finite or ≤ 0 `overnight_price` is dropped (for example a holiday night).
+- Overnight replay guard: the service publishes an overnight row only when `overnight_volume` or
+  `overnight_price` differs from the last value seen for that symbol. The first row after a
+  subscribe, an OpenD reconnect, a relay-owner change or a session change is a baseline and is not
+  published. A quiet symbol therefore sends nothing until its next overnight trade.
 - Every numeric field is a finite JSON number or `null`. An invalid raw field becomes `null`. The
   whole quote is dropped only when `last` or the time is invalid.
 - The cached quote OpenD sends right after a subscribe is forwarded with its true source
@@ -142,5 +161,5 @@ the session changes.
 | `want.json`                                                                                    | relay → service desired set                                                                                       |
 | `assign_ok.json`, `assign_partial_quota.json`, `assign_session.json`, `assign_opend_lost.json` | admission cases                                                                                                   |
 | `health_ok.json`, `health_opend_lost.json`                                                     | health cases                                                                                                      |
-| `batch_normal.json`, `batch_dst_fallback.json`                                                 | expected relay-facing ticks                                                                                       |
+| `batch_normal.json`, `batch_dst_fallback.json`                                                 | expected relay-facing RTH ticks (overnight rows are covered by `scripts/tests/test_futu_quotes_overnight.py`)     |
 | `_futu_raw_*.json`                                                                             | raw Futu quote rows with the expected output (EDT; 2026-11-02, the first RTH after the 2026-11-01 fall-back; stale replay; NaN as an invalid string input) for X1 unit tests |

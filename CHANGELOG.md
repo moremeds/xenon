@@ -5,6 +5,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+- **futu-quotes serves the US overnight session.** `futu-first` relay clients now get Futu ticks during Blue Ocean overnight (Sun–Thu 20:00 → 03:50 ET; OpenD reports `AFTER_HOURS_END` or `OVERNIGHT`), not only RTH. Overnight rows use `overnight_price` / `_high_price` / `_low_price` / `_volume`, `close` = the RTH last price, `timestamp` = receipt time, and carry the additive field `session: "overnight"` (RTH rows are unchanged). An overnight row is published only when its overnight volume or price changed, so a cached replay after a subscribe is never shown as fresh. Pre-market and after-hours stay on IB.
+
 ## [0.16.1] — 2026-10-25
 
 - **Futu SIMULATE / REAL switch moved into the Futu account tab.** The switch is now part of the FUTU tab card instead of a separate panel under the tab bar, and it shows on every page that shows the tab bar. Picking an env from the IB view also opens the Futu tab. Active REAL uses the warning token; the separate SIMULATE / REAL badge is removed because the switch shows the same state.
