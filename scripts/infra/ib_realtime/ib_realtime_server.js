@@ -125,10 +125,29 @@ function parseArgs(argv) {
   return args;
 }
 
-function normalizeSymbols(raw) {
-  return raw
-    .map((symbol) => String(symbol).trim().toUpperCase())
-    .filter((symbol) => symbol.length > 0);
+// Symbol entries are backward compatible: a bare string, or
+// {symbol, tier:"held"|"view"} for clients that declare a quote-priority
+// tier (absent/invalid tier = held). Valid tiers are recorded into `tiers`
+// keyed by the normalized symbol; invalid entries are dropped.
+function normalizeSymbols(raw, tiers) {
+  const out = [];
+  for (const entry of raw) {
+    if (entry !== null && typeof entry === "object") {
+      const symbol =
+        typeof entry.symbol === "string"
+          ? entry.symbol.trim().toUpperCase()
+          : "";
+      if (!symbol) continue;
+      if (entry.tier === "held" || entry.tier === "view") {
+        tiers.set(symbol, entry.tier);
+      }
+      out.push(symbol);
+      continue;
+    }
+    const symbol = String(entry).trim().toUpperCase();
+    if (symbol.length > 0) out.push(symbol);
+  }
+  return out;
 }
 
 /** Build composite key for an option contract: SYMBOL_YYYYMMDD_STRIKE_RIGHT */
@@ -158,7 +177,8 @@ function normalizeContracts(raw) {
       const right = c.right === "C" || c.right === "P" ? c.right : null;
       if (!symbol || !expiry || expiry.length !== 8 || !strike || !right)
         return null;
-      return { symbol, expiry, strike, right };
+      const tier = c.tier === "held" || c.tier === "view" ? c.tier : null;
+      return { symbol, expiry, strike, right, tier };
     })
     .filter(Boolean);
 }
@@ -227,8 +247,12 @@ function parseActionMessage(raw) {
     return null;
   }
 
+  // Declared quote tiers: symbol key -> "held"|"view" (absent = held). Filled
+  // by normalizers for symbol object entries; contract entries carry it on
+  // the returned object instead.
+  const tiers = new Map();
   const symbols = Array.isArray(payload.symbols)
-    ? normalizeSymbols(payload.symbols)
+    ? normalizeSymbols(payload.symbols, tiers)
     : [];
   const contracts = Array.isArray(payload.contracts)
     ? normalizeContracts(payload.contracts)
@@ -242,7 +266,7 @@ function parseActionMessage(raw) {
     action === "subscribe-depth" || action === "unsubscribe-depth"
       ? normalizeDepthTarget(payload)
       : null;
-  return { action, symbols, contracts, indexes, forexes, stocksMeta, depth };
+  return { action, symbols, contracts, indexes, forexes, stocksMeta, depth, tiers };
 }
 
 const cli = parseArgs(process.argv.slice(2));
@@ -480,6 +504,10 @@ httpServer.on("upgrade", async (req, socket, head) => {
 const clients = new Set();
 const symbolSubscribers = new Map();
 const clientSymbols = new Map();
+// symbol key -> Map<client, "held"|"view">: each subscriber's declared quote
+// tier (absent declaration = held). Mirrors symbolSubscribers membership;
+// merged per symbol into want.tiers by futuRouting.desiredWant.
+const subscriberTiers = new Map();
 const symbolStates = new Map();
 const requestIdToSymbol = new Map();
 const snapshotRequests = new Map();
@@ -604,13 +632,23 @@ const liveness = createLiveness({
 });
 
 /* ─── Futu Provider Routing ────────────────────────────────────────────────
- * Service clients authenticated via X-API-Key may opt into Futu-first quotes
- * with ?quotes=futu-first on the upgrade URL; every other connection keeps
- * the IB route. Enabled only when FUTU_QUOTES_URL is set — unset means the
- * relay behaves exactly as before (no upstream socket, all routes "ib").
+ * XENON_QUOTES_DEFAULT=ib|futu-first (default ib) sets the quote preference
+ * for every client, browser ticket connections included; service clients
+ * authenticated via X-API-Key may still opt into Futu-first with
+ * ?quotes=futu-first (there is no ?quotes=ib). Enabled only when
+ * FUTU_QUOTES_URL is set — unset means the relay behaves exactly as before
+ * (no upstream socket, all routes "ib"). Both env flags are read once at
+ * startup: a flip needs a relay restart and reaches existing sockets only on
+ * reconnect.
  */
 const FUTU_QUOTES_URL = process.env.FUTU_QUOTES_URL || "";
 const FUTU_RECONCILE_MS = Number(process.env.FUTU_RECONCILE_MS) || 5_000;
+const XENON_QUOTES_DEFAULT =
+  process.env.XENON_QUOTES_DEFAULT === "futu-first" ? "futu-first" : "ib";
+// XENON_FUTU_OPTIONS=1 lets option contract keys route to Futu like stocks
+// (they enter `want`); 0/unset keeps them pinned to IB. Indexes, forex and
+// non-US native venues stay pinned either way.
+const XENON_FUTU_OPTIONS = process.env.XENON_FUTU_OPTIONS === "1";
 const futuRouting = createFutuRouting({
   holdDownMs: Number(process.env.FUTU_HOLD_DOWN_MS) || FUTU_HOLD_DOWN_MS,
 });
@@ -764,6 +802,23 @@ function stopBatchFlush() {
 
 function removeBatchBuffer(client) {
   clientBatchBuffers.delete(client);
+  futuStaleServed.delete(client);
+}
+
+// Per-client record of Futu rows already delivered with stale:true, keyed by
+// the row's own timestamp — Map<client, Map<symbol, timestamp>>. A quiet row
+// ages past the threshold between batches, so the reconcile timer republishes
+// the cached row once with stale:true; the timestamp key means each row flips
+// exactly once and a newer row earns its own single flip (D10).
+const futuStaleServed = new Map();
+
+function markFutuStaleServed(client, symbol, timestamp) {
+  let m = futuStaleServed.get(client);
+  if (!m) {
+    m = new Map();
+    futuStaleServed.set(client, m);
+  }
+  m.set(symbol, timestamp ?? "");
 }
 
 function sendMessage(client, payload) {
@@ -796,8 +851,21 @@ function sendStatus(client) {
     ib_issue: ibConnectionIssue?.code ?? null,
     ib_status_message: ibConnectionIssue?.operatorMessage ?? null,
     subscriptions,
-    providers: { futu: futuRouting.status() },
+    providers: {
+      futu: { ...futuRouting.status(), routes: routeCountsFor(client) },
+    },
   });
+}
+
+// Per-client route counts for observability: how many of this client's
+// subscriptions are currently served from Futu vs IB.
+function routeCountsFor(client) {
+  const counts = { futu: 0, ib: 0 };
+  for (const route of clientRoutes.get(client)?.values() ?? []) {
+    if (route === "futu") counts.futu += 1;
+    else counts.ib += 1;
+  }
+  return counts;
 }
 
 function broadcastStatus() {
@@ -878,7 +946,11 @@ function startLiveSubscription(key, ibContract) {
   }
 
   // Enforce the IB line budget: evict the idlest live line(s) to make room.
-  makeRoomForLine(key);
+  // When nothing is evictable for this tier (e.g. a view subscribe on a budget
+  // of held lines), do NOT subscribe over-budget — leave tickerId null so the
+  // symbol stays wanted-but-evicted: readers see stale:true via the next
+  // hydrate, and fillFreeLines admits it as soon as a slot frees.
+  if (!makeRoomForLine(key)) return;
 
   try {
     ib.reqMktData(nextTickerId, ibContract, "233,165", false, false);
@@ -948,13 +1020,20 @@ function resetDailyCloseState() {
   // is still valid across a reconnect; only the in-flight bookkeeping is reset.
 }
 
-function subscribeClientToSymbol(client, symbol) {
+function subscribeClientToSymbol(client, symbol, tier = null) {
   let subscribers = symbolSubscribers.get(symbol);
   if (!subscribers) {
     subscribers = new Set();
     symbolSubscribers.set(symbol, subscribers);
   }
   subscribers.add(client);
+
+  let tierMap = subscriberTiers.get(symbol);
+  if (!tierMap) {
+    tierMap = new Map();
+    subscriberTiers.set(symbol, tierMap);
+  }
+  tierMap.set(client, tier === "view" ? "view" : "held");
 
   let clientSet = clientSymbols.get(client);
   if (!clientSet) {
@@ -977,6 +1056,11 @@ function unsubscribeClientFromSymbol(client, symbol) {
 
   if (subscribers) {
     subscribers.delete(client);
+    const tierMap = subscriberTiers.get(symbol);
+    if (tierMap) {
+      tierMap.delete(client);
+      if (tierMap.size === 0) subscriberTiers.delete(symbol);
+    }
     if (subscribers.size === 0) {
       symbolSubscribers.delete(symbol);
       stopLiveSubscription(symbol);
@@ -992,6 +1076,14 @@ function unsubscribeClientFromSymbol(client, symbol) {
     clientSet.delete(symbol);
   }
   clientRoutes.get(client)?.delete(symbol);
+  // Drop the stale-flip marker for this (client, symbol) — the mark belongs to
+  // the subscription, and a browsing session must not retain one entry per
+  // symbol it ever visited. Drop the per-client map once it empties.
+  const served = futuStaleServed.get(client);
+  if (served) {
+    served.delete(symbol);
+    if (served.size === 0) futuStaleServed.delete(client);
+  }
   reconcileFutuRoutes(); // want set and IB demand may have changed
 
   return unsubscribed;
@@ -1018,6 +1110,11 @@ function disconnectClient(client) {
     if (!subscribers) continue;
 
     subscribers.delete(client);
+    const tierMap = subscriberTiers.get(symbol);
+    if (tierMap) {
+      tierMap.delete(client);
+      if (tierMap.size === 0) subscriberTiers.delete(symbol);
+    }
     if (subscribers.size === 0) {
       symbolSubscribers.delete(symbol);
       stopLiveSubscription(symbol);
@@ -1459,6 +1556,16 @@ function withStale(state) {
   };
 }
 
+// stale on a Futu-routed row: its own timestamp aged past STALE_TICK_MS — the
+// same threshold withStale applies to IB rows, so consumers see the same flag
+// semantics on both sources. One uniform rule: a quiet overnight (X6) symbol
+// ages out exactly like a quiet RTH one, with no session carve-out, and a row
+// without a parseable timestamp is stale.
+function futuStale(data, now) {
+  const ts = Date.parse(data?.timestamp ?? "");
+  return !Number.isFinite(ts) || now - ts > STALE_TICK_MS;
+}
+
 /* ─── L1 market-data line budget (LRU) ──────────────────────────────────────
  * IB caps simultaneous market-data lines at ~100 per ACCOUNT (shared across all
  * API clients). The subscribed universe (portfolio + open option chains, ~62
@@ -1489,10 +1596,20 @@ function activeLineCount() {
 function lineEntries() {
   const out = [];
   for (const [key, state] of symbolStates) {
+    // Merged subscriber tier for the budget (D13): "held" when any subscriber
+    // of the key is held — or when no tier is recorded, matching the untagged
+    // default in subscribeClientToSymbol; "view" only when every recorded
+    // subscriber is view.
+    const tierMap = subscriberTiers.get(key);
+    const held =
+      !tierMap ||
+      tierMap.size === 0 ||
+      [...tierMap.values()].includes("held");
     out.push({
       key,
       tickerId: state.tickerId,
       lastAccessAt: state.lastAccessAt,
+      tier: held ? "held" : "view",
     });
   }
   return out;
@@ -1516,8 +1633,13 @@ function evictLine(key) {
 // incoming symbol. Returns true if there is room to admit `incomingKey`.
 function makeRoomForLine(incomingKey) {
   while (activeLineCount() >= MAX_CONCURRENT_LINES) {
-    const victim = pickEvictable(lineEntries(), incomingKey);
-    if (victim == null) return false; // nothing evictable (all == incoming)
+    const entries = lineEntries();
+    const incomingTier =
+      entries.find((e) => e.key === incomingKey)?.tier ?? "held";
+    // Held lines are evictable only for an incoming held subscribe — a view
+    // subscription never displaces a position (D13).
+    const victim = pickEvictable(entries, incomingKey, incomingTier === "held");
+    if (victim == null) return false; // nothing evictable for this tier
     evictLine(victim);
   }
   return true;
@@ -1531,27 +1653,41 @@ function demandedLineEntries(now = Date.now()) {
   });
 }
 
-// A line just freed — re-admit the hottest evicted-but-still-wanted symbol.
+// A line just freed — re-admit the hottest evicted-but-wanted symbol, held
+// before view (D13). When the budget is already full and the top pending key
+// is held, evict the idlest VIEW line to admit it — existing view allocations
+// must not defeat held-first. A pending held key never evicts another held
+// line for this reason (pickEvictable returns null), and a pending view key
+// simply waits for a genuinely free slot, same as before.
 function admitPendingLine() {
-  if (!ibConnected) return;
-  if (activeLineCount() >= MAX_CONCURRENT_LINES) return;
-  const key = pickAdmittable(demandedLineEntries());
-  if (key == null) return;
+  if (!ibConnected) return false;
+  const entries = demandedLineEntries();
+  const key = pickAdmittable(entries);
+  if (key == null) return false;
+  if (activeLineCount() >= MAX_CONCURRENT_LINES) {
+    if (entries.find((e) => e.key === key)?.tier !== "held") return false;
+    const victim = pickEvictable(entries, key, false); // reclaim view lines only
+    if (victim == null) return false;
+    evictLine(victim);
+    if (activeLineCount() >= MAX_CONCURRENT_LINES) return false;
+  }
   const state = symbolStates.get(key);
-  if (!state || !state.contract || state.tickerId != null) return;
+  if (!state || !state.contract || state.tickerId != null) return false;
   const subs = symbolSubscribers.get(key);
-  if (!subs || subs.size === 0) return; // no longer wanted
+  if (!subs || subs.size === 0) return false; // no longer wanted
   startLiveSubscription(key, state.contract);
+  return state.tickerId != null; // false on a failed admit stops the fill loop
 }
 
 // Fill every free slot with the hottest evicted-but-wanted symbols. Used after a
 // bulk free (client disconnect) where one admitPendingLine() would leave most of
-// the reclaimed capacity idle while evicted symbols stay stale.
+// the reclaimed capacity idle while evicted symbols stay stale. Keeps looping
+// while admitPendingLine makes progress — including a pending held key
+// reclaiming a view line over a full budget.
 function fillFreeLines() {
-  while (activeLineCount() < MAX_CONCURRENT_LINES) {
-    const before = activeLineCount();
-    admitPendingLine();
-    if (activeLineCount() === before) break; // nothing left to admit
+  while (admitPendingLine()) {
+    // Progress guaranteed by the return value; the loop exits when nothing is
+    // pending or no view line can be reclaimed for a held key.
   }
 }
 
@@ -1891,10 +2027,19 @@ function onHistoricalDailyClose(reqId, time, close) {
 // batch). IB-routed: today's semantics — a withStale() snapshot, but only
 // while IB is connected (as before, no hydration frame when IB is down).
 function hydrateForClient(client, symbol) {
-  const route = futuRouting.routeFor(client, symbol, Date.now());
+  const now = Date.now();
+  const route = futuRouting.routeFor(client, symbol, now);
   if (route === "futu") {
     const data = futuRouting.futuData(symbol);
-    if (data) sendMessage(client, { type: "price", symbol, data });
+    if (data) {
+      const stale = futuStale(data, now);
+      sendMessage(client, {
+        type: "price",
+        symbol,
+        data: { ...data, stale },
+      });
+      if (stale) markFutuStaleServed(client, symbol, data.timestamp);
+    }
     return;
   }
   if (!ibConnected) return;
@@ -1925,24 +2070,38 @@ function dropIbLine(symbol) {
   verbose(`futu serves ${symbol} — IB line dropped`);
 }
 
-// Futu -> relay batch: accept a tick only for a symbol this relay currently
-// routes to Futu, then deliver only to the clients routed to Futu for it.
+// Futu -> relay batch: cache every row for a symbol the latest assign admits
+// (ok) — hold-down included — then serve it only to clients routed to Futu.
+// The cache is what makes futuLive true and what hydrateForClient serves on a
+// route switch, so an ok-but-quiet symbol keeps its IB line until a real Futu
+// row exists (D10/Fable F1).
 function onFutuBatch(updates) {
   if (!updates || typeof updates !== "object") return;
   const now = Date.now();
   for (const [symbol, data] of Object.entries(updates)) {
     if (data == null || typeof data !== "object") continue;
-    if (!futuRouting.futuLive(symbol, now)) continue;
+    if (!futuRouting.isOk(symbol)) continue;
+    const payload = { ...data, source: data.source ?? "futu" };
+    const wasLive = futuRouting.futuLive(symbol, now);
+    futuRouting.recordTick(symbol, payload);
+    const live = futuRouting.futuLive(symbol, now);
+    if (live && !wasLive) {
+      // This row just made the symbol live — flip routes and hydrate in the
+      // same turn instead of leaving the first row to the reconcile timer
+      // (which races the batch flush and made delivery timing-dependent).
+      reconcileFutuRoutes();
+    }
+    if (!live) continue;
     const subs = symbolSubscribers.get(symbol);
     if (!subs || subs.size === 0) continue;
-    const payload = { ...data, source: data.source ?? "futu" };
-    let accepted = false;
+    payload.stale = futuStale(payload, now);
     for (const client of subs) {
       if (futuRouting.routeFor(client, symbol, now) !== "futu") continue;
       bufferPriceForClient(client, symbol, payload);
-      accepted = true;
+      if (payload.stale === true) {
+        markFutuStaleServed(client, symbol, payload.timestamp);
+      }
     }
-    if (accepted) futuRouting.recordTick(symbol, payload);
   }
 }
 
@@ -1965,13 +2124,29 @@ function reconcileFutuRoutes() {
       hydrateForClient(client, symbol);
     }
   }
+  // A quiet Futu row ages past the stale threshold without new ticks — the
+  // route doesn't change, so nothing above republishes it. For each
+  // Futu-routed (client, symbol) whose last delivered row was still fresh,
+  // buffer the same cached row once with stale:true — identical values and
+  // timestamp, only the flag flips, and each row flips at most once.
+  for (const [symbol, subs] of symbolSubscribers) {
+    const data = futuRouting.futuData(symbol);
+    if (!data || !futuStale(data, now)) continue;
+    for (const client of subs) {
+      if (futuRouting.routeFor(client, symbol, now) !== "futu") continue;
+      if (futuStaleServed.get(client)?.get(symbol) === data.timestamp) continue;
+      bufferPriceForClient(client, symbol, { ...data, stale: true });
+      markFutuStaleServed(client, symbol, data.timestamp);
+    }
+  }
   for (const [symbol, subs] of symbolSubscribers) {
     if (futuRouting.ibDemand(symbol, subs, now)) continue;
     dropIbLine(symbol);
   }
   if (ibConnected) fillFreeLines();
   if (futuClient) {
-    futuClient.setWant(futuRouting.desiredWant(clientSymbols));
+    const want = futuRouting.desiredWant(clientSymbols, subscriberTiers);
+    futuClient.setWant(want.symbols, want.tiers);
   }
 }
 
@@ -1983,6 +2158,18 @@ function restoreSubscriptions() {
   // later chain strikes come in, and an evicted symbol can't tick to re-prove
   // its heat — so it would stay stale after every reconnect.
   const keys = [...symbolSubscribers.keys()].sort((a, b) => {
+    // Held keys restore before view keys (D13), then by recency within tier —
+    // the same merged default-held rule as lineEntries.
+    const heldRank = (k) => {
+      const tierMap = subscriberTiers.get(k);
+      return !tierMap ||
+        tierMap.size === 0 ||
+        [...tierMap.values()].includes("held")
+        ? 0
+        : 1;
+    };
+    const diff = heldRank(a) - heldRank(b);
+    if (diff !== 0) return diff;
     const at = symbolStates.get(a)?.lastAccessAt ?? 0;
     const bt = symbolStates.get(b)?.lastAccessAt ?? 0;
     return bt - at;
@@ -2041,7 +2228,7 @@ async function handleClientMessage(client, data) {
       const subscribed = [];
       // Stock subscriptions (backward compatible)
       for (const symbol of symbols) {
-        subscribeClientToSymbol(client, symbol);
+        subscribeClientToSymbol(client, symbol, message.tiers.get(symbol));
         const ibContract = stockContract(symbol);
         ensureSymbolState(symbol, ibContract);
         if (ibConnected) {
@@ -2062,8 +2249,9 @@ async function handleClientMessage(client, data) {
       // Option contract subscriptions
       for (const c of contracts) {
         const key = optionKey(c);
-        futuRouting.pinIbOnly(key); // options never route to Futu
-        subscribeClientToSymbol(client, key);
+        // Options stay on IB unless XENON_FUTU_OPTIONS=1.
+        if (!XENON_FUTU_OPTIONS) futuRouting.pinIbOnly(key);
+        subscribeClientToSymbol(client, key, c.tier);
         const ibContract = optionContract(
           c.symbol,
           c.expiry,
@@ -2619,13 +2807,13 @@ wss.on("connection", (client, req) => {
     subId = null;
   }
   // ?quotes=futu-first is honoured only for X-API-Key-authenticated upgrades.
-  // Ticket-authed connections (browsers and server-side ticket clients) always
-  // keep the IB route. Other query params are preserved and ignored as today.
+  // Every other connection takes the XENON_QUOTES_DEFAULT route (ib unless
+  // the env flips it) — there is no ?quotes=ib opt-out either.
   futuRouting.setPref(
     client,
     clientAuth.get(client) === "api-key" && quotesParam === "futu-first"
       ? "futu-first"
-      : "ib",
+      : XENON_QUOTES_DEFAULT,
   );
   if (subId) {
     clientId.set(client, subId);
@@ -2698,7 +2886,8 @@ if (FUTU_QUOTES_URL) {
     onSocket: (open) => {
       futuRouting.noteSocket(open);
       if (open) {
-        futuClient?.setWant(futuRouting.desiredWant(clientSymbols));
+        const want = futuRouting.desiredWant(clientSymbols, subscriberTiers);
+        futuClient?.setWant(want.symbols, want.tiers);
       } else {
         reconcileFutuRoutes();
       }

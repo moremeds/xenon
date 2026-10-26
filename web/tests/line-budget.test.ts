@@ -12,13 +12,16 @@ const modPath = new URL(
 const { pickEvictable, pickAdmittable } = await import(modPath);
 
 describe("pickEvictable", () => {
+  // Untiered entries count as held, so the LRU cases below pass
+  // allowHeld=true explicitly — the incoming-held subscribe the classic
+  // pre-tier behavior models.
   it("returns the oldest-access live line", () => {
     const entries = [
       { key: "AAPL", tickerId: 1, lastAccessAt: 300 },
       { key: "FAR_OTM", tickerId: 2, lastAccessAt: 100 }, // idlest
       { key: "TSLA", tickerId: 3, lastAccessAt: 200 },
     ];
-    expect(pickEvictable(entries)).toBe("FAR_OTM");
+    expect(pickEvictable(entries, null, true)).toBe("FAR_OTM");
   });
 
   it("never evicts the incoming symbol even if it is idlest", () => {
@@ -26,7 +29,7 @@ describe("pickEvictable", () => {
       { key: "NEW", tickerId: 9, lastAccessAt: 1 }, // idlest but excluded
       { key: "AAPL", tickerId: 1, lastAccessAt: 300 },
     ];
-    expect(pickEvictable(entries, "NEW")).toBe("AAPL");
+    expect(pickEvictable(entries, "NEW", true)).toBe("AAPL");
   });
 
   it("skips lines that hold no ticket (already evicted)", () => {
@@ -34,7 +37,7 @@ describe("pickEvictable", () => {
       { key: "EVICTED", tickerId: null, lastAccessAt: 1 },
       { key: "AAPL", tickerId: 1, lastAccessAt: 300 },
     ];
-    expect(pickEvictable(entries)).toBe("AAPL");
+    expect(pickEvictable(entries, null, true)).toBe("AAPL");
   });
 
   it("returns null when nothing is live", () => {
@@ -49,7 +52,24 @@ describe("pickEvictable", () => {
       { key: "STALE", tickerId: 1 }, // no lastAccessAt → 0 → idlest
       { key: "AAPL", tickerId: 2, lastAccessAt: 300 },
     ];
-    expect(pickEvictable(entries)).toBe("STALE");
+    expect(pickEvictable(entries, null, true)).toBe("STALE");
+  });
+
+  it("evicts the idlest view line first; held victims need allowHeld", () => {
+    const entries = [
+      { key: "HELD_IDLE", tickerId: 1, lastAccessAt: 1 },
+      { key: "VIEW", tickerId: 2, lastAccessAt: 999, tier: "view" },
+    ];
+    // View lines leave first even though the held line is idler.
+    expect(pickEvictable(entries)).toBe("VIEW");
+    const heldOnly = [
+      { key: "HELD_A", tickerId: 1, lastAccessAt: 1 },
+      { key: "HELD_B", tickerId: 2, lastAccessAt: 2 },
+    ];
+    // View demand / the pending-held reclaim never displace a held line.
+    expect(pickEvictable(heldOnly)).toBe(null);
+    // A held subscribe keeps the pre-tier LRU on a full held budget.
+    expect(pickEvictable(heldOnly, null, true)).toBe("HELD_A");
   });
 });
 

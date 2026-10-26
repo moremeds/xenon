@@ -15,10 +15,13 @@ import {
   type WSDepthBatchMessage,
   type WSTapeBatchMessage,
   type WSDepthUnavailableMessage,
+  type SymbolSubscription,
   normalizeSymbolList,
+  normalizeSymbolSubscriptions,
   uniqueOptionContracts,
-  symbolKey,
-  contractsKey,
+  symbolEntryKey,
+  contractEntryKey,
+  stripEntryTier,
   optionKey,
   parseOptionKey,
   forexKey,
@@ -39,9 +42,10 @@ export type PriceUpdate = {
 };
 
 export type UsePricesOptions = {
-  /** Symbols to subscribe to (stock tickers) */
-  symbols: string[];
-  /** Option contracts to subscribe to */
+  /** Symbols to subscribe to (stock tickers). Entries may carry a
+   *  `{symbol, tier}` tag — contract-x7 `held`/`view`; bare = held. */
+  symbols: SymbolSubscription[];
+  /** Option contracts to subscribe to; `contract.tier` tags the entry. */
   contracts?: OptionContract[];
   /** Index contracts to subscribe to (e.g. VIX, VVIX) */
   indexes?: IndexContract[];
@@ -197,7 +201,7 @@ export function applyDepthMessage(
 }
 
 export type DesiredSubscriptions = {
-  symbols: string[];
+  symbols: SymbolSubscription[];
   contracts: OptionContract[];
   indexes: IndexContract[];
   forexes: ForexContract[];
@@ -207,7 +211,9 @@ export type DesiredSubscriptions = {
 export type SubscriptionDiff = {
   currentHash: string;
   changed: boolean;
-  addedSymbols: string[];
+  /** Wire entries — bare strings or `{symbol, tier}` (relay tier tagging). */
+  addedSymbols: SymbolSubscription[];
+  /** Wire contracts — may carry `tier`. */
   addedContracts: OptionContract[];
   addedIndexes: IndexContract[];
   addedForexes: ForexContract[];
@@ -227,9 +233,15 @@ export type SubscriptionDiff = {
  */
 export function subscriptionHash(d: DesiredSubscriptions): string {
   return (
-    symbolKey(d.symbols) +
+    d.symbols
+      .map(symbolEntryKey)
+      .sort()
+      .join(",") +
     "|" +
-    contractsKey(d.contracts) +
+    d.contracts
+      .map(contractEntryKey)
+      .sort()
+      .join(",") +
     "|" +
     d.indexes
       .map((i) => `${i.symbol}@${i.exchange}`)
@@ -260,13 +272,19 @@ export function computeSubscriptionDiff(
     lastFx = "",
     lastStk = "",
   ] = lastHash.split("|");
+  // Hash segments hold ENTRY keys ("SYM:held" / "OPT_..._C:view" for tagged
+  // entries). Adds diff on the entry key so a tier-only change re-emits the
+  // entry; removals diff on the BARE identity so a tier change never produces
+  // an unsubscribe (which would evict the live price row).
   const prevSymbolSet = new Set(lastSyms.split(",").filter(Boolean));
   const prevContractSet = new Set(lastCts.split(",").filter(Boolean));
   const prevIndexSet = new Set(lastIdxs.split(",").filter(Boolean));
   const prevForexSet = new Set(lastFx.split(",").filter(Boolean));
   const prevStockSet = new Set(lastStk.split(",").filter(Boolean));
 
-  const currSymbolSet = new Set(desired.symbols);
+  const currSymbolSet = new Set(
+    desired.symbols.map((s) => (typeof s === "string" ? s : s.symbol)),
+  );
   const currContractSet = new Set(desired.contracts.map(optionKey));
   const currIndexSet = new Set(
     desired.indexes.map((idx) => `${idx.symbol}@${idx.exchange}`),
@@ -281,19 +299,23 @@ export function computeSubscriptionDiff(
   return {
     currentHash,
     changed: currentHash !== lastHash,
-    addedSymbols: desired.symbols.filter((s) => !prevSymbolSet.has(s)),
+    addedSymbols: desired.symbols.filter(
+      (s) => !prevSymbolSet.has(symbolEntryKey(s)),
+    ),
     addedContracts: desired.contracts.filter(
-      (c) => !prevContractSet.has(optionKey(c)),
+      (c) => !prevContractSet.has(contractEntryKey(c)),
     ),
     addedIndexes: desired.indexes.filter(
       (idx) => !prevIndexSet.has(`${idx.symbol}@${idx.exchange}`),
     ),
     addedForexes: desired.forexes.filter((f) => !prevForexSet.has(forexKey(f))),
     addedStocks: desired.stocksMeta.filter((s) => !prevStockSet.has(s.symbol)),
-    removedSymbols: [...prevSymbolSet].filter((s) => !currSymbolSet.has(s)),
-    removedContractKeys: [...prevContractSet].filter(
-      (k) => !currContractSet.has(k),
+    removedSymbols: [...new Set([...prevSymbolSet].map(stripEntryTier))].filter(
+      (s) => !currSymbolSet.has(s),
     ),
+    removedContractKeys: [
+      ...new Set([...prevContractSet].map(stripEntryTier)),
+    ].filter((k) => !currContractSet.has(k)),
     removedIndexSymbols: [
       ...new Set(removedIndexKeys.map((k) => k.split("@")[0])),
     ],
@@ -353,13 +375,13 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
   );
 
   // Desired subscription tracking (ref — not rendered)
-  const desiredRef = useRef<{
-    symbols: string[];
-    contracts: OptionContract[];
-    indexes: IndexContract[];
-    forexes: ForexContract[];
-    stocksMeta: StockMeta[];
-  }>({ symbols: [], contracts: [], indexes: [], forexes: [], stocksMeta: [] });
+  const desiredRef = useRef<DesiredSubscriptions>({
+    symbols: [],
+    contracts: [],
+    indexes: [],
+    forexes: [],
+    stocksMeta: [],
+  });
   const lastSentHashRef = useRef("");
 
   // Focused-depth tracking — kept SEPARATE from the price subscription diff so
@@ -377,9 +399,20 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
   const onPriceUpdateRef = useRef(onPriceUpdate);
   const onConnectionChangeRef = useRef(onConnectionChange);
 
-  // Stable hashes for change detection
-  const symbolHash = symbolKey(symbols);
-  const contractHash = contractsKey(contracts);
+  // Stable hashes for change detection — tier-aware so a tier-only change on
+  // the same symbol/contract still re-runs the normalizers below.
+  const symbolHash = useMemo(
+    () =>
+      symbols
+        .map((e) => (typeof e === "string" ? e : `${e.symbol}:${e.tier}`))
+        .sort()
+        .join(","),
+    [symbols],
+  );
+  const contractHash = useMemo(
+    () => contracts.map(contractEntryKey).sort().join(","),
+    [contracts],
+  );
   const indexHash = useMemo(
     () =>
       indexes
@@ -392,7 +425,7 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
   const stockMetaHash = stocksMetaKey(stocksMeta);
   // Hash keys avoid recomputation when parents pass new array identities with the same subscription set.
   const normalizedSymbols = useMemo(
-    () => normalizeSymbolList(symbols),
+    () => normalizeSymbolSubscriptions(symbols),
     [symbolHash], // eslint-disable-line react-hooks/exhaustive-deps -- symbolHash content-keys `symbols`
   );
   const normalizedContracts = useMemo(
