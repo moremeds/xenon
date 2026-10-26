@@ -277,6 +277,7 @@ test("R234-2: recovery still needs the full 60s hold-down (default values)", asy
   assert.equal(ws.sent.at(-1).action, "want");
   assert.equal(ws.sent.at(-1).gen, 2);
   ws.serviceMessage({ type: "assign", gen: 2, ok: ["AAPL"], pending: [], rejected: [] });
+  routing.recordTick("AAPL", { last: 1 }); // first row after re-ok (D10)
   // A real service streams health continuously — it must keep streaming
   // through the hold-down or the 15 s deadline fires again. Protocol pongs
   // keep the socket up (20 s pong timeout).

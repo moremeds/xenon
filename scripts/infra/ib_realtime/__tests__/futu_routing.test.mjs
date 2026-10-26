@@ -26,6 +26,9 @@ function liveFutu(r, okSymbols, now = 0, wantGen = 1) {
     now,
     wantGen,
   );
+  // A symbol is not Futu-live without a cached row (D10) — a live symbol
+  // in this suite always has one.
+  for (const s of okSymbols) r.recordTick(s, { last: 1 });
 }
 
 test("want set = futu-first clients' symbols minus IB-pinned", () => {
@@ -102,6 +105,35 @@ test("hold-down: not routed to futu until ok is stable for 60s", () => {
   assert.equal(r.futuLive("AAPL", HD), true);
 });
 
+test("futuLive requires a cached row — a quiet symbol keeps IB demand", () => {
+  const r = setup();
+  r.setPref(futuClientA, "futu-first");
+  r.noteSocket(true);
+  r.noteHealth({ opend_connected: true, quota: { ceiling: 800 } });
+  r.applyAssign({ gen: 1, ok: ["AAPL"], pending: [], rejected: [] }, 0, 1);
+  const subs = new Set([futuClientA]);
+  const t = HD + 1;
+  // Hold-down elapsed but no Futu row ever arrived: the symbol must NOT go
+  // live — an IB frame would otherwise freeze (Fable F1) and hydration
+  // would have nothing to send.
+  assert.equal(r.futuLive("AAPL", t), false);
+  assert.equal(r.ibDemand("AAPL", subs, t), true);
+  // The first cached row flips it live and releases the IB line.
+  r.recordTick("AAPL", { last: 10 });
+  assert.equal(r.futuLive("AAPL", t), true);
+  assert.equal(r.ibDemand("AAPL", subs, t), false);
+});
+
+test("isOk reflects the ok set of the latest accepted assign", () => {
+  const r = setup();
+  liveFutu(r, ["AAPL"], 0);
+  assert.equal(r.isOk("AAPL"), true);
+  assert.equal(r.isOk("MSFT"), false);
+  r.applyAssign({ gen: 1, ok: ["MSFT"], pending: [], rejected: [] }, 10, 1);
+  assert.equal(r.isOk("AAPL"), false);
+  assert.equal(r.isOk("MSFT"), true);
+});
+
 test("IB demand drops for futu-served symbols (line freed)", () => {
   const r = setup();
   r.setPref(futuClientA, "futu-first");
@@ -149,6 +181,7 @@ test("OpenD loss / socket loss fails over to IB immediately", () => {
     t + 20,
     2,
   );
+  r.recordTick("AAPL", { last: 1 }); // fresh row after the down (D10)
   assert.equal(r.futuLive("AAPL", t + 20 + HD + 1), true);
   r.noteSocket(false);
   assert.equal(r.futuLive("AAPL", t + 20 + HD + 1), false);
@@ -173,6 +206,7 @@ test("recovery: fresh health + new ok + full hold-down", () => {
   r.noteSocket(true);
   r.noteHealth({ opend_connected: true, quota: {} });
   r.applyAssign({ gen: 1, ok: ["AAPL"], pending: [], rejected: [] }, 1000, 1);
+  r.recordTick("AAPL", { last: 1 }); // fresh row after the down (D10)
   assert.equal(r.futuLive("AAPL", 1000 + HD - 1), false);
   assert.equal(r.futuLive("AAPL", 1000 + HD), true);
 });
@@ -200,6 +234,7 @@ test("same-gen assign applies partition changes: pending→ok→session", () => 
     G,
   );
   assert.deepEqual(p2.entered, ["AAPL"]);
+  r.recordTick("AAPL", { last: 1 }); // first row after admission (D10)
   assert.equal(r.futuLive("AAPL", 100 + HD - 1), false);
   assert.equal(r.futuLive("AAPL", 100 + HD), true);
 
@@ -219,6 +254,7 @@ test("same-gen no-change assign does NOT restart the hold-down", () => {
   r.noteHealth({ opend_connected: true, quota: {} });
   const G = 5;
   r.applyAssign({ gen: G, ok: ["AAPL"], pending: [], rejected: [] }, 0, G);
+  r.recordTick("AAPL", { last: 1 }); // row cached during the hold-down (D10)
   // Periodic quota-refresh assign, same ok — okSince must stay at t=0.
   r.applyAssign({ gen: G, ok: ["AAPL"], pending: [], rejected: [] }, 900, G);
   assert.equal(r.futuLive("AAPL", HD), true);
@@ -231,6 +267,7 @@ test("symbol leaving ok needs a fresh hold-down to return", () => {
   r.applyAssign({ gen: 2, ok: [], pending: [], rejected: [] }, HD + 1, 2);
   assert.equal(r.futuLive("AAPL", HD + 2), false);
   r.applyAssign({ gen: 2, ok: ["AAPL"], pending: [], rejected: [] }, HD + 5, 2);
+  r.recordTick("AAPL", { last: 1 }); // leaving ok also drops the cached row
   assert.equal(r.futuLive("AAPL", HD + 5 + HD - 1), false);
   assert.equal(r.futuLive("AAPL", HD + 5 + HD), true);
 });
@@ -258,6 +295,7 @@ test("assigns for a gen other than the current want gen are rejected", () => {
       .ignored,
     false,
   );
+  r.recordTick("AAPL", { last: 1 }); // a live symbol also needs a row (D10)
   assert.equal(r.futuLive("AAPL", HD + 2), true);
 });
 

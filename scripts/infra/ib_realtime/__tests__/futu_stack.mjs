@@ -164,6 +164,7 @@ export async function startStack(extraEnv = {}) {
     });
     ws.msgs = msgs;
     ws.batches = () => msgs.filter((m) => m.type === "batch");
+    ws.statuses = () => msgs.filter((m) => m.type === "status");
     return new Promise((resolve, reject) => {
       ws.on("open", () => resolve(ws));
       ws.on("error", reject);

@@ -141,6 +141,16 @@ function lastFutuStatus(ws) {
   return ws.statuses().at(-1)?.providers?.futu ?? null;
 }
 
+// The first Futu row for a symbol flips the route and reaches the client via
+// the hydration `price` frame (D10); rows after the flip arrive in `batch`.
+function hasFutuTick(ws, symbol, last) {
+  return ws.msgs.some(
+    (m) =>
+      m.updates?.[symbol]?.last === last ||
+      (m.type === "price" && m.symbol === symbol && m.data?.last === last),
+  );
+}
+
 async function admitOnFutu(symbols) {
   await waitFor(() =>
     symbols.every((s) => futuWants.at(-1)?.symbols?.includes(s)),
@@ -309,9 +319,7 @@ test("OpenD loss fails back to IB within the deadline", async () => {
   await admitOnFutu(["MSFT"]);
   await sleep(HD + 300);
   futuSend({ type: "batch", updates: { MSFT: { symbol: "MSFT", last: 401 } } });
-  await waitFor(() =>
-    opted.batches().some((b) => b.updates?.MSFT?.last === 401),
-  );
+  await waitFor(() => hasFutuTick(opted, "MSFT", 401));
 
   // OpenD drops: the service reports opend_connected:false, then goes quiet.
   futuHealthOn = false;
@@ -333,7 +341,7 @@ test("stalled service (no health) fails back within the health deadline", async 
   await admitOnFutu(["SPY"]);
   await sleep(HD + 300);
   futuSend({ type: "batch", updates: { SPY: { symbol: "SPY", last: 500 } } });
-  await waitFor(() => opted.batches().some((b) => b.updates?.SPY));
+  await waitFor(() => hasFutuTick(opted, "SPY", 500));
 
   // Stall: the health stream stops entirely.
   futuHealthOn = false;
@@ -377,10 +385,7 @@ test("recovery after hold-down re-routes to Futu", async () => {
   });
   await sleep(HD + 300);
   futuSend({ type: "batch", updates: { QQQ: { symbol: "QQQ", last: 480 } } });
-  await waitFor(
-    () => opted.batches().some((b) => b.updates?.QQQ?.last === 480),
-    { timeout: 3000 },
-  );
+  await waitFor(() => hasFutuTick(opted, "QQQ", 480), { timeout: 3000 });
   opted.close();
 });
 
@@ -441,7 +446,7 @@ test("same-gen assign partition moves apply without a new want", async () => {
   futuSend({ type: "assign", gen, ok: ["COST"], pending: [], rejected: [] });
   await sleep(HD + 300);
   futuSend({ type: "batch", updates: { COST: { symbol: "COST", last: 901 } } });
-  await waitFor(() => opted.batches().some((b) => b.updates?.COST));
+  await waitFor(() => hasFutuTick(opted, "COST", 901));
 
   // Same-gen session pullback — ok→pending fails back to IB immediately.
   const n = opted.batches().length;

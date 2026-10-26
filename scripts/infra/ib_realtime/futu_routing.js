@@ -17,6 +17,10 @@
 //
 // Per-source state: futuStates holds the latest Futu-sourced PriceData per
 // symbol (hydration); it and ok/okSince are cleared on every down event.
+// futuLive requires a cached row (D10): the relay caches batch rows for
+// ok-but-not-live symbols during the hold-down instead of serving them, so a
+// route never flips to Futu before real data exists to hydrate it — a quiet
+// symbol otherwise loses its IB line and shows a frozen IB frame (Fable F1).
 
 export const FUTU_HOLD_DOWN_MS = 60_000;
 
@@ -111,13 +115,20 @@ export function createFutuRouting({ holdDownMs = FUTU_HOLD_DOWN_MS } = {}) {
   }
 
   // Futu serves this symbol now: link up + not IB-pinned + in ok +
-  // hold-down elapsed.
+  // hold-down elapsed + a Futu row already cached (D10).
   function futuLive(symbol, now) {
     if (!up) return false;
     if (ibPinned.has(symbol)) return false;
     if (!okSet.has(symbol)) return false;
     const since = okSince.get(symbol);
-    return since != null && now - since >= holdDownMs;
+    return since != null && now - since >= holdDownMs && futuStates.has(symbol);
+  }
+
+  // Symbol is admitted by the latest accepted assign (whether or not the
+  // hold-down elapsed or a row exists yet). Batch rows for ok symbols get
+  // cached so a later route switch can hydrate from them.
+  function isOk(symbol) {
+    return okSet.has(symbol);
   }
 
   function routeFor(client, symbol, now) {
@@ -195,6 +206,7 @@ export function createFutuRouting({ holdDownMs = FUTU_HOLD_DOWN_MS } = {}) {
     isUp,
     applyAssign,
     futuLive,
+    isOk,
     routeFor,
     ibDemand,
     desiredWant,

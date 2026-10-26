@@ -82,13 +82,26 @@ test("XENON_QUOTES_DEFAULT=ib keeps tickets on IB; api-key opt-in unchanged", as
       WMT: { symbol: "WMT", last: 90 },
     },
   });
+  // The first row for a symbol flips the route and is delivered via the
+  // hydration `price` frame (D10); later rows arrive as `batch`. Accept either.
   await stack.waitFor(
-    () => opted.batches().some((b) => b.updates?.MSFT?.last === 401),
+    () =>
+      opted.msgs.some(
+        (m) =>
+          m.updates?.MSFT?.last === 401 ||
+          (m.symbol === "MSFT" && m.data?.last === 401),
+      ),
     { timeout: 3000 },
   );
   await sleep(200);
   assert.equal(
-    browser.batches().some((b) => b.updates?.WMT || b.updates?.MSFT),
+    browser.msgs.some(
+      (m) =>
+        m.updates?.WMT ||
+        m.updates?.MSFT ||
+        m.symbol === "WMT" ||
+        m.symbol === "MSFT",
+    ),
     false,
     "ticket client received a futu tick under default=ib",
   );

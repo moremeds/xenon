@@ -834,8 +834,21 @@ function sendStatus(client) {
     ib_issue: ibConnectionIssue?.code ?? null,
     ib_status_message: ibConnectionIssue?.operatorMessage ?? null,
     subscriptions,
-    providers: { futu: futuRouting.status() },
+    providers: {
+      futu: { ...futuRouting.status(), routes: routeCountsFor(client) },
+    },
   });
+}
+
+// Per-client route counts for observability: how many of this client's
+// subscriptions are currently served from Futu vs IB.
+function routeCountsFor(client) {
+  const counts = { futu: 0, ib: 0 };
+  for (const route of clientRoutes.get(client)?.values() ?? []) {
+    if (route === "futu") counts.futu += 1;
+    else counts.ib += 1;
+  }
+  return counts;
 }
 
 function broadcastStatus() {
@@ -1514,6 +1527,16 @@ function withStale(state) {
   };
 }
 
+// stale on a Futu-routed row: its own timestamp aged past STALE_TICK_MS — the
+// same threshold withStale applies to IB rows, so consumers see the same flag
+// semantics on both sources. One uniform rule: a quiet overnight (X6) symbol
+// ages out exactly like a quiet RTH one, with no session carve-out, and a row
+// without a parseable timestamp is stale.
+function futuStale(data, now) {
+  const ts = Date.parse(data?.timestamp ?? "");
+  return !Number.isFinite(ts) || now - ts > STALE_TICK_MS;
+}
+
 /* ─── L1 market-data line budget (LRU) ──────────────────────────────────────
  * IB caps simultaneous market-data lines at ~100 per ACCOUNT (shared across all
  * API clients). The subscribed universe (portfolio + open option chains, ~62
@@ -1946,10 +1969,17 @@ function onHistoricalDailyClose(reqId, time, close) {
 // batch). IB-routed: today's semantics — a withStale() snapshot, but only
 // while IB is connected (as before, no hydration frame when IB is down).
 function hydrateForClient(client, symbol) {
-  const route = futuRouting.routeFor(client, symbol, Date.now());
+  const now = Date.now();
+  const route = futuRouting.routeFor(client, symbol, now);
   if (route === "futu") {
     const data = futuRouting.futuData(symbol);
-    if (data) sendMessage(client, { type: "price", symbol, data });
+    if (data) {
+      sendMessage(client, {
+        type: "price",
+        symbol,
+        data: { ...data, stale: futuStale(data, now) },
+      });
+    }
     return;
   }
   if (!ibConnected) return;
@@ -1980,24 +2010,27 @@ function dropIbLine(symbol) {
   verbose(`futu serves ${symbol} — IB line dropped`);
 }
 
-// Futu -> relay batch: accept a tick only for a symbol this relay currently
-// routes to Futu, then deliver only to the clients routed to Futu for it.
+// Futu -> relay batch: cache every row for a symbol the latest assign admits
+// (ok) — hold-down included — then serve it only to clients routed to Futu.
+// The cache is what makes futuLive true and what hydrateForClient serves on a
+// route switch, so an ok-but-quiet symbol keeps its IB line until a real Futu
+// row exists (D10/Fable F1).
 function onFutuBatch(updates) {
   if (!updates || typeof updates !== "object") return;
   const now = Date.now();
   for (const [symbol, data] of Object.entries(updates)) {
     if (data == null || typeof data !== "object") continue;
+    if (!futuRouting.isOk(symbol)) continue;
+    const payload = { ...data, source: data.source ?? "futu" };
+    futuRouting.recordTick(symbol, payload);
     if (!futuRouting.futuLive(symbol, now)) continue;
     const subs = symbolSubscribers.get(symbol);
     if (!subs || subs.size === 0) continue;
-    const payload = { ...data, source: data.source ?? "futu" };
-    let accepted = false;
+    payload.stale = futuStale(payload, now);
     for (const client of subs) {
       if (futuRouting.routeFor(client, symbol, now) !== "futu") continue;
       bufferPriceForClient(client, symbol, payload);
-      accepted = true;
     }
-    if (accepted) futuRouting.recordTick(symbol, payload);
   }
 }
 
