@@ -73,20 +73,17 @@ def test_dry_run_connects_to_nothing(capsys):
     assert rc == 0 and "US.AAPL261120C200000" in out
 
 
-# --- tick rule, mids, combo ----------------------------------------------
+# --- cents, mids, combo ---------------------------------------------------
 
 
-def test_tick_rule():
-    assert m.tick_size("STK", 450.0) == 0.01
-    assert m.tick_size("OPT", 2.99) == 0.01
-    assert m.tick_size("OPT", 3.00) == 0.05
-    assert m.tick_size("OPT", None) == 0.01
+def test_no_tick_rule_left():
+    assert not hasattr(m, "tick_size") and not hasattr(m, "diff_ticks")
 
 
-def test_diff_ticks():
-    assert m.diff_ticks(1.03, 1.00, 0.01) == pytest.approx(3.0)
-    assert m.diff_ticks(3.10, 3.00, 0.05) == pytest.approx(2.0)
-    assert m.diff_ticks(None, 1.0, 0.01) is None
+def test_diff_cents():
+    assert m.diff_cents(1.03, 1.00) == pytest.approx(3.0)
+    assert m.diff_cents(3.10, 3.00) == pytest.approx(10.0)  # same cents at any price level
+    assert m.diff_cents(None, 1.0) is None
 
 
 def test_combo_mid_sign_long_plus_short_minus():
@@ -121,7 +118,9 @@ def test_quantile_and_stat_summary():
     s = m.stat_summary([1.0, None, 2.0, 3.0, 4.0, 5.0])
     assert (s["n"], s["median"], s["q1"], s["q3"]) == (5, 3.0, 2.0, 4.0)
     a = m.abs_summary([-2.0, 0.5, 1.0, None])
-    assert a["n"] == 3 and a["max"] == 2.0 and a["within"] == pytest.approx(2 / 3)
+    assert a["n"] == 3 and a["max"] == 2.0
+    assert a["within"][1] == pytest.approx(2 / 3) and a["within"][5] == pytest.approx(1.0)
+    assert m.abs_summary([5.0, 5.0001])["within"][5] == pytest.approx(0.5)
 
 
 # --- matched-time join ---------------------------------------------------
@@ -162,7 +161,7 @@ def test_compare_sample_uses_latest_push_at_or_before_t():
     sample = {"key": "SYN", "cycle": 0, "t": 110.0, "bid": 10.01, "ask": 10.03}
     row = m.compare_sample(stock, sample, q["US.SYN"], b["US.SYN"])
     assert row["f_bid"] == 10.00 and row["f_ask"] == 10.02  # the 100.0 push, not the 130.0 one
-    assert row["d_bid"] == pytest.approx(-1.0) and row["d_ask"] == pytest.approx(-1.0)
+    assert row["d_bid"] == pytest.approx(-1.0) and row["d_ask"] == pytest.approx(-1.0)  # cents
     assert row["d_mid"] == pytest.approx(-1.0)
     assert row["book_age_s"] == pytest.approx(10.0)
     assert row["quote_age_s"] == pytest.approx(11.0)
@@ -177,7 +176,7 @@ def test_compare_sample_before_first_push_is_none():
     assert row["f_mid"] is None and row["d_mid"] is None and row["book_age_s"] is None
 
 
-def test_option_greek_ratios_and_tick_choice():
+def test_option_greek_ratios():
     _stock, opt, q, b = _fixture()
     sample = {
         "key": opt.key,
@@ -188,31 +187,68 @@ def test_option_greek_ratios_and_tick_choice():
         "greeks": {"impliedVol": 0.25, "delta": 0.5, "gamma": 0.02, "vega": 0.1, "theta": -0.01},
     }
     row = m.compare_sample(opt, sample, q[opt.futu_code], b[opt.futu_code])
-    assert row["tick"] == 0.01
+    assert "tick" not in row
     assert row["r_iv"] == pytest.approx(1.0)
     assert row["r_delta"] == pytest.approx(1.0)
     assert row["r_gamma"] == pytest.approx(2.0)
     assert row["r_theta"] == pytest.approx(2.0)
 
 
-def test_combo_gaps_per_cycle():
+def _leg(key, cycle, t, ib, fu):
+    return {"key": key, "cycle": cycle, "t": t, "ib_mid": ib, "f_mid": fu}
+
+
+def test_combo_gaps_per_cycle_cents():
     rows = [
-        {"key": "L", "cycle": 0, "ib_mid": 5.00, "f_mid": 5.02},
-        {"key": "S", "cycle": 0, "ib_mid": 2.00, "f_mid": 1.99},
-        {"key": "L", "cycle": 1, "ib_mid": 5.00, "f_mid": None},
-        {"key": "S", "cycle": 1, "ib_mid": 2.00, "f_mid": 2.00},
+        _leg("L", 0, 100.0, 5.00, 5.02),
+        _leg("S", 0, 102.5, 2.00, 1.99),
+        _leg("L", 1, 130.0, 5.00, None),
+        _leg("S", 1, 131.0, 2.00, 2.00),
     ]
     out = m.combo_gaps([m.Vertical("L", "S")], rows)["L:S"]
-    assert out[0]["ib_mid"] == pytest.approx(3.0) and out[0]["f_mid"] == pytest.approx(3.03)
-    assert out[0]["tick"] == 0.05  # IB combo mid 3.00 uses the 0.05 tick
-    assert out[0]["gap_ticks"] == pytest.approx(0.6)  # 0.03 / 0.05
-    assert out[1]["gap_ticks"] is None
+    assert out[0]["ib_spread"] == pytest.approx(3.0) and out[0]["all_futu"] == pytest.approx(3.03)
+    assert out[0]["gap_all_futu_c"] == pytest.approx(3.0)  # 3.03 - 3.00 in cents
+    assert out[0]["sep_s"] == pytest.approx(2.5)
+    assert out[1]["gap_all_futu_c"] is None and out[1]["gap_fl_is_c"] is None and out[1]["gap_il_fs_c"] is None
+
+
+def test_combo_mixed_orientations_expose_cancelled_leg_errors():
+    # synthetic: Futu is 5 cents low on both legs. The errors cancel in the all-Futu spread
+    # but not when one leg comes from Futu and the other from IB.
+    rows = [_leg("L", 0, 100.0, 5.00, 4.95), _leg("S", 0, 101.0, 2.00, 1.95)]
+    c = m.combo_gaps([m.Vertical("L", "S")], rows)["L:S"][0]
+    assert c["gap_all_futu_c"] == pytest.approx(0.0)
+    assert c["gap_fl_is_c"] == pytest.approx(-5.0)  # Futu long 4.95, IB short 2.00 -> 2.95 vs 3.00
+    assert c["gap_il_fs_c"] == pytest.approx(5.0)  # IB long 5.00, Futu short 1.95 -> 3.05 vs 3.00
+    summ = m.combo_summary_of({"L:S": [c]})["L:S"]
+    assert summ["orient"]["all_futu"]["gap_abs"]["within"][1] == pytest.approx(1.0)
+    assert summ["orient"]["fl_is"]["gap_abs"]["within"][1] == pytest.approx(0.0)
+    assert summ["orient"]["fl_is"]["gap_abs"]["within"][5] == pytest.approx(1.0)
+    assert summ["sep"] == {"n": 1, "min": 1.0, "median": 1.0, "max": 1.0}
 
 
 def test_book_cadence():
     c = m.book_cadence([0.0, 30.0, 60.0, 90.0], 0.0, 120.0)
     assert c["pushes"] == 4 and c["per_min"] == pytest.approx(2.0) and c["last_age_s"] == pytest.approx(30.0)
     assert m.book_cadence([], 0.0, 60.0)["last_age_s"] is None
+
+
+def test_book_cadence_ignores_pushes_after_window_end():
+    c = m.book_cadence([1.0, 2.0, 12.0], 0.0, 10.0)
+    assert c["last_age_s"] == pytest.approx(8.0)  # the push at 12 is outside the window
+    assert c["pushes"] == 2
+    assert m.book_cadence([12.0], 0.0, 10.0)["last_age_s"] is None
+
+
+def test_ib_request_duration_per_instrument():
+    stock, _opt, q, b = _fixture()
+    samples = [
+        {"key": "SYN", "cycle": i, "t": 110.0 + i, "t_request": 110.0 + i - d, "bid": 10.0, "ask": 10.02}
+        for i, d in enumerate([2.0, 2.0, 4.0, 2.0, 20.0])
+    ]
+    res = m.analyze([stock], [], q, b, samples, (100.0, 160.0))
+    req = res["per"]["SYN"]["ib_req"]
+    assert req["n"] == 5 and req["median"] == pytest.approx(2.0) and req["p90"] == pytest.approx(13.6)
 
 
 def test_quota_units_from_snapshots():
@@ -284,12 +320,17 @@ def test_render_markdown_sections_and_refusal():
         "# Futu vs IB quotes calibration (2026-10-26, rth)",
         "## Quota units measured",
         "synthetic refusal text",
-        "## Agreement at matched times",
+        "## Agreement at matched times (cents, Futu minus IB)",
+        "within 1¢",
+        "within 5¢",
+        "policy tolerance, not the instrument's tick",
+        "## IB request duration",
         "## Greek ratios",
         "## Decisions (lead fills)",
         "Every number below was observed in this run",
     ):
         assert needle in md
+    assert "tick" not in md.replace("not the instrument's tick", "").lower().replace("ticker", "")
     assert "Overnight observations" not in md
     meta["session"] = "overnight"
     assert "## Overnight observations (stocks)" in m.render_markdown(meta, res)
@@ -303,3 +344,121 @@ def test_recorder_writes_jsonl(tmp_path):
     kinds = [json.loads(line)["kind"] for line in (tmp_path / "r.jsonl").read_text().splitlines()]
     assert kinds == ["futu_quote", "futu_book"]
     assert len(rec.quotes["US.SYN"]) == 1 and len(rec.books["US.SYN"]) == 1
+
+
+# --- offline re-render from a stored JSONL -------------------------------
+
+
+def _write_synthetic_jsonl(path):
+    """Synthetic run: one stock, a vertical, 2 IB cycles, window start/end NOT recorded."""
+    lines = [
+        {
+            "kind": "meta",
+            "ts": 1793024025.0,
+            "session": "rth",
+            "instruments": ["SYN"],
+            "args": {
+                "stocks": "SYN",
+                "options": "",
+                "vertical": [],
+                "minutes": 1.0,
+                "ib_interval": 30.0,
+                "api_url": "http://127.0.0.1:8321",
+                "opend_host": "h",
+                "opend_port": 1,
+                "session": "rth",
+                "out_dir": "o",
+                "doc_dir": "d",
+                "dry_run": False,
+            },
+        },
+        {
+            "kind": "query_subscription",
+            "ts": 1793024026.0,
+            "label": "before",
+            "n_ok": 0,
+            "own_used": 0,
+            "total_used": 5,
+            "remain": 995,
+        },
+        {"kind": "subscribe", "ts": 1793024026.5, "code": "US.SYN", "subtype": "QUOTE", "ok": True, "error": None},
+        {
+            "kind": "query_subscription",
+            "ts": 1793024027.0,
+            "label": "QUOTE stocks",
+            "n_ok": 1,
+            "own_used": 1,
+            "total_used": 6,
+            "remain": 994,
+        },
+        {"kind": "futu_book", "ts": 1793024030.0, "code": "US.SYN", "bid": 10.00, "ask": 10.02},
+        {"kind": "futu_book", "ts": 1793024090.0, "code": "US.SYN", "bid": 10.05, "ask": 10.07},
+        {"kind": "futu_book", "ts": 1793024100.0, "code": "US.SYN", "bid": 99.0, "ask": 99.5},  # after the window
+        {
+            "kind": "ib_sample",
+            "ts": 1793024032.0,
+            "key": "SYN",
+            "cycle": 0,
+            "bid": 10.01,
+            "ask": 10.03,
+            "t_request": 1793024030.0,
+        },
+        {
+            "kind": "ib_sample",
+            "ts": 1793024062.0,
+            "key": "SYN",
+            "cycle": 1,
+            "bid": 10.01,
+            "ask": 10.03,
+            "t_request": 1793024060.0,
+        },
+        {"kind": "unsubscribe", "ts": 1793024095.0, "code": "US.SYN", "subtype": "QUOTE", "error": None},
+    ]
+    path.write_text("\n".join(json.dumps(r) for r in lines) + "\n", encoding="utf-8")
+
+
+def test_load_jsonl_derives_window_when_not_recorded(tmp_path):
+    p = tmp_path / "run.jsonl"
+    _write_synthetic_jsonl(p)
+    run = m.load_jsonl(p)
+    assert run.window == (1793024030.0, 1793024095.0)  # first IB request .. first unsubscribe record
+    assert run.window_source == "derived"
+    assert [i.key for i in run.instruments] == ["SYN"]
+    assert len(run.ib_samples) == 2 and run.ib_samples[0]["t"] == 1793024032.0
+    assert run.meta["ib_cycles"] == 2 and run.meta["date_et"] == "2026-10-26"
+    assert run.meta["quota"][0]["own_per_instrument"] == 1.0
+    # the book push at 100.0 is after window_end: not counted, not used as the end age
+    res = m.analyze(run.instruments, run.verticals, run.quotes, run.books, run.ib_samples, run.window)
+    cad = res["per"]["SYN"]["book_cadence"]
+    assert cad["pushes"] == 2 and cad["last_age_s"] == pytest.approx(5.0)
+
+
+def test_load_jsonl_prefers_recorded_window(tmp_path):
+    p = tmp_path / "run.jsonl"
+    _write_synthetic_jsonl(p)
+    with p.open("a") as fh:
+        fh.write(
+            json.dumps(
+                {"kind": "meta_window", "ts": 1793024094.0, "window_start": 1793024029.0, "window_end": 1793024094.0}
+            )
+            + "\n"
+        )
+    run = m.load_jsonl(p)
+    assert run.window == (1793024029.0, 1793024094.0) and run.window_source == "recorded"
+
+
+def test_from_jsonl_renders_offline(tmp_path, monkeypatch):
+    p = tmp_path / "run.jsonl"
+    _write_synthetic_jsonl(p)
+
+    def _no_network(*a, **k):
+        raise AssertionError("network used in --from-jsonl")
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", _no_network)
+    monkeypatch.setattr(m.ApiClient, "call", _no_network)
+    monkeypatch.delenv("XENON_QUERY_API_KEY", raising=False)
+    rc = m.main(["--from-jsonl", str(p), "--doc-dir", str(tmp_path)])
+    assert rc == 0
+    md = (tmp_path / "futu-vs-ib-quotes-2026-10-26-rth.md").read_text(encoding="utf-8")
+    assert "# Futu vs IB quotes calibration (2026-10-26, rth)" in md
+    assert "derived from the raw samples" in md and f"`{p}`" in md

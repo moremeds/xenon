@@ -17,13 +17,18 @@ Examples:
         --stocks AAPL,SPY,QQQ,NVDA,TSLA --options ... --vertical ... --minutes 10
 
 Definitions used in the summary (all measured, none assumed):
-- Tick rule: stocks 0.01; options below 3.00 use 0.01, 3.00 and above use 0.05.
-  Option ticks are chosen from the IB mid (the price the IB side quotes).
+- Price gaps are in cents (dollars x 100). "within 1 cent" and "within 5 cents" are
+  policy tolerances chosen for this report, not the instrument's tick.
 - Matched time: at each IB sample time t the Futu value is the latest Futu push
   whose receipt time is at or before t. Futu age is t minus that receipt time.
 - Greek ratio = Futu value / IB value, where the Futu IV is divided by 100 first.
   A factor that converts Futu units to IB units is the inverse of the median ratio.
-- Combo mid = sum of per-leg signed mids (long +, short -) per source.
+- Spread mid = sum of per-leg signed mids (long +, short -). For each vertical three
+  spreads are compared with the all-IB spread: all-Futu, Futu long with IB short, and
+  IB long with Futu short. Legs are sampled serially, each at its own IB response time.
+- IB request duration = response time minus request time of one IB sample. The time at
+  which IB acquired the value inside that interval is not recorded.
+- `--from-jsonl PATH` rebuilds every metric and the markdown from a stored JSONL, offline.
 - The IB endpoints give bid/ask (and greeks for options) but no last price, so a
   Futu last can only be compared with the IB mid; this is labelled as such.
 """
@@ -180,22 +185,15 @@ def build_instruments(stocks: Sequence[str], options: Sequence[str], verticals: 
 
 
 # ---------------------------------------------------------------------------
-# Pure parts: tick rule, mids, ratios, stats, matched-time join
+# Pure parts: cents, mids, ratios, stats, matched-time join
 # ---------------------------------------------------------------------------
 
 
-def tick_size(kind: str, price: float | None) -> float:
-    """Stocks 0.01. Options: 0.01 below 3.00, 0.05 at 3.00 and above."""
-    if kind == "OPT" and price is not None and price >= 3.0:
-        return 0.05
-    return 0.01
-
-
-def diff_ticks(a: float | None, b: float | None, tick: float) -> float | None:
-    """(a - b) in ticks, None if either side is missing."""
+def diff_cents(a: float | None, b: float | None) -> float | None:
+    """(a - b) in cents (dollars x 100), None if either side is missing."""
     if a is None or b is None:
         return None
-    return round((a - b) / tick, 6)
+    return round((a - b) * 100.0, 6)
 
 
 def mid_of(bid: float | None, ask: float | None) -> float | None:
@@ -265,15 +263,18 @@ def stat_summary(values: Iterable[float | None]) -> dict[str, Any]:
     }
 
 
-def abs_summary(values: Iterable[float | None], within: float = 1.0) -> dict[str, Any]:
-    """n, median/p90/max of |value| and the share with |value| <= within."""
+WITHIN_CENTS = (1, 5)  # policy tolerances of this report, not the instrument's tick
+
+
+def abs_summary(values: Iterable[float | None], withins: Sequence[int] = WITHIN_CENTS) -> dict[str, Any]:
+    """n, median/p90/max of |value| and, per threshold, the share with |value| <= threshold."""
     vals = [abs(v) for v in values if v is not None]
     return {
         "n": len(vals),
         "median": quantile(vals, 0.5),
         "p90": quantile(vals, 0.9),
         "max": max(vals) if vals else None,
-        "within": (sum(1 for v in vals if v <= within + 1e-9) / len(vals)) if vals else None,
+        "within": {w: ((sum(1 for v in vals if v <= w + 1e-9) / len(vals)) if vals else None) for w in withins},
     }
 
 
@@ -336,7 +337,7 @@ def compare_sample(
     t = float(sample["t"])
     ib_bid, ib_ask = to_float(sample.get("bid")), to_float(sample.get("ask"))
     ib_mid = mid_of(ib_bid, ib_ask)
-    tick = tick_size(inst.kind, ib_mid)
+    t_request = to_float(sample.get("t_request"))
 
     q = quotes.at(t) if quotes is not None else None
     b = books.at(t) if books is not None else None
@@ -352,7 +353,6 @@ def compare_sample(
         "kind": inst.kind,
         "cycle": sample.get("cycle"),
         "t": t,
-        "tick": tick,
         "ib_error": sample.get("error"),
         "ib_bid": ib_bid,
         "ib_ask": ib_ask,
@@ -361,10 +361,11 @@ def compare_sample(
         "f_ask": f_ask,
         "f_mid": f_mid,
         "f_last": f_last,
-        "d_bid": diff_ticks(f_bid, ib_bid, tick),
-        "d_ask": diff_ticks(f_ask, ib_ask, tick),
-        "d_mid": diff_ticks(f_mid, ib_mid, tick),
-        "d_last_vs_ib_mid": diff_ticks(f_last, ib_mid, tick),
+        "d_bid": diff_cents(f_bid, ib_bid),
+        "d_ask": diff_cents(f_ask, ib_ask),
+        "d_mid": diff_cents(f_mid, ib_mid),
+        "d_last_vs_ib_mid": diff_cents(f_last, ib_mid),
+        "ib_req_s": (t - t_request) if t_request is not None else None,
         "quote_age_s": (t - q[0]) if q else None,
         "quote_src_age_s": (t - q_src) if q_src is not None else None,
         "book_age_s": (t - b[0]) if b else None,
@@ -381,9 +382,17 @@ def compare_sample(
     return row
 
 
+ORIENTATIONS = (
+    ("all_futu", "all-Futu"),
+    ("fl_is", "Futu long / IB short"),
+    ("il_fs", "IB long / Futu short"),
+)
+
+
 def combo_gaps(verticals: Sequence[Vertical], rows: Sequence[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """Per vertical and per IB cycle: IB combo mid, Futu combo mid and the gap in ticks.
-    Each leg uses its own matched-time row of that cycle."""
+    """Per vertical and per IB cycle: the all-IB spread, the three Futu-based spreads and each gap
+    to the all-IB spread in cents. A cycle is valid only when all four leg mids exist; otherwise
+    every gap is None. `sep_s` is the time between the two IB leg responses (legs are sampled serially)."""
     by_key_cycle: dict[tuple[str, Any], Mapping[str, Any]] = {(r["key"], r["cycle"]): r for r in rows}
     cycles = sorted({r["cycle"] for r in rows if r.get("cycle") is not None})
     out: dict[str, list[dict[str, Any]]] = {}
@@ -393,19 +402,54 @@ def combo_gaps(verticals: Sequence[Vertical], rows: Sequence[Mapping[str, Any]])
             long_r, short_r = by_key_cycle.get((v.long_key, c)), by_key_cycle.get((v.short_key, c))
             if long_r is None or short_r is None:
                 continue
-            ib = combo_mid([(+1, long_r["ib_mid"]), (-1, short_r["ib_mid"])])
-            fu = combo_mid([(+1, long_r["f_mid"]), (-1, short_r["f_mid"])])
-            tick = tick_size("OPT", abs(ib) if ib is not None else None)
-            series.append({"cycle": c, "ib_mid": ib, "f_mid": fu, "gap_ticks": diff_ticks(fu, ib, tick), "tick": tick})
+            il, is_, fl, fs = long_r["ib_mid"], short_r["ib_mid"], long_r["f_mid"], short_r["f_mid"]
+            complete = None not in (il, is_, fl, fs)
+            spreads = {
+                "ib_spread": combo_mid([(+1, il), (-1, is_)]),
+                "all_futu": combo_mid([(+1, fl), (-1, fs)]),
+                "fl_is": combo_mid([(+1, fl), (-1, is_)]),
+                "il_fs": combo_mid([(+1, il), (-1, fs)]),
+            }
+            entry: dict[str, Any] = {"cycle": c, **spreads, "sep_s": abs(float(long_r["t"]) - float(short_r["t"]))}
+            for o, _label in ORIENTATIONS:
+                entry[f"gap_{o}_c"] = diff_cents(spreads[o], spreads["ib_spread"]) if complete else None
+            series.append(entry)
         out[v.name] = series
     return out
 
 
+def combo_summary_of(combos: Mapping[str, Sequence[Mapping[str, Any]]]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for name, series in combos.items():
+        valid = [s for s in series if s["gap_all_futu_c"] is not None]
+        seps = [s["sep_s"] for s in valid]
+        out[name] = {
+            "cycles": len(series),
+            "pairs": len(valid),
+            "orient": {
+                o: {
+                    "gap": stat_summary(s[f"gap_{o}_c"] for s in series),
+                    "gap_abs": abs_summary(s[f"gap_{o}_c"] for s in series),
+                }
+                for o, _label in ORIENTATIONS
+            },
+            "sep": {
+                "n": len(seps),
+                "min": min(seps) if seps else None,
+                "median": quantile(seps, 0.5),
+                "max": max(seps) if seps else None,
+            },
+        }
+    return out
+
+
 def book_cadence(book_ts: Sequence[float], window_start: float, window_end: float) -> dict[str, Any]:
-    """Push count, pushes per minute over the window and the age of the last push at window end."""
+    """Push count and pushes per minute over the window, and the age at window end of the latest
+    push received at or before window end (a push after the window never counts)."""
     inside = [t for t in book_ts if window_start <= t <= window_end]
     minutes = max((window_end - window_start) / 60.0, 1e-9)
-    last = max(book_ts) if book_ts else None
+    upto = [t for t in book_ts if t <= window_end]
+    last = max(upto) if upto else None
     return {
         "pushes": len(inside),
         "per_min": len(inside) / minutes,
@@ -440,6 +484,11 @@ def analyze(
             "ib_samples": len(mine),
             "ib_errors": sum(1 for r in mine if r["ib_error"]),
             "pairs": sum(1 for r in mine if r["d_mid"] is not None),
+            "ib_req": {
+                "n": sum(1 for r in mine if r["ib_req_s"] is not None),
+                "median": quantile([r["ib_req_s"] for r in mine if r["ib_req_s"] is not None], 0.5),
+                "p90": quantile([r["ib_req_s"] for r in mine if r["ib_req_s"] is not None], 0.9),
+            },
             "bid": stat_summary(r["d_bid"] for r in mine),
             "ask": stat_summary(r["d_ask"] for r in mine),
             "mid": stat_summary(r["d_mid"] for r in mine),
@@ -474,16 +523,13 @@ def analyze(
         per[inst.key] = entry
     agg_greeks = {f: stat_summary(r[f"r_{f}"] for r in rows if r["kind"] == "OPT") for f in GREEK_FIELDS}
     combos = combo_gaps(verticals, rows)
-    combo_summary = {
-        name: {
-            "cycles": len(series),
-            "pairs": sum(1 for s in series if s["gap_ticks"] is not None),
-            "gap": stat_summary(s["gap_ticks"] for s in series),
-            "gap_abs": abs_summary(s["gap_ticks"] for s in series),
-        }
-        for name, series in combos.items()
+    return {
+        "rows": rows,
+        "per": per,
+        "greeks": agg_greeks,
+        "combos": combos,
+        "combo_summary": combo_summary_of(combos),
     }
-    return {"rows": rows, "per": per, "greeks": agg_greeks, "combos": combos, "combo_summary": combo_summary}
 
 
 def quota_units(snapshots: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -553,13 +599,22 @@ def render_markdown(meta: Mapping[str, Any], result: Mapping[str, Any]) -> str:
     L.append("## Run")
     L.append("")
     L.append(f"- Window (ET): {_et(meta['window_start'])} to {_et(meta['window_end'])}")
+    L.append(f"- Window bounds: {meta.get('window_note') or 'recorded by the run'}")
     L.append(
         f"- Session mode: `{session}`; requested minutes: {meta['minutes']}; IB poll interval: {meta['ib_interval']} s; IB cycles: {meta['ib_cycles']}"
     )
     L.append(f"- OpenD: `{meta['opend']}`; xenon API: `{meta['api_url']}`")
-    L.append(f"- Raw samples: `{meta['jsonl']}`")
+    counts = meta.get("raw_counts")
     L.append(
-        "- Tick rule: stocks 0.01; options below 3.00 use 0.01, 3.00 and above 0.05 (chosen from the IB mid). Combo gaps use the same rule on the IB combo mid."
+        f"- Raw samples: `{meta['jsonl']}`"
+        + (
+            f" (gitignored; {counts['book']} book pushes, {counts['quote']} quote pushes, {counts['ib']} IB samples)"
+            if counts
+            else ""
+        )
+    )
+    L.append(
+        '- Units: price gaps are in cents (dollars x 100). "within 1¢" and "within 5¢" are policy tolerance, not the instrument\'s tick; the instrument and combo price increments were not verified.'
     )
     L.append(
         '- Matched time: Futu value = latest Futu push with receipt time at or before the IB sample time. IB `last` is not exposed by the IB endpoints, so "Futu last - IB mid" is only a coarse indicator.'
@@ -613,25 +668,39 @@ def render_markdown(meta: Mapping[str, Any], result: Mapping[str, Any]) -> str:
     for r in unsub_err:
         L.append(f"  - `{r['code']}` {r['subtype']}: {str(r['error'])}")
     L.append("")
-    L.append("## Agreement at matched times (ticks, Futu minus IB)")
-    L.append("")
-    L.append("Signed columns show median [Q1, Q3] (n). `|mid|` columns are absolute.")
+    L.append("## Agreement at matched times (cents, Futu minus IB)")
     L.append("")
     L.append(
-        "| Key | IB samples | IB errors | pairs | bid | ask | mid | median abs mid | p90 abs mid | max abs mid | within 1 tick | Futu last - IB mid |"
+        "Signed columns show median [Q1, Q3] (n). `|mid|` columns are absolute. 1¢ and 5¢ are policy tolerance, not the instrument's tick."
     )
-    L.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    L.append("")
+    L.append(
+        "| Key | IB samples | IB errors | pairs | bid | ask | mid | median abs mid | p90 abs mid | max abs mid | within 1¢ | within 5¢ | Futu last - IB mid |"
+    )
+    L.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for key, p in result["per"].items():
         a = p["mid_abs"]
         L.append(
             f"| {key} | {p['ib_samples']} | {p['ib_errors']} | {p['pairs']} | {_iqr(p['bid'], 2)} | {_iqr(p['ask'], 2)} | {_iqr(p['mid'], 2)} | "
-            f"{_n(a['median'], 2)} | {_n(a['p90'], 2)} | {_n(a['max'], 2)} | {_pct(a['within'])} | {_iqr(p['last_vs_ib_mid'], 2)} |"
+            f"{_n(a['median'], 2)} | {_n(a['p90'], 2)} | {_n(a['max'], 2)} | {_pct(a['within'][1])} | {_pct(a['within'][5])} | {_iqr(p['last_vs_ib_mid'], 2)} |"
         )
+    L.append("")
+    L.append("## IB request duration")
+    L.append("")
+    L.append(
+        "Per IB sample: response time minus request time, in seconds. The time at which IB acquired the quoted value inside that interval is not recorded, so this table does not say which source is fresher."
+    )
+    L.append("")
+    L.append("| Key | IB samples with request time | median (s) | p90 (s) |")
+    L.append("| --- | --- | --- | --- |")
+    for key, p in result["per"].items():
+        r = p["ib_req"]
+        L.append(f"| {key} | {r['n']} | {_n(r['median'], 3)} | {_n(r['p90'], 3)} |")
     L.append("")
     L.append("## Futu freshness and push cadence")
     L.append("")
     L.append(
-        "Ages in seconds at each IB sample time. Quote source age is the QUOTE `data_date`/`data_time` (ET wall clock) against the sample time; ORDER_BOOK has no source time, so its age is receipt time."
+        "Ages in seconds at each IB sample time. BOOK last age at end uses the latest push received at or before the window end. Quote source age is the QUOTE `data_date`/`data_time` (ET wall clock) against the sample time; ORDER_BOOK has no source time, so its age is receipt time."
     )
     L.append("")
     L.append(
@@ -662,21 +731,38 @@ def render_markdown(meta: Mapping[str, Any], result: Mapping[str, Any]) -> str:
         L.append("| **all options** | " + " | ".join(_iqr(g[f], 4) for f in GREEK_FIELDS) + " |")
     if result["combo_summary"]:
         L.append("")
-        L.append("## Combo mid gap (Futu minus IB, ticks)")
+        L.append("## Spread gap vs the all-IB spread (cents)")
         L.append("")
         L.append(
-            "Combo mid = long leg mid minus short leg mid, per source. D12: a gap above 1 tick at matched times means route all legs of one underlying to one source."
+            "Spread = long leg mid minus short leg mid. Each Futu-based spread is compared with the all-IB spread of the same cycle: "
+            "all-Futu, Futu long with IB short, and IB long with Futu short. Gap = Futu-based spread minus all-IB spread. "
+            "A Futu leg value is the latest Futu push at or before that leg's own IB response time. "
+            "A cycle counts as a pair only when all four leg mids exist. 1¢ and 5¢ are policy tolerance, not the instrument's tick."
         )
         L.append("")
         L.append(
-            "| Vertical (long:short) | cycles | pairs | gap median [Q1, Q3] | median abs | p90 abs | max abs | within 1 tick |"
+            "| Vertical (long:short) | Spread source | cycles | pairs | gap median [Q1, Q3] | median abs | p90 abs | max abs | within 1¢ | within 5¢ |"
         )
-        L.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+        L.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         for name, c in result["combo_summary"].items():
-            a = c["gap_abs"]
-            L.append(
-                f"| `{name}` | {c['cycles']} | {c['pairs']} | {_iqr(c['gap'], 2)} | {_n(a['median'], 2)} | {_n(a['p90'], 2)} | {_n(a['max'], 2)} | {_pct(a['within'])} |"
-            )
+            for o, label in ORIENTATIONS:
+                g = c["orient"][o]
+                a = g["gap_abs"]
+                L.append(
+                    f"| `{name}` | {label} | {c['cycles']} | {c['pairs']} | {_iqr(g['gap'], 2)} | {_n(a['median'], 2)} | {_n(a['p90'], 2)} | {_n(a['max'], 2)} | {_pct(a['within'][1])} | {_pct(a['within'][5])} |"
+                )
+        L.append("")
+        L.append("### IB leg-response time separation")
+        L.append("")
+        L.append(
+            "Time between the two IB leg responses of one pair. The legs are sampled serially, so these spreads are not a simultaneous combo quote."
+        )
+        L.append("")
+        L.append("| Vertical (long:short) | pairs | min (s) | median (s) | max (s) |")
+        L.append("| --- | --- | --- | --- | --- |")
+        for name, c in result["combo_summary"].items():
+            sp = c["sep"]
+            L.append(f"| `{name}` | {sp['n']} | {_n(sp['min'], 2)} | {_n(sp['median'], 2)} | {_n(sp['max'], 2)} |")
     if session == "overnight":
         L.append("")
         L.append("## Overnight observations (stocks)")
@@ -1010,6 +1096,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out-dir", default="output/research", help="raw JSONL directory")
     p.add_argument("--doc-dir", default=str(REPO_ROOT / "docs" / "research"), help="markdown summary directory")
     p.add_argument("--dry-run", action="store_true", help="validate args and code mapping, connect to nothing")
+    p.add_argument(
+        "--from-jsonl",
+        metavar="PATH",
+        help="rebuild every metric and the markdown from a stored raw JSONL; offline, no OpenD, no API",
+    )
     return p
 
 
@@ -1055,6 +1146,167 @@ def ib_cycle(
         samples.append(sample)
         rec.write("ib_sample", sample["t"], **{k: v for k, v in sample.items() if k != "t"})
     return samples
+
+
+def build_meta(
+    *,
+    args_view: Mapping[str, Any],
+    date_et: str,
+    ib_cycles: int,
+    window: tuple[float, float],
+    window_note: str,
+    jsonl: Path | str,
+    verticals: Sequence[Vertical],
+    snaps: Sequence[Mapping[str, Any]],
+    sub_results: Sequence[Mapping[str, Any]],
+    unsub_results: Sequence[Mapping[str, Any]],
+    push_errors: int,
+    raw_counts: Mapping[str, int],
+) -> dict[str, Any]:
+    """The run facts `render_markdown` prints. Shared by a live run and `--from-jsonl`."""
+    return {
+        "date_et": date_et,
+        "session": args_view["session"],
+        "minutes": args_view["minutes"],
+        "ib_interval": args_view["ib_interval"],
+        "ib_cycles": ib_cycles,
+        "window_start": window[0],
+        "window_end": window[1],
+        "window_note": window_note,
+        "opend": f"{args_view['opend_host']}:{args_view['opend_port']}",
+        "api_url": args_view["api_url"],
+        "jsonl": str(jsonl),
+        "verticals": [v.name for v in verticals],
+        "quota": quota_units(snaps),
+        "snapshots": [
+            {k: s.get(k) for k in ("label", "own_used", "total_used", "remain")} for s in snaps if "error" not in s
+        ],
+        "subscribe_results": list(sub_results),
+        "unsubscribe_results": list(unsub_results),
+        "push_errors": push_errors,
+        "raw_counts": dict(raw_counts),
+    }
+
+
+@dataclass
+class StoredRun:
+    instruments: list[Instrument]
+    verticals: list[Vertical]
+    quotes: dict[str, Series]
+    books: dict[str, Series]
+    ib_samples: list[dict[str, Any]]
+    window: tuple[float, float]
+    window_source: str  # "recorded" | "derived"
+    meta: dict[str, Any]
+
+
+_PUSH_ENVELOPE = ("kind", "ts", "ts_utc", "code")
+_DERIVED_WINDOW_NOTE = (
+    "derived from the raw samples (the run did not record them): start = earliest IB request time, "
+    "end = time of the first `unsubscribe` record"
+)
+
+
+def load_jsonl(path: Path | str) -> StoredRun:
+    """Rebuild everything the analysis needs from a stored raw JSONL. Offline: no OpenD, no API."""
+    path = Path(path)
+    meta_rec: dict[str, Any] | None = None
+    window_rec: dict[str, Any] | None = None
+    quotes: dict[str, Series] = {}
+    books: dict[str, Series] = {}
+    ib_samples: list[dict[str, Any]] = []
+    snaps: list[dict[str, Any]] = []
+    subs: list[dict[str, Any]] = []
+    unsubs: list[dict[str, Any]] = []
+    unsub_ts: list[float] = []
+    push_errors = 0
+    n_book = n_quote = 0
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            kind, ts = rec.get("kind"), float(rec["ts"])
+            if kind == "meta":
+                meta_rec = rec
+            elif kind == "meta_window":
+                window_rec = rec
+            elif kind in ("futu_quote", "futu_book"):
+                target = quotes if kind == "futu_quote" else books
+                target.setdefault(str(rec["code"]), Series()).add(
+                    ts, {k: v for k, v in rec.items() if k not in _PUSH_ENVELOPE}
+                )
+                if kind == "futu_quote":
+                    n_quote += 1
+                else:
+                    n_book += 1
+            elif kind == "ib_sample":
+                sample = {k: v for k, v in rec.items() if k not in ("kind", "ts", "ts_utc")}
+                sample["t"] = ts
+                ib_samples.append(sample)
+            elif kind == "query_subscription":
+                snaps.append({k: v for k, v in rec.items() if k not in ("kind", "ts", "ts_utc")})
+            elif kind == "subscribe":
+                subs.append(
+                    {"code": rec["code"], "subtype": rec["subtype"], "ok": rec["ok"], "error": rec["error"], "t": ts}
+                )
+            elif kind == "unsubscribe":
+                unsubs.append({"code": rec["code"], "subtype": rec["subtype"], "error": rec["error"]})
+                unsub_ts.append(ts)
+            elif kind == "push_error":
+                push_errors += 1
+    if meta_rec is None:
+        raise ValueError(f"{path}: no meta record; not a calibration JSONL")
+    args_view = dict(meta_rec["args"])
+    args_view.setdefault("session", meta_rec.get("session", "rth"))
+    instruments, verticals = resolve_plan(argparse.Namespace(**args_view))
+    if window_rec is not None:
+        window = (float(window_rec["window_start"]), float(window_rec["window_end"]))
+        source, note = "recorded", "recorded by the run"
+    else:
+        reqs = [float(x["t_request"]) for x in ib_samples if x.get("t_request") is not None]
+        start = min(reqs) if reqs else float(meta_rec["ts"])
+        end = min(unsub_ts) if unsub_ts else max([float(x["t"]) for x in ib_samples] + [start])
+        window, source, note = (start, end), "derived", _DERIVED_WINDOW_NOTE
+    codes = {i.futu_code for i in instruments}
+    date_et = datetime.fromtimestamp(float(meta_rec["ts"]), tz=timezone.utc).astimezone(ET).strftime("%Y-%m-%d")
+    meta = build_meta(
+        args_view=args_view,
+        date_et=date_et,
+        ib_cycles=len({x["cycle"] for x in ib_samples}),
+        window=window,
+        window_note=note,
+        jsonl=path,
+        verticals=verticals,
+        snaps=snaps,
+        sub_results=subs,
+        unsub_results=unsubs,
+        push_errors=push_errors,
+        raw_counts={"book": n_book, "quote": n_quote, "ib": len(ib_samples)},
+    )
+    return StoredRun(
+        instruments,
+        verticals,
+        {c: v for c, v in quotes.items() if c in codes},
+        {c: v for c, v in books.items() if c in codes},
+        ib_samples,
+        window,
+        source,
+        meta,
+    )
+
+
+def render_from_jsonl(path: Path | str, doc_dir: Path | str) -> Path:
+    """`--from-jsonl`: re-render the markdown summary from a stored raw JSONL. No network."""
+    stored = load_jsonl(path)
+    result = analyze(
+        stored.instruments, stored.verticals, stored.quotes, stored.books, stored.ib_samples, stored.window
+    )
+    doc_dir = Path(doc_dir)
+    doc_dir.mkdir(parents=True, exist_ok=True)
+    doc = doc_dir / f"futu-vs-ib-quotes-{stored.meta['date_et']}-{stored.meta['session']}.md"
+    doc.write_text(render_markdown(stored.meta, result), encoding="utf-8")
+    return doc
 
 
 def run(
@@ -1110,6 +1362,7 @@ def run(
         while time.time() < deadline:  # keep collecting pushes to the end of the requested window
             time.sleep(min(deadline - time.time(), 1.0))
         window_end = time.time()
+        rec.write("meta_window", window_end, window_start=window_start, window_end=window_end)
     finally:
         try:
             if ctx is not None:
@@ -1123,26 +1376,24 @@ def run(
     quotes = {c: s for c, s in rec.quotes.items() if c in with_ok}
     books = {c: s for c, s in rec.books.items() if c in with_ok}
     result = analyze(instruments, verticals, quotes, books, ib_samples, (window_start, window_end))
-    meta = {
-        "date_et": date_et,
-        "session": args.session,
-        "minutes": args.minutes,
-        "ib_interval": args.ib_interval,
-        "ib_cycles": cycles,
-        "window_start": window_start,
-        "window_end": window_end,
-        "opend": f"{args.opend_host}:{args.opend_port}",
-        "api_url": args.api_url,
-        "jsonl": str(jsonl),
-        "verticals": [v.name for v in verticals],
-        "quota": quota_units(snaps),
-        "snapshots": [
-            {k: s.get(k) for k in ("label", "own_used", "total_used", "remain")} for s in snaps if "error" not in s
-        ],
-        "subscribe_results": sub_results,
-        "unsubscribe_results": unsub_results,
-        "push_errors": rec.push_errors,
-    }
+    meta = build_meta(
+        args_view=vars(args),
+        date_et=date_et,
+        ib_cycles=cycles,
+        window=(window_start, window_end),
+        window_note="recorded by the run (`meta_window` record in the raw JSONL)",
+        jsonl=jsonl,
+        verticals=verticals,
+        snaps=snaps,
+        sub_results=sub_results,
+        unsub_results=unsub_results,
+        push_errors=rec.push_errors,
+        raw_counts={
+            "book": sum(len(x) for x in rec.books.values()),
+            "quote": sum(len(x) for x in rec.quotes.values()),
+            "ib": len(ib_samples),
+        },
+    )
     doc_dir = Path(args.doc_dir)
     doc_dir.mkdir(parents=True, exist_ok=True)
     doc = doc_dir / f"futu-vs-ib-quotes-{date_et}-{args.session}.md"
@@ -1152,6 +1403,14 @@ def run(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.from_jsonl:
+        try:
+            doc = render_from_jsonl(args.from_jsonl, args.doc_dir)
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(f"summary: {doc}")
+        return 0
     try:
         instruments, verticals = resolve_plan(args)
     except ValueError as exc:
