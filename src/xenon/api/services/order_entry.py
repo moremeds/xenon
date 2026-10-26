@@ -2955,6 +2955,10 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
         # amend stays uncertain and keeps max(old, outgoing) until an
         # operator resolves it (runbook § 5).
         if confirmed:
+            from xenon.api.services import futu_observation
+
+            read_at = reply.get("read_at")
+            obs = futu_observation.observation_from_row(reply["row"], scope, read_at) if reply.get("row") else None
             gate4.settle_modify(
                 submission_id,
                 gen.get("amend_id"),
@@ -2963,6 +2967,7 @@ async def _futu_modify(body: dict, broker: str, account_env: str | None):
                 new_qty=sent_qty,
                 new_limit_price=sent_price,
                 new_futu_terms=futu_orders.terms_for(futu_orders.intent_for(gen["spec"])),
+                futu_observed=orders_store._futu_order_info(obs, read_at) if obs is not None else None,
             )
         else:
             gate4.settle_modify(submission_id, gen.get("amend_id"), "uncertain", scope_d)

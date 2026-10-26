@@ -1447,6 +1447,7 @@ def settle_modify(
     new_qty: int | None = None,
     new_limit_price: Decimal | float | str | None = None,
     new_futu_terms: Mapping[str, Any] | None = None,
+    futu_observed: Mapping[str, Any] | None = None,
 ) -> bool:
     """Resolve one amend generation against the broker reply.
 
@@ -1458,7 +1459,9 @@ def settle_modify(
     confirmed → quantity becomes new_qty (quantity amends) and limit_price
                 becomes new_limit_price (when given); a Futu amend's confirmed
                 trigger / trail terms replace `legs.futu_terms` (when given;
-                `legs.futu_intent` is never touched); amend clears.
+                `legs.futu_intent` is never touched); the confirming read
+                (`futu_observed`, `orders_store._futu_order_info`) replaces
+                `legs.futu_order` unless a newer read is stored; amend clears.
     rejected  → the broker provably did not apply the amend, amend clears.
     uncertain → a quantity amend keeps pending_amend_qty + token so coverage
                 keeps reserving max(old,new); a price-only amend clears its
@@ -1486,10 +1489,14 @@ def settle_modify(
         payload = orders_store._clear_pending(payload)
         if outcome == "confirmed" and new_futu_terms is not None:
             payload["futu_terms"] = {k: new_futu_terms.get(k) for k in orders_store.FUTU_TERM_KEYS}
-            if isinstance(payload.get("futu_order"), dict):
-                # The confirming read showed these terms; an observation that
-                # began before this write keeps them (PR #244 F4).
-                payload["futu_order"] = {**payload["futu_order"], **payload["futu_terms"]}
+        if (
+            outcome == "confirmed"
+            and futu_observed is not None
+            and orders_store.futu_read_is_newer(payload.get("futu_order"), futu_observed.get("observed_at"), fallback=True)
+        ):
+            # The whole confirming read: unit and values from one read, ordered
+            # by read start against a newer stored observation (PR #244 R2-1/R2-2).
+            payload["futu_order"] = dict(futu_observed)
         _write_payload(conn, submission_id, payload, **values)
         return True
 

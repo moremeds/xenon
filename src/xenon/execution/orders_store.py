@@ -1593,11 +1593,12 @@ def _futu_intent_mismatch(row, obs: FutuOrderObservation) -> str | None:
 _FUTU_OBSERVED_TERMS = ("aux_price", "trail_type", "trail_value", "trail_spread")
 
 
-def _futu_order_info(obs: FutuOrderObservation) -> dict | None:
+def _futu_order_info(obs: FutuOrderObservation, observed_at=None) -> dict | None:
     """What Futu last reported about the order, stored in the legs payload
     (`futu_order`, observed and mutable; never `futu_intent` / `futu_terms`):
     the raw Futu type and its Xenon label, trigger, trail type / value /
-    spread, session and raw status. A term the type does not have is None (an
+    spread, session, raw status and `observed_at`, the start of the broker
+    read that produced the terms. A term the type does not have is None (an
     SDK placeholder is never kept). None when the row reported neither type
     nor status."""
     if obs.order_type is None and obs.futu_status is None:
@@ -1617,7 +1618,20 @@ def _futu_order_info(obs: FutuOrderObservation) -> dict | None:
         "trail_spread": term(obs.trail_spread, FUTU_SPREAD_LABELS),
         "session": obs.session if obs.session in _FUTU_SESSIONS else None,
         "status": obs.futu_status,
+        "observed_at": observed_at.isoformat() if isinstance(observed_at, datetime) else None,
     }
+
+
+def futu_read_is_newer(stored, observed_at, *, fallback: bool) -> bool:
+    """True when a broker read that began at `observed_at` is newer than the
+    read behind the stored `futu_order` terms. Observed terms are ordered by
+    read start, never by local write time (PR #244 R2-2). Without a stored
+    read time, `fallback` decides."""
+    stored_at = _as_aware(stored.get("observed_at")) if isinstance(stored, dict) else None
+    if stored_at is None:
+        return fallback
+    read = _as_aware(observed_at)
+    return read is not None and read > stored_at
 
 
 def _same_strike(row, obs: FutuOrderObservation) -> bool:
@@ -1658,7 +1672,7 @@ def _futu_identity_mismatch(row, obs: FutuOrderObservation) -> str | None:
     return None
 
 
-def _futu_state_values(row, obs: FutuOrderObservation, *, fresh: bool, own: bool) -> dict:
+def _futu_state_values(row, obs: FutuOrderObservation, *, fresh: bool, own: bool, observed_at=None) -> dict:
     """Column updates a Futu observation may apply to an existing row.
 
     Only a fresh observation (its read began after the row's last local
@@ -1675,12 +1689,13 @@ def _futu_state_values(row, obs: FutuOrderObservation, *, fresh: bool, own: bool
         if fresh or not (to_terminal or from_terminal):
             values["state"] = obs.state
     legs = normalize_legs_payload(row.legs)
-    info = _futu_order_info(obs)
-    if info is not None and not fresh:
-        # A read that began before the row's last local write (e.g. a
-        # confirmed amend) keeps the stored observed terms (PR #244 F4).
-        prev = legs.get("futu_order") if isinstance(legs.get("futu_order"), dict) else {}
-        info = {**info, **{k: prev.get(k) for k in _FUTU_OBSERVED_TERMS}}
+    info = _futu_order_info(obs, observed_at)
+    prev = legs.get("futu_order") if isinstance(legs.get("futu_order"), dict) else {}
+    if info is not None and not futu_read_is_newer(prev, observed_at, fallback=fresh):
+        # An older read keeps the stored observed terms, unit and read time
+        # together (PR #244 F4, R2-1); with no stored read time, a read that
+        # began before the row's last local write is the older one.
+        info = {**info, **{k: prev.get(k) for k in (*_FUTU_OBSERVED_TERMS, "observed_at")}}
     if row.reason_code == FUTU_NOT_OBSERVED:
         values["reason_code"] = None
     if own:
@@ -1852,7 +1867,7 @@ def mirror_futu_order(
                     obs = dataclasses.replace(obs, state=keep)
 
         if row is None:
-            info = _futu_order_info(obs)
+            info = _futu_order_info(obs, observed_at)
             sid = futu_submission_id(account_env, broker_account, obs.order_id)
             mult = (obs.legs.get("legs") or [{}])[0].get("mult")
             pg_insert_values = dict(
@@ -1904,7 +1919,7 @@ def mirror_futu_order(
         else:
             own = not row.submission_id.startswith(FUTU_SUBMISSION_PREFIX)
             values = _futu_state_values(
-                row, obs, fresh=is_fresh_observation(observed_at, row.updated_at), own=own
+                row, obs, fresh=is_fresh_observation(observed_at, row.updated_at), own=own, observed_at=observed_at
             )
             if out["fill_skipped"] and row.reason_code != _fill_reason(out["fill_skipped"]):
                 values["reason_code"] = _fill_reason(out["fill_skipped"])

@@ -164,8 +164,14 @@ def test_f4_a_delayed_observation_does_not_revert_confirmed_trail_terms(quotes):
 
     mod = _modify(quotes, oid, newTrailValue=3)
     assert mod.status_code == 200 and mod.json()["confirmed"] is True, mod.text
+    confirmed = _row(sid).legs["futu_order"]
 
     orders_store.mirror_futu_order(stale, broker_account=LIVE_ACC, account_env="live", observed_at=read_at)
+
+    kept = _row(sid).legs["futu_order"]
+    assert {k: kept[k] for k in ("trail_type", "trail_value", "observed_at")} == {
+        k: confirmed[k] for k in ("trail_type", "trail_value", "observed_at")
+    }  # terms, unit and their read time stay together
 
     assert _row(sid).legs["futu_terms"]["trail_value"] == "3"
     assert _row(sid).legs["futu_order"]["trail_value"] != "2.5"
@@ -183,3 +189,99 @@ def test_f4_a_newer_external_edit_still_shows(quotes):
 
     assert _shown(oid)["trailValue"] == 3.5
     assert _row(sid).legs["futu_terms"]["trail_value"] == "3"  # confirmed terms unchanged by observation
+
+
+# -- Round 2: observed unit and terms come from one read, ordered by read time --
+
+EXT_TRAIL_LIMIT = {
+    "order_type": "TRAILING_STOP_LIMIT",
+    "price": 3.0,
+    "trail_type": "AMOUNT",
+    "trail_value": 2.5,
+    "trail_spread": 0.05,
+    "session": "RTH",
+}
+
+
+@pytest.mark.parametrize("mirror_fails", [False, True])
+def test_r2_1_an_external_unit_edit_shows_the_unit_of_the_confirming_read(quotes, monkeypatch, mirror_fails):
+    if mirror_fails:  # settlement itself publishes the confirming read
+        from xenon.api.services import order_entry
+
+        monkeypatch.setattr(order_entry, "_futu_mirror", lambda *a, **kw: None)
+    sid = _import_external(quotes, EXT_TRAIL_LIMIT)
+    assert _shown(EXT_OID)["trailType"] == "AMOUNT"
+    quotes.ctx.book[EXT_OID].update(trail_type="RATIO", trail_value=1.5)  # Futu app edit, not observed yet
+
+    mod = _modify(quotes, EXT_OID, newTrailValue=2)
+
+    assert mod.status_code == 200 and mod.json()["confirmed"] is True, mod.text
+    [kw] = _modifies(quotes)
+    assert (kw["trail_type"], kw["trail_value"]) == ("RATIO", 2.0)
+    shown = _shown(EXT_OID)
+    assert (shown["trailType"], shown["trailValue"]) == ("RATIO", 2.0)
+    assert "futu_intent" not in _row(sid).legs  # the unit came from the read, not a made-up intent
+
+
+def test_r2_1_a_restored_own_unit_shows_with_the_confirmed_value(quotes):
+    sid, oid = _place(quotes, RATIO_LIMIT)
+    quotes.ctx.book[oid]["trail_type"] = "AMOUNT"  # Futu app edit, observed
+    assert _observe(LIVE, quotes.ctx)["complete"]
+    assert _shown(oid)["trailType"] == "AMOUNT"
+    quotes.ctx.book[oid]["trail_type"] = "RATIO"  # back to the placement unit, not observed yet
+    intent = _row(sid).legs["futu_intent"]
+
+    mod = _modify(quotes, oid, newTrailValue=2)
+
+    assert mod.status_code == 200 and mod.json()["confirmed"] is True, mod.text
+    [kw] = _modifies(quotes)
+    assert (kw["trail_type"], kw["trail_value"]) == ("RATIO", 2.0)
+    shown = _shown(oid)
+    assert (shown["trailType"], shown["trailValue"]) == ("RATIO", 2.0)
+    assert _row(sid).legs["futu_intent"] == intent
+
+
+@pytest.mark.parametrize("lands", ["before", "after"])
+def test_r2_2_an_edit_observed_between_confirmation_and_settlement_stays(quotes, monkeypatch, lands):
+    """The edit is read after the confirming read; its mirror commits before
+    the settle write ("before") or after it ("after")."""
+    from xenon.execution import gate4
+
+    sid, oid = _place(quotes, TRAIL_LIMIT)
+    real = gate4.settle_modify
+    seen = {}
+
+    def _edit_then_settle(submission_id, amend_id, outcome, *a, **kw):
+        if outcome != "confirmed" or seen:
+            return real(submission_id, amend_id, outcome, *a, **kw)
+        time.sleep(0.01)
+        quotes.ctx.book[oid]["trail_value"] = 3.5  # Futu app edit after the confirming read
+        read_at = datetime.now(timezone.utc)
+        newer = fo.observation_from_row(dict(quotes.ctx.book[oid]), LIVE, read_at)
+
+        def _mirror():
+            orders_store.mirror_futu_order(newer, broker_account=LIVE_ACC, account_env="live", observed_at=read_at)
+
+        if lands == "before":
+            _mirror()
+            legs = _row(sid).legs
+            seen.update(observed=legs["futu_order"]["trail_value"], pending=legs.get("pending_amend_id"))
+            assert seen == {"observed": "3.5", "pending": amend_id}
+        out = real(submission_id, amend_id, outcome, *a, **kw)
+        if lands == "after":
+            _mirror()
+        seen["ran"] = True
+        return out
+
+    monkeypatch.setattr(gate4, "settle_modify", _edit_then_settle)
+
+    mod = _modify(quotes, oid, newTrailValue=3)
+
+    assert mod.status_code == 200 and mod.json()["confirmed"] is True, mod.text
+    assert seen  # the hook ran at the settle boundary
+    [kw] = _modifies(quotes)
+    assert (kw["trail_type"], kw["trail_value"]) == ("AMOUNT", 3.0)
+    legs = _row(sid).legs
+    assert legs["futu_terms"]["trail_value"] == "3"  # the confirmed amend is still recorded
+    assert legs.get("pending_amend_id") is None  # and its generation settled
+    assert _shown(oid)["trailValue"] == 3.5
