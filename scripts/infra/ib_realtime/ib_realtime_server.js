@@ -125,10 +125,29 @@ function parseArgs(argv) {
   return args;
 }
 
-function normalizeSymbols(raw) {
-  return raw
-    .map((symbol) => String(symbol).trim().toUpperCase())
-    .filter((symbol) => symbol.length > 0);
+// Symbol entries are backward compatible: a bare string, or
+// {symbol, tier:"held"|"view"} for clients that declare a quote-priority
+// tier (absent/invalid tier = held). Valid tiers are recorded into `tiers`
+// keyed by the normalized symbol; invalid entries are dropped.
+function normalizeSymbols(raw, tiers) {
+  const out = [];
+  for (const entry of raw) {
+    if (entry !== null && typeof entry === "object") {
+      const symbol =
+        typeof entry.symbol === "string"
+          ? entry.symbol.trim().toUpperCase()
+          : "";
+      if (!symbol) continue;
+      if (entry.tier === "held" || entry.tier === "view") {
+        tiers.set(symbol, entry.tier);
+      }
+      out.push(symbol);
+      continue;
+    }
+    const symbol = String(entry).trim().toUpperCase();
+    if (symbol.length > 0) out.push(symbol);
+  }
+  return out;
 }
 
 /** Build composite key for an option contract: SYMBOL_YYYYMMDD_STRIKE_RIGHT */
@@ -158,7 +177,8 @@ function normalizeContracts(raw) {
       const right = c.right === "C" || c.right === "P" ? c.right : null;
       if (!symbol || !expiry || expiry.length !== 8 || !strike || !right)
         return null;
-      return { symbol, expiry, strike, right };
+      const tier = c.tier === "held" || c.tier === "view" ? c.tier : null;
+      return { symbol, expiry, strike, right, tier };
     })
     .filter(Boolean);
 }
@@ -227,8 +247,12 @@ function parseActionMessage(raw) {
     return null;
   }
 
+  // Declared quote tiers: symbol key -> "held"|"view" (absent = held). Filled
+  // by normalizers for symbol object entries; contract entries carry it on
+  // the returned object instead.
+  const tiers = new Map();
   const symbols = Array.isArray(payload.symbols)
-    ? normalizeSymbols(payload.symbols)
+    ? normalizeSymbols(payload.symbols, tiers)
     : [];
   const contracts = Array.isArray(payload.contracts)
     ? normalizeContracts(payload.contracts)
@@ -242,7 +266,7 @@ function parseActionMessage(raw) {
     action === "subscribe-depth" || action === "unsubscribe-depth"
       ? normalizeDepthTarget(payload)
       : null;
-  return { action, symbols, contracts, indexes, forexes, stocksMeta, depth };
+  return { action, symbols, contracts, indexes, forexes, stocksMeta, depth, tiers };
 }
 
 const cli = parseArgs(process.argv.slice(2));
@@ -480,6 +504,10 @@ httpServer.on("upgrade", async (req, socket, head) => {
 const clients = new Set();
 const symbolSubscribers = new Map();
 const clientSymbols = new Map();
+// symbol key -> Map<client, "held"|"view">: each subscriber's declared quote
+// tier (absent declaration = held). Mirrors symbolSubscribers membership;
+// merged per symbol into want.tiers by futuRouting.desiredWant.
+const subscriberTiers = new Map();
 const symbolStates = new Map();
 const requestIdToSymbol = new Map();
 const snapshotRequests = new Map();
@@ -958,13 +986,20 @@ function resetDailyCloseState() {
   // is still valid across a reconnect; only the in-flight bookkeeping is reset.
 }
 
-function subscribeClientToSymbol(client, symbol) {
+function subscribeClientToSymbol(client, symbol, tier = null) {
   let subscribers = symbolSubscribers.get(symbol);
   if (!subscribers) {
     subscribers = new Set();
     symbolSubscribers.set(symbol, subscribers);
   }
   subscribers.add(client);
+
+  let tierMap = subscriberTiers.get(symbol);
+  if (!tierMap) {
+    tierMap = new Map();
+    subscriberTiers.set(symbol, tierMap);
+  }
+  tierMap.set(client, tier === "view" ? "view" : "held");
 
   let clientSet = clientSymbols.get(client);
   if (!clientSet) {
@@ -987,6 +1022,11 @@ function unsubscribeClientFromSymbol(client, symbol) {
 
   if (subscribers) {
     subscribers.delete(client);
+    const tierMap = subscriberTiers.get(symbol);
+    if (tierMap) {
+      tierMap.delete(client);
+      if (tierMap.size === 0) subscriberTiers.delete(symbol);
+    }
     if (subscribers.size === 0) {
       symbolSubscribers.delete(symbol);
       stopLiveSubscription(symbol);
@@ -1028,6 +1068,11 @@ function disconnectClient(client) {
     if (!subscribers) continue;
 
     subscribers.delete(client);
+    const tierMap = subscriberTiers.get(symbol);
+    if (tierMap) {
+      tierMap.delete(client);
+      if (tierMap.size === 0) subscriberTiers.delete(symbol);
+    }
     if (subscribers.size === 0) {
       symbolSubscribers.delete(symbol);
       stopLiveSubscription(symbol);
@@ -1981,7 +2026,8 @@ function reconcileFutuRoutes() {
   }
   if (ibConnected) fillFreeLines();
   if (futuClient) {
-    futuClient.setWant(futuRouting.desiredWant(clientSymbols));
+    const want = futuRouting.desiredWant(clientSymbols, subscriberTiers);
+    futuClient.setWant(want.symbols, want.tiers);
   }
 }
 
@@ -2051,7 +2097,7 @@ async function handleClientMessage(client, data) {
       const subscribed = [];
       // Stock subscriptions (backward compatible)
       for (const symbol of symbols) {
-        subscribeClientToSymbol(client, symbol);
+        subscribeClientToSymbol(client, symbol, message.tiers.get(symbol));
         const ibContract = stockContract(symbol);
         ensureSymbolState(symbol, ibContract);
         if (ibConnected) {
@@ -2074,7 +2120,7 @@ async function handleClientMessage(client, data) {
         const key = optionKey(c);
         // Options stay on IB unless XENON_FUTU_OPTIONS=1.
         if (!XENON_FUTU_OPTIONS) futuRouting.pinIbOnly(key);
-        subscribeClientToSymbol(client, key);
+        subscribeClientToSymbol(client, key, c.tier);
         const ibContract = optionContract(
           c.symbol,
           c.expiry,
@@ -2709,7 +2755,8 @@ if (FUTU_QUOTES_URL) {
     onSocket: (open) => {
       futuRouting.noteSocket(open);
       if (open) {
-        futuClient?.setWant(futuRouting.desiredWant(clientSymbols));
+        const want = futuRouting.desiredWant(clientSymbols, subscriberTiers);
+        futuClient?.setWant(want.symbols, want.tiers);
       } else {
         reconcileFutuRoutes();
       }

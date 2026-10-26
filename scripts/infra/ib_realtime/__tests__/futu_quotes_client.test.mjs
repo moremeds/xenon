@@ -94,6 +94,25 @@ test("want sent on open with gen=1; setWant sends only on change", async (t) => 
   });
 });
 
+test("want frame carries tiers and re-sends on a tier-only change", async (t) => {
+  const { client, ws } = setup(t);
+  await tick(t, 1);
+  client.setWant(["AAPL"], { AAPL: "view" });
+  assert.deepEqual(ws().sent, [
+    { action: "want", gen: 1, symbols: ["AAPL"], tiers: { AAPL: "view" } },
+  ]);
+  client.setWant(["AAPL"], { AAPL: "view" }); // unchanged — no resend
+  assert.equal(ws().sent.length, 1);
+  client.setWant(["AAPL"], { AAPL: "held" }); // tier changed — gen++
+  assert.equal(ws().sent.length, 2);
+  assert.deepEqual(ws().sent[1], {
+    action: "want",
+    gen: 2,
+    symbols: ["AAPL"],
+    tiers: { AAPL: "held" },
+  });
+});
+
 test("assign/health/batch frames dispatch to callbacks", async (t) => {
   const { client, events, ws } = setup(t);
   await tick(t, 1);

@@ -38,7 +38,36 @@ test("want set = futu-first clients' symbols minus IB-pinned", () => {
   ]);
   r.pinIbOnly("VIX");
   r.pinIbOnly("SPY_20261218_500_C");
-  assert.deepEqual(r.desiredWant(clientSymbols), ["AAPL"]);
+  const want = r.desiredWant(clientSymbols);
+  assert.deepEqual(want.symbols, ["AAPL"]);
+  assert.deepEqual(want.tiers, { AAPL: "held" });
+});
+
+test("want tiers = highest over the symbol's subscribers (held > view)", () => {
+  const r = setup();
+  r.setPref(futuClientA, "futu-first");
+  const clientSymbols = new Map([
+    [futuClientA, new Set(["AAPL", "MSFT", "QQQ"])],
+  ]);
+  // subscriberTiers: symbol -> Map<client, tier>. AAPL is all-view; MSFT has
+  // one held; QQQ's held comes from an ib-preference subscriber — the merge
+  // counts every subscriber, not only futu-first ones.
+  const subscriberTiers = new Map([
+    ["AAPL", new Map([[futuClientA, "view"], [apiKeyClientB, "view"]])],
+    ["MSFT", new Map([[futuClientA, "view"], [apiKeyClientB, "held"]])],
+    ["QQQ", new Map([[futuClientA, "view"], [browserClient, "held"]])],
+  ]);
+  const want = r.desiredWant(clientSymbols, subscriberTiers);
+  assert.deepEqual(want.symbols, ["AAPL", "MSFT", "QQQ"]);
+  assert.deepEqual(want.tiers, { AAPL: "view", MSFT: "held", QQQ: "held" });
+});
+
+test("want tiers: no declared tiers defaults every symbol to held", () => {
+  const r = setup();
+  r.setPref(futuClientA, "futu-first");
+  const clientSymbols = new Map([[futuClientA, new Set(["AAPL"])]]);
+  const want = r.desiredWant(clientSymbols);
+  assert.deepEqual(want.tiers, { AAPL: "held" });
 });
 
 test("routeFor: only opted-in client gets futu when futu-live", () => {

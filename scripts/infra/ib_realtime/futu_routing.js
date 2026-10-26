@@ -136,7 +136,11 @@ export function createFutuRouting({ holdDownMs = FUTU_HOLD_DOWN_MS } = {}) {
 
   // Complete desired set for `want` — futu-first clients' symbols minus
   // IB-pinned keys (indexes/options/forex/non-US are never Futu-served).
-  function desiredWant(clientSymbols) {
+  // Each wanted symbol also gets the highest tier declared by its
+  // subscribers: `subscriberTiers` is symbol -> Map<client, "held"|"view">,
+  // and the merge counts every subscriber (not only futu-first ones) so a
+  // held position protects the Futu subscription. Absent = held.
+  function desiredWant(clientSymbols, subscriberTiers = new Map()) {
     const want = new Set();
     for (const client of futuFirst) {
       const symbols = clientSymbols.get(client);
@@ -145,7 +149,22 @@ export function createFutuRouting({ holdDownMs = FUTU_HOLD_DOWN_MS } = {}) {
         if (!ibPinned.has(symbol)) want.add(symbol);
       }
     }
-    return [...want].sort();
+    const tiers = {};
+    for (const symbol of want) {
+      const declared = subscriberTiers.get(symbol);
+      let tier = "held";
+      if (declared && declared.size > 0) {
+        tier = "view";
+        for (const t of declared.values()) {
+          if (t !== "view") {
+            tier = "held";
+            break;
+          }
+        }
+      }
+      tiers[symbol] = tier;
+    }
+    return { symbols: [...want].sort(), tiers };
   }
 
   function recordTick(symbol, data) {
