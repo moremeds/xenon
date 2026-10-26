@@ -25,8 +25,8 @@ import {
   type IndexContract,
   optionKey,
   portfolioLegToContract,
-  uniqueOptionContracts,
 } from "@/lib/pricesProtocol";
+import { tagSubscriptionEntries } from "@/lib/subscriptionTiers";
 import Sidebar from "@/components/Sidebar";
 import Header from "@/components/Header";
 import DashboardSurface from "@/components/dashboard/DashboardSurface";
@@ -242,23 +242,26 @@ export default function WorkspaceShell({
     [tickerParam],
   );
 
-  const allSymbols = useMemo(
-    () => [
-      ...new Set([...portfolioSymbols, ...orderSymbols, ...tickerSymbols]),
-    ],
-    [portfolioSymbols, orderSymbols, tickerSymbols],
-  );
-
   const tickerDetail = useTickerDetail();
 
-  const allContracts = useMemo(
+  // Quote tiers (contract-x7): portfolio + order legs subscribe `held`,
+  // ticker-detail chain legs `view`; ticker symbols stay untagged (= held).
+  const { symbols: allSymbols, contracts: allContracts } = useMemo(
     () =>
-      uniqueOptionContracts([
-        ...portfolioContracts,
-        ...orderContracts,
-        ...tickerDetail.chainContracts,
-      ]),
-    [portfolioContracts, orderContracts, tickerDetail.chainContracts],
+      tagSubscriptionEntries({
+        heldSymbols: [...portfolioSymbols, ...orderSymbols],
+        otherSymbols: tickerSymbols,
+        heldContracts: [...portfolioContracts, ...orderContracts],
+        viewContracts: tickerDetail.chainContracts,
+      }),
+    [
+      portfolioSymbols,
+      orderSymbols,
+      tickerSymbols,
+      portfolioContracts,
+      orderContracts,
+      tickerDetail.chainContracts,
+    ],
   );
 
   const {

@@ -141,6 +141,28 @@ function lastFutuStatus(ws) {
   return ws.statuses().at(-1)?.providers?.futu ?? null;
 }
 
+// The first served Futu row for a symbol flips the route and reaches the
+// client via the hydration `price` frame (D10); rows after the flip arrive
+// in `batch`. Wait for the VALUE via either frame — never the frame kind.
+function hasFutuTick(ws, symbol, last) {
+  return ws.msgs.some(
+    (m) =>
+      m.updates?.[symbol]?.last === last ||
+      (m.type === "price" && m.symbol === symbol && m.data?.last === last),
+  );
+}
+
+// Any frame mentioning the symbol — for negative asserts that must not pass
+// just because a leaked row rode the `price` channel instead of `batch`.
+function futuFramesFor(ws, symbol) {
+  return ws.msgs.filter(
+    (m) => m.symbol === symbol || m.updates?.[symbol] != null,
+  );
+}
+function hasFutuFrame(ws, symbol) {
+  return futuFramesFor(ws, symbol).length > 0;
+}
+
 async function admitOnFutu(symbols) {
   await waitFor(() =>
     symbols.every((s) => futuWants.at(-1)?.symbols?.includes(s)),
@@ -244,29 +266,25 @@ test("opted-in API-key client receives futu ticks; un-opted do not", async () =>
   assert.ok(futuWants.at(-1).gen >= 1);
   futuHealthOn = true; // real services keep the health stream alive
 
-  // During the hold-down a futu tick is still not routed to anyone.
+  // During the hold-down a futu tick is still not routed to anyone — the
+  // check runs while the window is still open (send happens ~ms after the
+  // assign on the same ordered socket).
   futuSend({ type: "batch", updates: { AAPL: { symbol: "AAPL", last: 11.0 } } });
-  await sleep(HD + 300);
+  await sleep(HD - 150);
   assert.equal(
-    opted.batches().some((b) => b.updates?.AAPL?.last === 11.0),
+    hasFutuFrame(opted, "AAPL"),
     false,
     "futu tick delivered before hold-down elapsed",
   );
 
+  // After the hold-down the cached 11.0 row is hydrated (D10) — either frame.
+  await waitFor(() => hasFutuTick(opted, "AAPL", 11.0), { timeout: 3000 });
+
   futuSend({ type: "batch", updates: { AAPL: { symbol: "AAPL", last: 11.5 } } });
-  await waitFor(
-    () => opted.batches().some((b) => b.updates?.AAPL?.last === 11.5),
-    { timeout: 3000 },
-  );
+  await waitFor(() => hasFutuTick(opted, "AAPL", 11.5), { timeout: 3000 });
   // Un-opted API-key client and browser client never see the futu tick.
-  assert.equal(
-    unopted.batches().some((b) => b.updates?.AAPL?.last === 11.5),
-    false,
-  );
-  assert.equal(
-    browser.batches().some((b) => b.updates?.AAPL?.last === 11.5),
-    false,
-  );
+  assert.equal(hasFutuFrame(unopted, "AAPL"), false);
+  assert.equal(hasFutuFrame(browser, "AAPL"), false);
 
   // providers.futu shows the healthy link.
   await waitFor(() => lastFutuStatus(opted)?.connected === true, {
@@ -295,7 +313,7 @@ test("quota rejection keeps the symbol off Futu (IB demand stays)", async () => 
   futuSend({ type: "batch", updates: { HYG: { symbol: "HYG", last: 80.1 } } });
   await sleep(300);
   assert.equal(
-    opted.batches().some((b) => b.updates?.HYG),
+    hasFutuFrame(opted, "HYG"),
     false,
     "rejected symbol must never receive futu ticks",
   );
@@ -309,9 +327,7 @@ test("OpenD loss fails back to IB within the deadline", async () => {
   await admitOnFutu(["MSFT"]);
   await sleep(HD + 300);
   futuSend({ type: "batch", updates: { MSFT: { symbol: "MSFT", last: 401 } } });
-  await waitFor(() =>
-    opted.batches().some((b) => b.updates?.MSFT?.last === 401),
-  );
+  await waitFor(() => hasFutuTick(opted, "MSFT", 401));
 
   // OpenD drops: the service reports opend_connected:false, then goes quiet.
   futuHealthOn = false;
@@ -319,10 +335,10 @@ test("OpenD loss fails back to IB within the deadline", async () => {
   await waitFor(() => lastFutuStatus(opted)?.opend_connected === false, {
     timeout: 3000,
   });
-  const n = opted.batches().length;
+  const n = futuFramesFor(opted, "MSFT").length;
   futuSend({ type: "batch", updates: { MSFT: { symbol: "MSFT", last: 402 } } });
   await sleep(300);
-  assert.equal(opted.batches().length, n);
+  assert.equal(futuFramesFor(opted, "MSFT").length, n);
   opted.close();
 });
 
@@ -333,7 +349,7 @@ test("stalled service (no health) fails back within the health deadline", async 
   await admitOnFutu(["SPY"]);
   await sleep(HD + 300);
   futuSend({ type: "batch", updates: { SPY: { symbol: "SPY", last: 500 } } });
-  await waitFor(() => opted.batches().some((b) => b.updates?.SPY));
+  await waitFor(() => hasFutuTick(opted, "SPY", 500));
 
   // Stall: the health stream stops entirely.
   futuHealthOn = false;
@@ -345,10 +361,10 @@ test("stalled service (no health) fails back within the health deadline", async 
     Date.now() - t0 < DEADLINE + 1500,
     "failover exceeded the health deadline",
   );
-  const n = opted.batches().length;
+  const n = futuFramesFor(opted, "SPY").length;
   futuSend({ type: "batch", updates: { SPY: { symbol: "SPY", last: 501 } } });
   await sleep(300);
-  assert.equal(opted.batches().length, n);
+  assert.equal(futuFramesFor(opted, "SPY").length, n);
   opted.close();
 });
 
@@ -377,10 +393,7 @@ test("recovery after hold-down re-routes to Futu", async () => {
   });
   await sleep(HD + 300);
   futuSend({ type: "batch", updates: { QQQ: { symbol: "QQQ", last: 480 } } });
-  await waitFor(
-    () => opted.batches().some((b) => b.updates?.QQQ?.last === 480),
-    { timeout: 3000 },
-  );
+  await waitFor(() => hasFutuTick(opted, "QQQ", 480), { timeout: 3000 });
   opted.close();
 });
 
@@ -407,7 +420,7 @@ test("indexes never enter want and never receive futu ticks", async () => {
   futuSend({ type: "batch", updates: { VIX: { symbol: "VIX", last: 18 } } });
   await sleep(300);
   assert.equal(
-    opted.batches().some((b) => b.updates?.VIX),
+    hasFutuFrame(opted, "VIX"),
     false,
     "index received a futu tick",
   );
@@ -433,7 +446,7 @@ test("same-gen assign partition moves apply without a new want", async () => {
   futuSend({ type: "batch", updates: { COST: { symbol: "COST", last: 900 } } });
   await sleep(200);
   assert.equal(
-    opted.batches().some((b) => b.updates?.COST),
+    hasFutuFrame(opted, "COST"),
     false,
     "pending symbol delivered a futu tick",
   );
@@ -441,10 +454,10 @@ test("same-gen assign partition moves apply without a new want", async () => {
   futuSend({ type: "assign", gen, ok: ["COST"], pending: [], rejected: [] });
   await sleep(HD + 300);
   futuSend({ type: "batch", updates: { COST: { symbol: "COST", last: 901 } } });
-  await waitFor(() => opted.batches().some((b) => b.updates?.COST));
+  await waitFor(() => hasFutuTick(opted, "COST", 901));
 
   // Same-gen session pullback — ok→pending fails back to IB immediately.
-  const n = opted.batches().length;
+  const n = futuFramesFor(opted, "COST").length;
   futuSend({
     type: "assign",
     gen,
@@ -456,7 +469,7 @@ test("same-gen assign partition moves apply without a new want", async () => {
   futuSend({ type: "batch", updates: { COST: { symbol: "COST", last: 902 } } });
   await sleep(300);
   assert.equal(
-    opted.batches().length,
+    futuFramesFor(opted, "COST").length,
     n,
     "futu tick delivered after same-gen session pullback",
   );
@@ -478,7 +491,6 @@ test("browser client cannot opt in even when the service claims ok", async () =>
       "browser-only symbol leaked into want",
     );
   }
-  const n = browser.batches().length;
   futuSend({
     type: "assign",
     gen: futuWants.at(-1)?.gen ?? 0,
@@ -489,6 +501,10 @@ test("browser client cannot opt in even when the service claims ok", async () =>
   await sleep(HD + 300);
   futuSend({ type: "batch", updates: { WMT: { symbol: "WMT", last: 90 } } });
   await sleep(300);
-  assert.equal(browser.batches().length, n);
+  assert.equal(
+    hasFutuFrame(browser, "WMT"),
+    false,
+    "browser received a futu tick it cannot opt into",
+  );
   browser.close();
 });

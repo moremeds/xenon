@@ -306,6 +306,13 @@ function LegRow({
         {marketPrice != null
           ? fmtPriceOrCalculated(marketPrice, isCalculated)
           : "—"}
+        {realtimeLegPrice?.stale === true && (
+          <span
+            className="price-stale-dot"
+            role="img"
+            aria-label="stale quote"
+          />
+        )}
         {priceDirection === "up" && (
           <ArrowUp
             size={11}
@@ -431,6 +438,14 @@ function PositionRow({
       : optionsRt
         ? optionsRt.priceIsCalculated
         : getLastPriceIsCalculated(pos);
+  // Relay-stamped stale quote (Futu rows): stock rows read the row quote;
+  // option/spread rows flag when any leg quote feeding the net price is stale.
+  const rowStale = isStock
+    ? realtimePrice?.stale === true
+    : pos.legs.some((leg) => {
+        const key = legPriceKey(pos.ticker, pos.expiry, leg);
+        return key != null && prices?.[key]?.stale === true;
+      });
   const { direction: priceDirection, flashDirection } =
     usePriceDirection(lastPrice);
   // Stock: daily change from underlying WS price
@@ -602,6 +617,13 @@ function PositionRow({
               ? fmtNative(lastPrice, cur)
               : fmtPriceOrCalculated(lastPrice, lastPriceIsCalculated)
             : "—"}
+          {rowStale && (
+            <span
+              className="price-stale-dot"
+              role="img"
+              aria-label="stale quote"
+            />
+          )}
           {priceDirection === "up" && (
             <ArrowUp
               size={11}

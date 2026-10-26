@@ -1,7 +1,10 @@
 // Relay -> futu-quotes internal WS client (docs/architecture/futu-quotes.md).
 //
 // Sends `want` (complete desired set, no deltas; `gen` is per-connection and
-// starts at 1) and receives `assign`/`batch`/`health`. Liveness is protocol
+// starts at 1) and receives `assign`/`batch`/`health`. `want` may carry a
+// `tiers` map — per-symbol `held|view` merged over all subscribers
+// (held > view); a symbol absent from `tiers` means `held` at the service.
+// Liveness is protocol
 // ping/pong: we ping every pingIntervalMs and tear down the socket when no
 // pong arrives within pongTimeoutMs. Independently, when no `health` frame
 // arrives within healthDeadlineMs the link is reported down (a stalled
@@ -35,7 +38,7 @@ export function createFutuQuotesClient({
   let healthy = false; // a fresh health frame arrived this epoch
   let lastPongAt = 0;
   let gen = 0;
-  let want = [];
+  let want = { symbols: [], tiers: {} };
   let pingTimer = null;
   let healthTimer = null; // armed/reset per health frame — the hard deadline
   let reconnectTimer = null;
@@ -46,8 +49,10 @@ export function createFutuQuotesClient({
   function sendWant() {
     if (!open || !ws) return;
     gen += 1;
+    const frame = { action: "want", gen, symbols: [...want.symbols] };
+    if (Object.keys(want.tiers).length) frame.tiers = want.tiers;
     try {
-      ws.send(JSON.stringify({ action: "want", gen, symbols: [...want] }));
+      ws.send(JSON.stringify(frame));
     } catch {
       /* socket dying — close/error path handles it */
     }
@@ -60,10 +65,21 @@ export function createFutuQuotesClient({
     return sa.every((s, i) => s === sb[i]);
   }
 
-  function setWant(symbols) {
-    const next = Array.isArray(symbols) ? symbols : [];
-    if (sameSet(next, want)) return;
-    want = next;
+  function sameTiers(a, b) {
+    const ka = Object.keys(a);
+    if (ka.length !== Object.keys(b).length) return false;
+    return ka.every((k) => b[k] === a[k]);
+  }
+
+  // `tiers` is {symbol: "held"|"view"} for the wanted symbols (service treats
+  // a missing symbol/key as held). A tier-only change re-sends the want.
+  function setWant(symbols, tiers) {
+    const nextSymbols = Array.isArray(symbols) ? symbols : [];
+    const nextTiers =
+      tiers && typeof tiers === "object" && !Array.isArray(tiers) ? tiers : {};
+    if (sameSet(nextSymbols, want.symbols) && sameTiers(nextTiers, want.tiers))
+      return;
+    want = { symbols: nextSymbols, tiers: nextTiers };
     sendWant();
   }
 
@@ -132,7 +148,7 @@ export function createFutuQuotesClient({
       } else {
         const recovered = !healthy;
         healthy = true;
-        if (recovered && want.length) sendWant(); // re-arm after a stall
+        if (recovered && want.symbols.length) sendWant(); // re-arm after a stall
       }
       onHealth(msg);
     }
@@ -182,7 +198,7 @@ export function createFutuQuotesClient({
       if (ws !== sock || stopped) return;
       open = true;
       socketDead = false;
-      if (want.length) sendWant(); // re-arm on reconnect; fresh epoch starts empty
+      if (want.symbols.length) sendWant(); // re-arm on reconnect; fresh epoch starts empty
       onSocket(true);
       startPing();
       armHealthDeadline(); // grace window for the first health frame

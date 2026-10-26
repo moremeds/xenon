@@ -1,22 +1,30 @@
 // Futu provider routing — pure state, no sockets/timers. Callers pass `now`.
 //
-// A relay client opts into Futu-first quotes via `?quotes=futu-first` on the
-// upgrade URL (honoured only for X-API-Key auth — carried in by the server).
-// A symbol may be live on Futu and IB at once; each client receives frames
-// only from the source routed for it.
+// A client is routed Futu-first either by `?quotes=futu-first` on the
+// upgrade URL (X-API-Key auth only) or by the relay's XENON_QUOTES_DEFAULT
+// env (default ib) — the server resolves the effective preference per client
+// and passes it in here. A symbol may be live on Futu and IB at once; each
+// client receives frames only from the source routed for it.
 //
 // Routing rules (docs/architecture/futu-quotes.md):
 //   - a symbol goes to Futu only when it is in `ok` of the latest `assign`
-//     gen, the link is up, and the ok membership has held for >= holdDownMs;
+//     gen, the link is up, the ok membership has held for >= holdDownMs and
+//     a Futu row is already cached (below);
 //   - failover (symbol leaves ok, opend_connected:false, socket lost, health
 //     deadline) puts the symbol back on the IB line budget immediately;
-//   - indexes, options, forex and non-US stocks are pinned to IB and are never
-//     sent in `want`;
+//   - indexes, forex and non-US stocks are pinned to IB; option keys are
+//     pinned too unless the server sets XENON_FUTU_OPTIONS=1;
 //   - IB demand = IB-preference clients' symbols + IB-pinned + symbols not yet
-//     Futu-live.
+//     Futu-live;
+//   - `want` carries per-symbol tiers merged over every subscriber
+//     (held > view; a missing tier means held).
 //
 // Per-source state: futuStates holds the latest Futu-sourced PriceData per
 // symbol (hydration); it and ok/okSince are cleared on every down event.
+// futuLive requires a cached row (D10): the relay caches batch rows for
+// ok-but-not-live symbols during the hold-down instead of serving them, so a
+// route never flips to Futu before real data exists to hydrate it — a quiet
+// symbol otherwise loses its IB line and shows a frozen IB frame (Fable F1).
 
 export const FUTU_HOLD_DOWN_MS = 60_000;
 
@@ -111,13 +119,20 @@ export function createFutuRouting({ holdDownMs = FUTU_HOLD_DOWN_MS } = {}) {
   }
 
   // Futu serves this symbol now: link up + not IB-pinned + in ok +
-  // hold-down elapsed.
+  // hold-down elapsed + a Futu row already cached (D10).
   function futuLive(symbol, now) {
     if (!up) return false;
     if (ibPinned.has(symbol)) return false;
     if (!okSet.has(symbol)) return false;
     const since = okSince.get(symbol);
-    return since != null && now - since >= holdDownMs;
+    return since != null && now - since >= holdDownMs && futuStates.has(symbol);
+  }
+
+  // Symbol is admitted by the latest accepted assign (whether or not the
+  // hold-down elapsed or a row exists yet). Batch rows for ok symbols get
+  // cached so a later route switch can hydrate from them.
+  function isOk(symbol) {
+    return okSet.has(symbol);
   }
 
   function routeFor(client, symbol, now) {
@@ -136,7 +151,11 @@ export function createFutuRouting({ holdDownMs = FUTU_HOLD_DOWN_MS } = {}) {
 
   // Complete desired set for `want` — futu-first clients' symbols minus
   // IB-pinned keys (indexes/options/forex/non-US are never Futu-served).
-  function desiredWant(clientSymbols) {
+  // Each wanted symbol also gets the highest tier declared by its
+  // subscribers: `subscriberTiers` is symbol -> Map<client, "held"|"view">,
+  // and the merge counts every subscriber (not only futu-first ones) so a
+  // held position protects the Futu subscription. Absent = held.
+  function desiredWant(clientSymbols, subscriberTiers = new Map()) {
     const want = new Set();
     for (const client of futuFirst) {
       const symbols = clientSymbols.get(client);
@@ -145,7 +164,22 @@ export function createFutuRouting({ holdDownMs = FUTU_HOLD_DOWN_MS } = {}) {
         if (!ibPinned.has(symbol)) want.add(symbol);
       }
     }
-    return [...want].sort();
+    const tiers = {};
+    for (const symbol of want) {
+      const declared = subscriberTiers.get(symbol);
+      let tier = "held";
+      if (declared && declared.size > 0) {
+        tier = "view";
+        for (const t of declared.values()) {
+          if (t !== "view") {
+            tier = "held";
+            break;
+          }
+        }
+      }
+      tiers[symbol] = tier;
+    }
+    return { symbols: [...want].sort(), tiers };
   }
 
   function recordTick(symbol, data) {
@@ -176,6 +210,7 @@ export function createFutuRouting({ holdDownMs = FUTU_HOLD_DOWN_MS } = {}) {
     isUp,
     applyAssign,
     futuLive,
+    isOk,
     routeFor,
     ibDemand,
     desiredWant,

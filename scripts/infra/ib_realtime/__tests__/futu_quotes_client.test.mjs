@@ -94,6 +94,25 @@ test("want sent on open with gen=1; setWant sends only on change", async (t) => 
   });
 });
 
+test("want frame carries tiers and re-sends on a tier-only change", async (t) => {
+  const { client, ws } = setup(t);
+  await tick(t, 1);
+  client.setWant(["AAPL"], { AAPL: "view" });
+  assert.deepEqual(ws().sent, [
+    { action: "want", gen: 1, symbols: ["AAPL"], tiers: { AAPL: "view" } },
+  ]);
+  client.setWant(["AAPL"], { AAPL: "view" }); // unchanged — no resend
+  assert.equal(ws().sent.length, 1);
+  client.setWant(["AAPL"], { AAPL: "held" }); // tier changed — gen++
+  assert.equal(ws().sent.length, 2);
+  assert.deepEqual(ws().sent[1], {
+    action: "want",
+    gen: 2,
+    symbols: ["AAPL"],
+    tiers: { AAPL: "held" },
+  });
+});
+
 test("assign/health/batch frames dispatch to callbacks", async (t) => {
   const { client, events, ws } = setup(t);
   await tick(t, 1);
@@ -258,6 +277,7 @@ test("R234-2: recovery still needs the full 60s hold-down (default values)", asy
   assert.equal(ws.sent.at(-1).action, "want");
   assert.equal(ws.sent.at(-1).gen, 2);
   ws.serviceMessage({ type: "assign", gen: 2, ok: ["AAPL"], pending: [], rejected: [] });
+  routing.recordTick("AAPL", { last: 1 }); // first row after re-ok (D10)
   // A real service streams health continuously — it must keep streaming
   // through the hold-down or the 15 s deadline fires again. Protocol pongs
   // keep the socket up (20 s pong timeout).
