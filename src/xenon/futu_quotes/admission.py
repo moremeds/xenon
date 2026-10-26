@@ -20,13 +20,16 @@ deterministically.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from datetime import time as dtime
 from typing import Any, Callable, Optional
 
 from xenon.futu_quotes.quote_map import ET
+from xenon.utils.symbol_norm import futu_to_ib
 
 MIN_LIFETIME_S = 60.0
 UNSUB_GRACE_S = 60.0
@@ -84,11 +87,69 @@ def futu_code(symbol: str) -> str:
     return f"US.{symbol}"
 
 
+# Option relay key (ib_realtime_server.js `optionKey`):
+# ``SYM_YYYYMMDD_STRIKE_RIGHT``, e.g. ``AAPL_20261030_150.5_C``. The
+# underlying stays `[A-Z][A-Z0-9]*` — class shares (`BRK.B`) have no
+# verified Futu option code (execution/futu_orders.py `futu_code_for`).
+_OPT_KEY_RE = re.compile(r"([A-Z][A-Z0-9]*)_(\d{8})_([0-9]+(?:\.[0-9]+)?)_([CP])")
+
+# Packed option code with a 1–3-digit strike milli part — the sub-$1 range
+# ``futu_to_ib``'s 4–9-digit heuristic does not classify as an option
+# (strike 0.5 packs to ``500``). ``code_for`` produces these for valid
+# relay keys, so a push of one must unpack back to the exact key.
+_OPT_CODE_SHORT_RE = re.compile(r"^US\.([A-Z][A-Z0-9]*)(\d{6})([CP])(\d{1,3})$")
+
+
+def code_for(symbol: str) -> Optional[str]:
+    """Relay symbol → Futu code; ``None`` when no Futu code exists.
+
+    Plain tickers → ``US.<SYM>``. Option keys → the OCC-packed
+    ``US.<UND><YYMMDD><C|P><strike×1000>`` without zero padding (the form
+    OpenD reports), under the same rule `futu_orders.futu_code_for` uses:
+    underlying `[A-Z][A-Z0-9]*`, strike positive with at most 3 decimals.
+    A symbol containing `_` that fails the option-key shape (class-share
+    underlying, bad expiry/right, 4-decimal strike) is unmappable → None.
+    """
+    if "_" not in symbol:
+        return futu_code(symbol)
+    m = _OPT_KEY_RE.fullmatch(symbol)
+    if m is None:
+        return None
+    underlying, yyyymmdd, strike_s, right = m.groups()
+    milli = Decimal(strike_s) * 1000
+    if milli <= 0 or milli != milli.to_integral_value():
+        return None
+    return f"US.{underlying}{yyyymmdd[2:]}{right}{int(milli)}"
+
+
+def option_underlying(symbol: str) -> Optional[str]:
+    """Underlying ticker of an option relay key; ``None`` otherwise."""
+    m = _OPT_KEY_RE.fullmatch(symbol)
+    return m.group(1) if m is not None else None
+
+
 def ticker_of(code: str) -> Optional[str]:
-    """Futu code → plain ticker; ``None`` for non-US codes."""
-    if isinstance(code, str) and code.startswith("US.") and len(code) > 3:
-        return code[3:]
-    return None
+    """Futu code → relay key; ``None`` for non-US codes.
+
+    Option codes unpack back to ``SYM_YYYYMMDD_STRIKE_RIGHT`` so `assign`
+    and `batch` keys stay exactly the `want.symbols` strings.
+    """
+    if not (isinstance(code, str) and code.startswith("US.") and len(code) > 3):
+        return None
+    info = futu_to_ib(code)
+    if info.get("kind") == "OPT":
+        strike = info["strike"]
+        strike_s = str(int(strike)) if strike == int(strike) else str(strike)
+        return f"{info['symbol']}_{info['expiry']}_{strike_s}_{info['right']}"
+    m = _OPT_CODE_SHORT_RE.match(code)
+    if m is not None:
+        underlying, yymmdd, right, milli = m.groups()
+        month, day = int(yymmdd[2:4]), int(yymmdd[4:6])
+        frac = milli.rjust(3, "0").rstrip("0")
+        if 1 <= month <= 12 and 1 <= day <= 31 and frac:
+            strike_s = f"0.{frac}"  # JS-number form of a sub-$1 strike
+            return f"{underlying}_20{yymmdd}_{strike_s}_{right}"
+    return code[3:]
 
 
 @dataclass
@@ -121,6 +182,11 @@ class SymbolState:
     unwanted_since: Optional[float] = None
     unsub_retry_at: Optional[float] = None
     unsub_attempts: int = 0
+    # Routing tier from want.tiers (D9): "held" admitted before "view";
+    # under quota pressure a still-desired "view" subscription is evicted
+    # first through the same min-lifetime + grace path as a removed one.
+    tier: str = "held"
+    evicted: bool = False
 
     @property
     def subscribed(self) -> bool:
@@ -164,9 +230,12 @@ class Admission:
         backoff_cap_s: float = BACKOFF_CAP_S,
         unsub_retry_s: float = UNSUB_RETRY_S,
         unsub_retry_cap_s: float = UNSUB_RETRY_CAP_S,
+        units_per_symbol: int = 2,
     ) -> None:
         self.now = now
         self.quota_cap = quota_cap
+        # Provider quota units one held symbol costs (QUOTE + ORDER_BOOK = 2).
+        self.units_per_symbol = units_per_symbol
         self.min_lifetime_s = min_lifetime_s
         self.unsub_grace_s = unsub_grace_s
         self.backoff_base_s = backoff_base_s
@@ -202,13 +271,25 @@ class Admission:
     def state(self, symbol: str) -> SymbolState:
         st = self.symbols.get(symbol)
         if st is None:
-            st = SymbolState(symbol=symbol, code=futu_code(symbol))
+            code = code_for(symbol)
+            st = SymbolState(symbol=symbol, code=code if code is not None else symbol)
+            if code is None:
+                # Unmappable relay key (e.g. class-share option
+                # ``BRK.B_..._C``): nothing to ask OpenD — reject locally.
+                st.verify = "not_supported"
             self.symbols[symbol] = st
         return st
 
-    def set_desired(self, gen: int, symbols: list[str]) -> None:
+    def set_desired(
+        self, gen: int, symbols: list[str], tiers: Optional[dict] = None
+    ) -> None:
         """Accept a ``want`` frame's set; newly unwanted symbols start the
-        unsubscribe grace clock (a renewed removal restarts it)."""
+        unsubscribe grace clock (a renewed removal restarts it).
+
+        ``tiers`` is the frame's optional ``{symbol: "held"|"view"}`` map;
+        a symbol missing from it (or no ``tiers`` key at all) is held.
+        """
+        tiers = tiers or {}
         self.gen = gen
         seen: set[str] = set()
         deduped: list[str] = []
@@ -221,10 +302,17 @@ class Admission:
         self.desired = deduped
         for s in deduped:
             st = self.state(s)
+            st.tier = "view" if tiers.get(s) == "view" else "held"
             if s not in prev_desired:
                 st.unwanted_since = None
                 st.unsub_retry_at = None
                 st.unsub_attempts = 0
+                st.evicted = False
+            elif st.tier == "held" and st.evicted:
+                # Promoted to held: no longer an eviction candidate.
+                st.evicted = False
+                st.unwanted_since = None
+                st.unsub_retry_at = None
         for s in prev_desired - seen:
             st = self.symbols[s]
             if st.unwanted_since is None:
@@ -288,12 +376,14 @@ class Admission:
         )
 
     def own_used(self) -> int:
-        """Local believed-held count (ready or awaiting reconfirm)."""
+        """Local believed-held count in symbols (ready or awaiting reconfirm)."""
         return sum(1 for st in self.symbols.values() if st.subscribed)
 
     def controlled_used(self) -> int:
-        """Held + reserved NEW admissions (the ≤ ceiling invariant).
+        """Held + reserved NEW admissions, in provider quota units.
 
+        One held symbol costs ``units_per_symbol`` provider units (QUOTE +
+        ORDER_BOOK), matching how OpenD counts ``own_used``/``remain``.
         A reconfirm is a subscribe of an already-held symbol: it is inside
         the held count and never charged twice, and its slot is never
         handed to a new admission while it is pending or failing.
@@ -301,7 +391,9 @@ class Admission:
         inflight = sum(
             1 for st in self.symbols.values() if st.op == "subscribe" and not st.subscribed
         )
-        return max(self.provider_own_used or 0, self.own_used()) + inflight
+        return max(
+            self.provider_own_used or 0, self.own_used() * self.units_per_symbol
+        ) + inflight * self.units_per_symbol
 
     def quota_report(self) -> dict:
         """health frame quota block."""
@@ -391,7 +483,7 @@ class Admission:
         return (
             self.opend_connected
             and st.subscribed
-            and symbol not in self.desired
+            and (symbol not in self.desired or st.evicted)
             and self.now() >= self.unsub_due_at(st)
         )
 
@@ -406,8 +498,12 @@ class Admission:
         rejected: list[dict] = []
         actions = Actions()
         desired = set(self.desired)
+        blocked_held_units = 0
 
-        for sym in self.desired:
+        # Held tier before view (D9): when quota does not fit every wanted
+        # symbol, held candidates reach the quota check first and take the
+        # slots. Stable sort keeps each tier in ``want.symbols`` order.
+        for sym in sorted(self.desired, key=lambda s: self.state(s).tier != "held"):
             st = self.state(sym)
             if st.verify == "unverified":
                 if not self.opend_connected:
@@ -432,6 +528,11 @@ class Admission:
                 pending.append({"symbol": sym, "reason": "opend_down"})
             elif not self.session_open:
                 pending.append({"symbol": sym, "reason": "session"})
+            elif st.evicted:
+                # Marked for release under quota pressure: it stays
+                # subscribed until the 60 s rules let the unsubscribe out,
+                # but the assign truth is "not routed" already.
+                rejected.append({"symbol": sym, "reason": "quota"})
             elif self.is_ready(st):
                 if self._overnight_unseen(sym):
                     pending.append({"symbol": sym, "reason": "session"})
@@ -444,13 +545,23 @@ class Admission:
             elif now < st.retry_at:
                 reason = st.rejected_reason or "backoff"
                 if reason in REJECTED_REASONS:
+                    if reason == "quota" and st.tier == "held" and not st.subscribed:
+                        blocked_held_units += self.units_per_symbol
                     rejected.append({"symbol": sym, "reason": reason})
                 else:
                     pending.append({"symbol": sym, "reason": "backoff"})
-            elif not st.subscribed and self.controlled_used() >= self.ceiling():
+            elif not st.subscribed and (
+                self.controlled_used() + self.units_per_symbol > self.ceiling()
+                or (st.tier == "view" and blocked_held_units > 0)
+            ):
+                # No room, or a held candidate is already blocked: a view
+                # may never take a slot a held needs (held tier evaluated
+                # first, so blocked_held_units is final here).
                 st.rejected_reason = "quota"
                 st.retry_at = now + self._backoff(st)
                 st.backoff_step += 1
+                if st.tier == "held":
+                    blocked_held_units += self.units_per_symbol
                 rejected.append({"symbol": sym, "reason": "quota"})
             else:
                 # New admission, or reconfirm of a held symbol (never charged
@@ -460,9 +571,54 @@ class Admission:
                 actions.subscribe.append(sym)
                 pending.append({"symbol": sym, "reason": "subscribing"})
 
-        # Unsubscribe pass: held but no longer desired.
+        # Quota-pressure eviction (D9): a still-desired subscription is
+        # released — view tier before held — when believed usage exceeds
+        # the ceiling, or when a held-tier candidate is blocked and a view
+        # slot can be freed for it. The mark goes through the same
+        # min-lifetime + 60 s grace unsubscribe path as a removed symbol;
+        # if pressure resolves before it can fire, the mark retracts and
+        # the symbol stays held.
+        over_units = self.controlled_used() - self.ceiling()
+        if over_units <= 0 and blocked_held_units <= 0:
+            for s in self.desired:
+                st = self.symbols[s]
+                if st.evicted:
+                    st.evicted = False
+                    st.unwanted_since = None
+                    st.unsub_retry_at = None
+        else:
+            candidates = [
+                self.symbols[s]
+                for s in self.desired
+                if self.symbols[s].subscribed
+                and self.symbols[s].op is None
+                and not self.symbols[s].evicted
+            ]
+            views = [st for st in candidates if st.tier == "view"]
+            helds = [st for st in candidates if st.tier != "view"]
+            to_evict: list[SymbolState] = []
+            preempt = blocked_held_units  # held preemption: views only
+            for st in views:
+                if preempt <= 0:
+                    break
+                to_evict.append(st)
+                preempt -= self.units_per_symbol
+            remaining = over_units - self.units_per_symbol * len(to_evict)
+            for st in views[len(to_evict):] + helds:
+                if remaining <= 0:
+                    break
+                to_evict.append(st)
+                remaining -= self.units_per_symbol
+            for st in to_evict:
+                st.evicted = True
+                if st.unwanted_since is None:
+                    st.unwanted_since = now
+
+        # Unsubscribe pass: held but no longer desired, or evicted.
         for st in self.symbols.values():
-            if not st.subscribed or st.symbol in desired or st.op is not None:
+            if not st.subscribed or st.op is not None:
+                continue
+            if st.symbol in desired and not st.evicted:
                 continue
             if st.unwanted_since is None:
                 st.unwanted_since = now
@@ -580,6 +736,7 @@ class Admission:
             st.ready_epoch = None
             st.unsub_retry_at = None
             st.unsub_attempts = 0
+            st.evicted = False  # a completed release ends the eviction
             if symbol in self.desired:
                 st.unwanted_since = None
             else:

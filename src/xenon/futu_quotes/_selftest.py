@@ -26,6 +26,7 @@ class _FakeOpenD:
         self.connected = False
         self.subscribed: set[str] = set()
         self.on_quote_rows: Optional[Callable[[list[dict]], None]] = None
+        self.on_book_rows: Optional[Callable[[list[dict]], None]] = None
         self.on_disconnected: Optional[Callable[[], None]] = None
         self.on_reconnected: Optional[Callable[[], None]] = None
         self._snapshots = {

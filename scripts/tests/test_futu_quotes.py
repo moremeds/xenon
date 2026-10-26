@@ -243,7 +243,8 @@ def test_admission_opend_down_pending():
 def test_admission_quota_ceiling_partition():
     clock = Clock()
     ad = _admission(clock)
-    ad.apply_quota_snapshot({"own_used": 0, "remain": 1, "total_used": 0})
+    # remain in provider units; one held symbol costs units_per_symbol (2).
+    ad.apply_quota_snapshot({"own_used": 0, "remain": 2, "total_used": 0})
     ad.set_desired(7, ["AAPL", "BRK.B", "HYG"])
     for s in ("AAPL", "BRK.B", "HYG"):
         ad.verify_result(s, "ok")
@@ -518,7 +519,11 @@ class FakeOpenD:
         self.defer_all = False
         self._defer_results: dict[str, str | None] = {}
         self._defer_queues: dict[str, list[asyncio.Future]] = {}
+        # Codes whose paired subscribe is refused for ORDER_BOOK (classified
+        # not_supported downstream).
+        self.book_refused: set[str] = set()
         self.on_quote_rows = None
+        self.on_book_rows = None
         self.on_disconnected = None
         self.on_reconnected = None
 
@@ -578,7 +583,7 @@ class FakeOpenD:
                 out[c] = await fut
                 if out[c] is None and c not in self.subscribed:
                     self.subscribed.add(c)
-                    self.own_used = len(self.subscribed)
+                    self.own_used = 2 * len(self.subscribed)
                 continue
             out[c] = self._do_subscribe(c)
         return out
@@ -587,7 +592,7 @@ class FakeOpenD:
         if c in self.subscribe_lost_reply:
             lost = self.subscribe_lost_reply.pop(c)
             self.subscribed.add(c)
-            self.own_used = len(self.subscribed)
+            self.own_used = 2 * len(self.subscribed)
             if isinstance(lost, Exception):
                 raise lost
             return lost
@@ -595,12 +600,14 @@ class FakeOpenD:
             raise self.subscribe_raise.pop(c)
         if c in self.subscribe_errors:
             return self.subscribe_errors.pop(c)
+        if c in self.book_refused:
+            return "ORDER_BOOK not supported for this code"
         if self.sub_limit is not None and len(self.subscribed) >= self.sub_limit:
             return "subscription quota limit exceeded"
         if c in self.subscribed:
             return None
         self.subscribed.add(c)
-        self.own_used = len(self.subscribed)
+        self.own_used = 2 * len(self.subscribed)  # QUOTE + ORDER_BOOK units
         return None
 
     def complete_subscribe(self, code: str, err: str | None = None) -> None:
@@ -625,7 +632,7 @@ class FakeOpenD:
                 out[c] = self.unsubscribe_errors.pop(0)
             elif c in self.subscribed:
                 self.subscribed.discard(c)
-                self.own_used = len(self.subscribed)
+                self.own_used = 2 * len(self.subscribed)
                 out[c] = None
             else:
                 out[c] = "code not subscribed"
@@ -641,7 +648,10 @@ class FakeOpenD:
             "total_used": self.total_used,
             "own_used": self.own_used,
             "remain": self.remain,
-            "sub_list": {"QUOTE": sorted(self.subscribed)},
+            "sub_list": {
+                "QUOTE": sorted(self.subscribed),
+                "ORDER_BOOK": sorted(self.subscribed),
+            },
         }
 
     async def get_global_state(self) -> dict:
@@ -658,6 +668,11 @@ class FakeOpenD:
     def push(self, rows: list[dict]) -> None:
         if self.on_quote_rows:
             self.on_quote_rows(rows)
+
+    def push_book(self, rows: list[dict]) -> None:
+        """ORDER_BOOK push: ``{code, Bid, Ask}`` dicts like the SDK delivers."""
+        if self.on_book_rows:
+            self.on_book_rows(rows)
 
 
 def _snapshot_row(code: str, **extra) -> dict:
@@ -687,8 +702,17 @@ async def _settled_service(
     return svc
 
 
-async def _want(svc: FutuQuotesService, ws: FakeWS, gen: int, symbols: list[str]) -> None:
-    await svc.on_ws_message(ws, json.dumps({"action": "want", "gen": gen, "symbols": symbols}))
+async def _want(
+    svc: FutuQuotesService,
+    ws: FakeWS,
+    gen: int,
+    symbols: list[str],
+    tiers: dict | None = None,
+) -> None:
+    msg: dict = {"action": "want", "gen": gen, "symbols": symbols}
+    if tiers is not None:
+        msg["tiers"] = tiers
+    await svc.on_ws_message(ws, json.dumps(msg))
 
 
 # ---------------------------------------------------------------------------
@@ -714,8 +738,8 @@ async def test_assign_ok_fixture():
 
 @pytest.mark.asyncio
 async def test_assign_partial_quota_fixture():
-    """remain=1 → ceiling 1 → AAPL ok, rest quota-rejected."""
-    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=1, own_used=0, total_used=1)
+    """remain=2 → ceiling 2 (one 2-unit symbol) → AAPL ok, rest rejected."""
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=2, own_used=0, total_used=1)
     svc = await _settled_service(fake)
     ws = FakeWS()
     await svc.on_ws_connect(ws)
@@ -1279,13 +1303,13 @@ async def test_failed_unsub_never_releases_owned_quota():
     must not free the record — a new admission stays rejected until the
     unsubscribe actually succeeds."""
     clock = Clock(1000.0)
-    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=1, own_used=0, total_used=0)
-    svc = await _settled_service(fake, clock=clock, quota_cap=1)
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=2, own_used=0, total_used=0)
+    svc = await _settled_service(fake, clock=clock, quota_cap=2)
     ws = FakeWS()
     await svc.on_ws_connect(ws)
     await _want(svc, ws, 1, ["AAPL"])
     await svc.drain()
-    assert svc.admission.is_ok("AAPL")  # ceiling == 1, own == 1
+    assert svc.admission.is_ok("AAPL")  # ceiling == 2 units, own == 1 symbol
 
     # OLD leaves, NEW arrives; unsubscribe keeps failing, quota refresh too.
     fake.unsubscribe_raise = OpenDProviderError("provider blew up")
@@ -1366,8 +1390,8 @@ async def test_reconnect_reconfirms_owned_subs_without_double_charging():
     """R235-5: recovery at the ceiling reconfirms believed-owned subs
     without reserving a second quota unit; genuinely new symbols still hit
     the ceiling."""
-    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=1, own_used=0, total_used=0)
-    svc = await _settled_service(fake, quota_cap=1)
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=2, own_used=0, total_used=0)
+    svc = await _settled_service(fake, quota_cap=2)
     ws = FakeWS()
     await svc.on_ws_connect(ws)
     await _want(svc, ws, 1, ["AAPL"])
@@ -1376,7 +1400,7 @@ async def test_reconnect_reconfirms_owned_subs_without_double_charging():
 
     fake.drop()
     await fake.connect()
-    # Provider still reports own_used=1 (the SDK restores its own subs).
+    # Provider still reports own_used=2 units (the SDK restores its own subs).
     await svc.opend_recovered()
     await svc.drain()
 
@@ -1636,9 +1660,15 @@ async def test_sdk_callbacks_from_replaced_context_are_dropped(monkeypatch):
 
     monkeypatch.setattr(opend_mod, "_probe_opend", lambda *a, **k: None)
     monkeypatch.setattr(OpenQuoteContext, "__init__", lambda self, *a, **k: None)
-    monkeypatch.setattr(
-        OpenQuoteContext, "set_handler", lambda self, h: setattr(self, "_t_handler", h)
-    )
+
+    def _set_handler(self, h):
+        # Real HandlerContext keeps one handler per type (QUOTE + ORDER_BOOK
+        # coexist); _t_handler stays the QUOTE alias used by this test.
+        self.__dict__.setdefault("_t_handlers", {})[type(h)] = h
+        if isinstance(h, StockQuoteHandlerBase):
+            self._t_handler = h
+
+    monkeypatch.setattr(OpenQuoteContext, "set_handler", _set_handler)
     monkeypatch.setattr(OpenQuoteContext, "start", lambda self: None)
     monkeypatch.setattr(OpenQuoteContext, "close", lambda self: None)
     monkeypatch.setattr(OpenQuoteContext, "on_disconnect", lambda self, c, r, m: None)
@@ -1695,8 +1725,8 @@ async def test_reconnect_with_failed_quota_refresh_never_over_admits():
     quota refresh fails; only its reconfirm is sent, never a new admission
     into its slot."""
     clock = Clock(1000.0)
-    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=1, own_used=0, total_used=0)
-    svc = await _settled_service(fake, clock=clock, quota_cap=1)
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=2, own_used=0, total_used=0)
+    svc = await _settled_service(fake, clock=clock, quota_cap=2)
     ws = FakeWS()
     await svc.on_ws_connect(ws)
     await _want(svc, ws, 1, ["AAPL"])
@@ -1728,15 +1758,15 @@ async def test_failed_reconfirm_keeps_retry_exemption():
     """R235-5: a failed reconfirm keeps its intent — after backoff it is
     retried as a reconfirm, not rejected for quota at a truthful ceiling."""
     clock = Clock(1000.0)
-    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=1, own_used=0, total_used=0)
-    svc = await _settled_service(fake, clock=clock, quota_cap=1)
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=2, own_used=0, total_used=0)
+    svc = await _settled_service(fake, clock=clock, quota_cap=2)
     ws = FakeWS()
     await svc.on_ws_connect(ws)
     await _want(svc, ws, 1, ["AAPL"])
     await svc.drain()
     assert svc.admission.is_ok("AAPL")
 
-    fake.remain = 0  # truthful: own_used=1, remain=0 → ceiling 1
+    fake.remain = 0  # truthful: own_used=2 units, remain=0 → ceiling 2
     fake.drop()
     await fake.connect()
     fake.subscribe_errors["US.AAPL"] = "provider internal failure"
@@ -1815,12 +1845,12 @@ async def test_generic_snapshot_error_is_retryable_not_unknown():
 )
 async def test_lost_subscribe_reply_keeps_slot_held(lost):
     """R235-5: OpenD accepted AAPL but the reply was lost. AAPL stays
-    believed held: MSFT is never admitted into its slot at cap 1, and AAPL
+    believed held: MSFT is never admitted into its slot at cap 2, and AAPL
     is unsubscribed after the normal grace once demand moves away."""
     clock = Clock(1000.0)
     fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=5, own_used=0, total_used=0)
     fake.subscribe_lost_reply["US.AAPL"] = lost
-    svc = await _settled_service(fake, clock=clock, quota_cap=1)
+    svc = await _settled_service(fake, clock=clock, quota_cap=2)
     ws = FakeWS()
     await svc.on_ws_connect(ws)
     await _want(svc, ws, 1, ["AAPL"])
@@ -1853,7 +1883,7 @@ async def test_late_old_session_success_keeps_ownership():
     not certify session B, but its provider-held slot stays owned: AAPL is
     reconfirmed (no second slot) instead of being stuck at rejected/quota."""
     clock = Clock(1000.0)
-    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=1, own_used=0, total_used=0)
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=2, own_used=0, total_used=0)
     gate_a = asyncio.Event()
 
     async def sub_hook(n, codes):
@@ -1861,7 +1891,7 @@ async def test_late_old_session_success_keeps_ownership():
             await gate_a.wait()
 
     fake.hooks["subscribe"] = sub_hook
-    svc = await _settled_service(fake, clock=clock, quota_cap=1)
+    svc = await _settled_service(fake, clock=clock, quota_cap=2)
     ws = FakeWS()
     await svc.on_ws_connect(ws)
     await _want(svc, ws, 1, ["AAPL"])
@@ -1869,7 +1899,7 @@ async def test_late_old_session_success_keeps_ownership():
 
     fake.drop()
     await fake.connect()
-    fake.remain = 0  # truthful after AAPL lands: own_used=1, remain=0
+    fake.remain = 0  # truthful after AAPL lands: own_used=2 units, remain=0
     rec = asyncio.create_task(svc.opend_recovered())
     await svc.drain(timeout=0.05)
     gate_a.set()  # old-session success; OpenD retains AAPL
@@ -1933,17 +1963,17 @@ async def test_unsub_release_drops_buffer_before_resubscribe(outcome):
 async def _held_aapl_then_rejected_reconfirm(
     clock: Clock, *, quota_fails: bool, reject: str = "subscription quota limit exceeded"
 ):
-    """Cap 1: AAPL admitted; reconnect with OpenD retaining AAPL; the
+    """Cap 2: AAPL admitted; reconnect with OpenD retaining AAPL; the
     reconfirm is rejected "subscription quota limit exceeded"."""
-    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=1, own_used=0, total_used=0)
-    svc = await _settled_service(fake, clock=clock, quota_cap=1)
+    fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=2, own_used=0, total_used=0)
+    svc = await _settled_service(fake, clock=clock, quota_cap=2)
     ws = FakeWS()
     await svc.on_ws_connect(ws)
     await _want(svc, ws, 1, ["AAPL"])
     await svc.drain()
     assert svc.admission.is_ok("AAPL")
 
-    fake.remain = 0  # truthful: own_used=1, remain=0
+    fake.remain = 0  # truthful: own_used=2 units, remain=0
     if quota_fails:
         fake.quota_raise = OpenDProviderError("quota unavailable")
     fake.drop()
@@ -2041,7 +2071,7 @@ async def test_terminal_rejection_after_uncertain_attempt_keeps_progress(reject)
     while wanted; once demand releases it, MSFT is admitted."""
     clock = Clock(1000.0)
     fake = FakeOpenD(snapshots=DEFAULT_SNAPSHOTS, remain=5, own_used=0, total_used=0)
-    svc = await _settled_service(fake, clock=clock, quota_cap=1)
+    svc = await _settled_service(fake, clock=clock, quota_cap=2)
     ws = FakeWS()
     await svc.on_ws_connect(ws)
     fake.subscribe_errors["US.AAPL"] = "Timeout"  # before OpenD accepted it

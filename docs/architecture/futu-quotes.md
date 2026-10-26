@@ -1,21 +1,25 @@
 # Futu quotes: relay ↔ futu-quotes contract
 
-Status: frozen contract for R1 (X1 service, X2 relay). Fixtures live in
-`scripts/infra/ib_realtime/fixtures/futu_quotes/`. All fixture prices are synthetic.
+Status: frozen contract for R1 (X1 service, X2 relay), extended by the X7
+Futu-primary work (paired QUOTE+ORDER_BOOK, option keys, held/view tiers).
+Fixtures live in `scripts/infra/ib_realtime/fixtures/futu_quotes/`. All fixture prices are synthetic.
 
 ## Why
 
 The IB realtime relay holds at most 85 live IB lines (`IB_REALTIME_MAX_LINES`). Argon subscribes to
-about 176 symbols, so the rest only get a snapshot and go stale. Futu OpenD gives one quota per
-(symbol, SubType); this account has 1000. The `futu-quotes` service streams US stocks/ETFs from
-OpenD, and the relay serves them to clients that opt in.
+about 176 symbols, so the rest only get a snapshot and go stale. Futu OpenD gives quota per
+(symbol, SubType); this account has 1000 units and each served symbol holds one paired
+QUOTE + ORDER_BOOK subscription (`FUTU_UNITS_PER_SYMBOL`, default 2 units — a conservative
+policy: X7-0 calibration measured +1/+1 units for a stock's QUOTE/ORDER_BOOK pair and no
+counter movement for US options). The `futu-quotes` service streams US stocks/ETFs and US
+options from OpenD, and the relay serves them to clients that opt in.
 
 ## Who gets Futu
 
 - A relay connection opts in with `?quotes=futu-first` on the upgrade URL. The relay honours it
   only on connections that authenticated with `X-API-Key` (service clients). Browser/ticket
   clients and API-key clients without the flag stay on IB.
-- Futu serves US stocks and ETFs in two sessions. The service polls
+- Futu serves US stocks and ETFs in two sessions, and US options in `rth` only. The service polls
   `get_global_state().market_us` every 30 s and reads its wall clock (UTC, converted to
   America/New_York) at each poll (`admission.us_session`):
   - `rth`: `market_us` is `MORNING` or `AFTERNOON`, at any clock. Futu's own state covers holidays
@@ -26,7 +30,9 @@ OpenD, and the relay serves them to clients that opt in.
   - Every other state (pre-market, after-hours, weekend, failed or unknown) counts as closed:
     symbols go `pending` with reason `session` and stay on IB. A clock edge (20:00, 03:50) takes
     effect at the next poll, so up to 30 s late.
-- Indexes, options, non-US symbols and anything Futu rejects stay on IB in every session.
+- Indexes, non-US symbols and anything Futu rejects stay on IB in every session. Options are never
+  served overnight: an option row in the overnight session is not a quote source and the symbol
+  sits `pending` with reason `session`.
 
 ## Transport
 
@@ -45,11 +51,24 @@ OpenD, and the relay serves them to clients that opt in.
 monotonically, and the service ignores any `gen` lower than the last one it saw on that connection.
 
 ```json
-{ "action": "want", "gen": 7, "symbols": ["AAPL", "BRK.B", "HYG"] }
+{
+  "action": "want",
+  "gen": 7,
+  "symbols": ["AAPL", "BRK.B", "HYG", "AAPL_20261030_150_C"],
+  "tiers": { "AAPL": "held", "AAPL_20261030_150_C": "view" }
+}
 ```
 
-Symbols are plain tickers, as the relay uses them. The service maps `AAPL` ↔ `US.AAPL`. Any
-class-share mapping it cannot verify is rejected with `unknown_symbol`.
+Symbols are plain tickers, as the relay uses them, or US option relay keys
+`SYM_YYYYMMDD_STRIKE_RIGHT` (the relay's `optionKey` form). The service maps `AAPL` ↔ `US.AAPL`
+and `AAPL_20261030_150_C` ↔ `US.AAPL261030C150000` (underlying `[A-Z][A-Z0-9]*`, ≤3-decimal
+strike). An option key it cannot map is rejected `not_supported` before any OpenD call —
+that includes a class-share underlying (`BRK.B_...`), which has no verified Futu option
+code. A class-share *ticker* it cannot verify is rejected with `unknown_symbol`. The relay
+sends option keys only when its option routing is on (`XENON_FUTU_OPTIONS`, relay side).
+
+`tiers` is optional. It marks each wanted symbol `held` or `view` for admission priority;
+a symbol missing from the map — or the whole `tiers` key absent or malformed — means `held`.
 
 ## Frames: futu-quotes → relay
 
@@ -69,7 +88,8 @@ the session changes.
 
 - For the latest `want`, `ok`, `pending` and `rejected` are disjoint and together list every wanted
   symbol. `pending` and `rejected` items are `{symbol, reason}`.
-- `ok`: subscribed on OpenD while the session is `rth` or `overnight`. The relay serves a symbol from Futu only when
+- `ok`: the paired QUOTE + ORDER_BOOK subscription is held on OpenD while the session is `rth` or
+  `overnight` (options: `rth` only). The relay serves a symbol from Futu only when
   it is in `ok` of the latest `gen` of the active connection.
 - Overnight readiness: in the `overnight` session a subscribed symbol is `ok` only after the
   service has seen at least one row for it with a valid `overnight_price` and an `overnight_volume`
@@ -79,7 +99,12 @@ the session changes.
 - Assignment transitions are serialized. A late completion of an older subscribe never changes the
   assignment for a newer `gen`.
 - `pending.reason`: `subscribing` | `session` | `opend_down` | `backoff`.
-- `rejected.reason`: `quota` | `unknown_symbol` | `not_supported` | `provider_error`.
+- `rejected.reason`: `quota` | `unknown_symbol` | `not_supported` | `provider_error`. A `quota`
+  rejection also covers a still-wanted `view` symbol marked for release under quota pressure:
+  the mark is set after that evaluation's partition is built, so it shows `rejected` from the
+  *next* evaluation (the relay should already treat it as unrouted) while the actual
+  unsubscribe waits for the subscription rules below. An ORDER_BOOK refusal for a code lands
+  in `not_supported`, as does an option key the service cannot map to a Futu code.
 - After `pending` or `rejected`, the relay serves the symbol from IB. The service re-evaluates
   pending and rejected symbols when quota is refreshed or released, when OpenD reconnects, and when
   the session opens, with bounded backoff. A symbol that later moves to `ok` arrives in a new `assign`.
@@ -96,13 +121,22 @@ the session changes.
 - Producer fence: the service emits ticks only for symbols in the current `ok` set of the active
   connection, and drops buffered ticks for a symbol that leaves it. The relay accepts a Futu tick
   only for a symbol it currently routes to Futu.
-- Each value is a full `PriceData` (`web/lib/pricesProtocol.ts`) plus `source: "futu"`. Fields
-  Futu's QUOTE push does not carry are `null`: bid, ask, sizes, greeks, 52-week and avgVolume.
+- Each value is a full `PriceData` (`web/lib/pricesProtocol.ts`) plus `source: "futu"`.
+  `bid`, `ask`, `bidSize`, `askSize` come from the top level of the paired ORDER_BOOK push
+  (best `(price, volume)`). They are `null` before any book has arrived and whenever the symbol's
+  session is not `rth`. Amendment A1: the receipt-age rule is **off by default**
+  (`FUTU_BOOK_STALE_S`, default `0`) because Futu pushes ORDER_BOOK only on change, so a quiet
+  but healthy book is still valid; a positive value re-enables nulling once the book receipt is
+  older than that many seconds. Disconnect, unsubscribe and session change clear the book either
+  way. 52-week, `avgVolume` and — for stocks — all greeks stay `null`: the QUOTE push does not
+  carry them.
 - RTH rows fill `last`, `volume`, `open`, `high`, `low`, `close` (previous close) and `timestamp`.
   They carry no `session` field (absent means `rth`).
 - RTH `timestamp` is ISO-8601 UTC with a `Z` suffix. It comes from the quote's own `data_date` +
   `data_time`, read as America/New_York with DST handling. It is never the receive, flush or
-  reconnect time.
+  reconnect time — except that a book-driven re-emit stamps `max(quote ts, book receipt time)`.
+  The per-symbol high-water mark and the coalescer order still use the QUOTE timestamp only, so
+  a book receipt never advances the mark or drops a newer quote.
 - Overnight rows add `session: "overnight"`. `last` / `high` / `low` / `volume` are
   `overnight_price` / `overnight_high_price` / `overnight_low_price` / `overnight_volume`; `close`
   is the RTH `last_price` (the most recent regular close); `open` is `null`. During overnight the
@@ -110,6 +144,14 @@ the session changes.
   overnight time field, so `timestamp` is the service's receipt time (UTC). A row with a missing,
   non-finite or ≤ 0 `overnight_price` or `overnight_volume` is dropped (for example a holiday night
   or a rolled row): it is not published and does not count for readiness.
+- Option rows (RTH only, keyed by the relay option key from `want.symbols`) fill the option
+  fields: `impliedVol`, `delta`, `gamma`, `theta`, `vega` = the QUOTE push's
+  `implied_volatility` / `delta` / `gamma` / `theta` / `vega` each × its factor from
+  `FUTU_GREEK_FACTORS` (JSON object, e.g. `{"iv":0.01,"delta":1,"gamma":1,"theta":1,"vega":1}` —
+  `iv` 0.01 converts Futu's percent IV into the fraction PriceData expects). Unset or invalid
+  `FUTU_GREEK_FACTORS`, or a missing/non-finite push value or factor, leaves that field `null`.
+  `undPrice` is the latest Futu `last` of the held underlying, refreshed on every emit including
+  book-driven rebuilds, else `null`. Options never carry `session: "overnight"`.
 - A missing `session` field means `rth`. Consumers must not require the field.
 - Overnight replay guard: the service publishes an overnight row only when `overnight_volume` or
   `overnight_price` differs from the last value seen for that symbol. The first row after a
@@ -137,20 +179,36 @@ the session changes.
 }
 ```
 
-- `ceiling` = min(`FUTU_QUOTE_QUOTA`, default 800; own_used + remain), where `remain` comes from
-  `query_subscription(is_all_conn=True)`. It is refreshed every 5 min and after a rejection. It is
-  a local admission limit only: OpenD's own rejection is authoritative, because other consumers of
-  the same account (livewire) can race us. Controlled usage = `own_used` + pending admissions, and it
-  must stay ≤ `ceiling`. `all_used` (all connections) is reported for information only.
+- `ceiling` = min(`FUTU_QUOTE_QUOTA`, default 800; own_used + remain), in provider quota units,
+  where `remain` comes from `query_subscription(is_all_conn=True)`. It is refreshed every 5 min
+  and after a rejection. It is a local admission limit only: OpenD's own rejection is
+  authoritative, because other consumers of the same account (livewire) can race us. Controlled
+  usage = held symbols × `FUTU_UNITS_PER_SYMBOL` (default 2) + pending admissions × the same, and
+  it must stay ≤ `ceiling`. The health `own_used` counts this service's held symbols (the
+  provider's own per-connection unit count feeds `ceiling`); `all_used` (all connections) is
+  reported for information only.
 - When OpenD is lost, the service sends `opend_connected: false` together with an `assign` whose
   `ok` is empty.
 
 ## Subscription rules (Futu)
 
-- SubType QUOTE only: 1 quota per symbol. No ORDER_BOOK or TICKER in v1.
-- Unsubscribe only when the symbol has left the desired set, at least 60 s after it was subscribed
-  (Futu rule), and after a further 60 s grace. Re-check the desired set when the timer fires.
-  When Futu rejects an unsubscribe as too early, retry it later.
+- One paired `SubType.QUOTE` + `SubType.ORDER_BOOK` subscription per symbol, issued as a single
+  OpenD subscribe so ownership is atomic: `FUTU_UNITS_PER_SYMBOL` (default 2) provider quota
+  units per symbol — a conservative policy, not a per-kind measurement (see § Why). A symbol is
+  held only while both subtypes are held in the current OpenD session; if
+  OpenD refuses ORDER_BOOK for the code the symbol is rejected `not_supported`. No TICKER.
+- Tiers: each wanted symbol is `held` or `view` (`want.tiers`; absent = `held`). `held`
+  candidates are evaluated first — when quota does not fit every wanted symbol, `held` takes
+  the slots and a `view` is never admitted while a `held` candidate is quota-blocked. Under
+  quota pressure (believed usage above the ceiling, or a blocked `held` candidate a `view`
+  slot could free) a still-desired `view` subscription is marked for release before any `held`
+  one, and only once `view` candidates are exhausted does pressure evict `held`. The mark goes
+  through the same unsubscribe rules as a removal below — min-lifetime plus grace — so it never
+  unsubscribes early, and it retracts if the pressure resolves first. A `want` promoting a
+  marked symbol to `held` cancels its eviction; a completed release ends it.
+- Unsubscribe only when the symbol has left the desired set or is marked for eviction, at least
+  60 s after it was subscribed (Futu rule), and after a further 60 s grace. Re-check the desired
+  set when the timer fires. When Futu rejects an unsubscribe as too early, retry it later.
 - After a reconnect, resubscribe the whole desired set. Do not assume subscriptions survived.
 
 ## Relay routing rules

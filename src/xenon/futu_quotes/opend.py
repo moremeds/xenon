@@ -28,6 +28,7 @@ try:
         RET_ERROR,
         RET_OK,
         OpenQuoteContext,
+        OrderBookHandlerBase,
         StockQuoteHandlerBase,
         SubType,
     )
@@ -35,10 +36,15 @@ except ImportError:  # pragma: no cover — futu-api missing
     RET_ERROR = None  # type: ignore[assignment]
     RET_OK = None  # type: ignore[assignment]
     OpenQuoteContext = None  # type: ignore[assignment]
+    OrderBookHandlerBase = object  # type: ignore[assignment,misc]
     StockQuoteHandlerBase = object  # type: ignore[assignment,misc]
     SubType = None  # type: ignore[assignment]
 
 logger = logging.getLogger("xenon.futu_quotes.opend")
+
+# Subtypes every subscription holds together: QUOTE alone has no bid/ask, so
+# the pair is atomic — a symbol is ready only when both are subscribed.
+_SUBTYPES = [SubType.QUOTE, SubType.ORDER_BOOK] if SubType is not None else []
 
 
 class OpenDError(Exception):
@@ -141,6 +147,7 @@ class OpenDLike(Protocol):
     """Async surface the service depends on (fake-compatible)."""
 
     on_quote_rows: Optional[Callable[[list[dict]], None]]
+    on_book_rows: Optional[Callable[[list[dict]], None]]
     on_disconnected: Optional[Callable[[], None]]
     on_reconnected: Optional[Callable[[], None]]
 
@@ -230,14 +237,43 @@ class _StockQuoteHandler(StockQuoteHandlerBase):  # type: ignore[misc]
         return ret, content
 
 
+class _OrderBookHandler(OrderBookHandlerBase):  # type: ignore[misc]
+    """Forwards parsed ORDER_BOOK push frames, tagged with their origin.
+
+    ``content`` is one ``{code, Bid, Ask, ...}`` dict per frame (not a
+    DataFrame), so it is wrapped in a single-item list to match the
+    ``on_book_rows`` rows convention.
+    """
+
+    def __init__(self, ctx: _QuoteContext) -> None:
+        super().__init__()
+        self._ctx = ctx
+
+    def on_recv_rsp(self, rsp_pb: Any) -> tuple:
+        ret, content = super().on_recv_rsp(rsp_pb)
+        if ret == RET_OK and isinstance(content, dict):
+            ctx = self._ctx
+            origin = (ctx._fq_gen, ctx._fq_link)  # read on the SDK thread
+            ctx._fq_loop.call_soon_threadsafe(
+                ctx._fq_sink._deliver_book, origin, [content]
+            )
+        return ret, content
+
+
 class FutuOpenD:
-    """Serialized async facade over one ``OpenQuoteContext`` (SubType.QUOTE only)."""
+    """Serialized async facade over one ``OpenQuoteContext``.
+
+    Subscriptions are the QUOTE + ORDER_BOOK pair: a symbol counts as held
+    only when both subtypes are subscribed in the current session, and
+    unsubscribe releases both together.
+    """
 
     def __init__(self, host: str = "127.0.0.1", port: int = 11111, probe_timeout: float = 3.0) -> None:
         self.host = host
         self.port = port
         self.probe_timeout = probe_timeout
         self.on_quote_rows: Optional[Callable[[list[dict]], None]] = None
+        self.on_book_rows: Optional[Callable[[list[dict]], None]] = None
         self.on_disconnected: Optional[Callable[[], None]] = None
         self.on_reconnected: Optional[Callable[[], None]] = None
         self._ctx: Any = None
@@ -263,6 +299,7 @@ class FutuOpenD:
         def _open() -> Any:
             ctx = _QuoteContext(host=self.host, port=self.port, loop=loop, sink=self, gen=gen)
             ctx.set_handler(_StockQuoteHandler(ctx))
+            ctx.set_handler(_OrderBookHandler(ctx))
             ctx.start()
             return ctx
 
@@ -303,6 +340,16 @@ class FutuOpenD:
         if cb is not None:
             cb(rows)
 
+    def _deliver_book(self, origin: tuple[int, int], rows: list[dict]) -> None:
+        """Loop thread: same origin fence as ``_deliver_rows``, for books."""
+        gen, link = origin
+        ctx = self._ctx
+        if gen != self._gen or ctx is None or link != ctx._fq_link:
+            return
+        cb = self.on_book_rows
+        if cb is not None:
+            cb(rows)
+
     async def _call(self, fn: Callable[[], Any]) -> Any:
         """Run a blocking SDK call serialized under one lock."""
         if self._ctx is None:
@@ -327,12 +374,13 @@ class FutuOpenD:
         return await self._call(_run)
 
     async def subscribe(self, codes: list[str]) -> dict[str, Optional[str]]:
-        """Per-code subscribe; returns ``{code: None | error_message}``."""
+        """Per-code QUOTE+ORDER_BOOK subscribe (one atomic SDK call each);
+        returns ``{code: None | error_message}``."""
         out: dict[str, Optional[str]] = {}
         for code in codes:
 
             def _run(code: str = code) -> Optional[str]:
-                ret, msg = self._ctx.subscribe([code], [SubType.QUOTE])
+                ret, msg = self._ctx.subscribe([code], _SUBTYPES)
                 return None if ret == RET_OK else str(msg)
 
             try:
@@ -342,11 +390,12 @@ class FutuOpenD:
         return out
 
     async def unsubscribe(self, codes: list[str]) -> dict[str, Optional[str]]:
+        """Per-code unsubscribe of both subtypes together."""
         out: dict[str, Optional[str]] = {}
         for code in codes:
 
             def _run(code: str = code) -> Optional[str]:
-                ret, msg = self._ctx.unsubscribe([code], [SubType.QUOTE])
+                ret, msg = self._ctx.unsubscribe([code], _SUBTYPES)
                 return None if ret == RET_OK else str(msg)
 
             try:
