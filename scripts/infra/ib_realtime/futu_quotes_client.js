@@ -1,7 +1,10 @@
 // Relay -> futu-quotes internal WS client (docs/architecture/futu-quotes.md).
 //
 // Sends `want` (complete desired set, no deltas; `gen` is per-connection and
-// starts at 1) and receives `assign`/`batch`/`health`. Liveness is protocol
+// starts at 1) and receives `assign`/`batch`/`health`. `want` may carry a
+// `tiers` map — per-symbol `held|view` merged over all subscribers
+// (held > view); a symbol absent from `tiers` means `held` at the service.
+// Liveness is protocol
 // ping/pong: we ping every pingIntervalMs and tear down the socket when no
 // pong arrives within pongTimeoutMs. Independently, when no `health` frame
 // arrives within healthDeadlineMs the link is reported down (a stalled

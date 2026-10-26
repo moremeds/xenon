@@ -1,19 +1,23 @@
 // Futu provider routing — pure state, no sockets/timers. Callers pass `now`.
 //
-// A relay client opts into Futu-first quotes via `?quotes=futu-first` on the
-// upgrade URL (honoured only for X-API-Key auth — carried in by the server).
-// A symbol may be live on Futu and IB at once; each client receives frames
-// only from the source routed for it.
+// A client is routed Futu-first either by `?quotes=futu-first` on the
+// upgrade URL (X-API-Key auth only) or by the relay's XENON_QUOTES_DEFAULT
+// env (default ib) — the server resolves the effective preference per client
+// and passes it in here. A symbol may be live on Futu and IB at once; each
+// client receives frames only from the source routed for it.
 //
 // Routing rules (docs/architecture/futu-quotes.md):
 //   - a symbol goes to Futu only when it is in `ok` of the latest `assign`
-//     gen, the link is up, and the ok membership has held for >= holdDownMs;
+//     gen, the link is up, the ok membership has held for >= holdDownMs and
+//     a Futu row is already cached (below);
 //   - failover (symbol leaves ok, opend_connected:false, socket lost, health
 //     deadline) puts the symbol back on the IB line budget immediately;
-//   - indexes, options, forex and non-US stocks are pinned to IB and are never
-//     sent in `want`;
+//   - indexes, forex and non-US stocks are pinned to IB; option keys are
+//     pinned too unless the server sets XENON_FUTU_OPTIONS=1;
 //   - IB demand = IB-preference clients' symbols + IB-pinned + symbols not yet
-//     Futu-live.
+//     Futu-live;
+//   - `want` carries per-symbol tiers merged over every subscriber
+//     (held > view; a missing tier means held).
 //
 // Per-source state: futuStates holds the latest Futu-sourced PriceData per
 // symbol (hydration); it and ok/okSince are cleared on every down event.
