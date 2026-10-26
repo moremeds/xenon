@@ -368,7 +368,7 @@ def test_f6_gtc_stop_limit_round_trips_and_updates():
     _run(FakeTradeCtx(positions=[_pos("US.SPY", 100.0)], open_orders=[row, plain]))
 
     got = _open_payload()
-    assert (got["7601"]["orderType"], got["7601"]["tif"], got["7601"]["auxPrice"]) == ("STOP_LIMIT", "GTC", 1.2)
+    assert (got["7601"]["orderType"], got["7601"]["tif"], got["7601"]["auxPrice"]) == ("STP LMT", "GTC", 1.2)
     assert (got["7602"]["orderType"], got["7602"]["tif"], got["7602"]["auxPrice"]) == ("LMT", "DAY", None)
 
     time.sleep(0.01)

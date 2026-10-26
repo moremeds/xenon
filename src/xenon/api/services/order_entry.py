@@ -2154,6 +2154,24 @@ def _futu_guard(kind: str, broker: str, op: str | None, account_env: str | None)
     return scope, None
 
 
+def futu_capabilities() -> dict[str, dict[str, list[str]]]:
+    """/health `futu.capabilities[env]`: the env's allowed place tuples
+    (`SEC:TYPE:TIF:SESSION`, after the operator allowlist) and the order
+    types whose modify is on and that the env can hold (contract § Order
+    types). Clients offer only these; `trading` says whether the env is on."""
+    from xenon.execution import futu_orders, futu_scope
+
+    out: dict[str, dict[str, list[str]]] = {}
+    for env in futu_scope.ACCOUNT_ENVS:
+        tuples = futu_orders.allowed_tuples(env)
+        types = {t[1] for t in tuples}
+        out[env] = {
+            "tuples": sorted(":".join(t) for t in tuples),
+            "modify": sorted(t for t in futu_orders.modify_types() if t in types),
+        }
+    return out
+
+
 def futu_trading_status() -> dict[str, bool]:
     """/health `futu.trading`: per env, would a Futu place pass the guard?
     True only when not read-only, the Futu order worker runs, the env is in

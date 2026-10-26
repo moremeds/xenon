@@ -191,27 +191,51 @@ def _scope_fields(scope: AccountScope) -> dict[str, str]:
 
 # Futu order types (SDK `OrderType`): NORMAL / MARKET map to the IB labels,
 # every other type is passed through as Futu's own label.
-_FUTU_ORDER_TYPE = {"NORMAL": "LMT", "MARKET": "MKT"}
+_FUTU_TERM_LABELS = {
+    "aux_price": orders_store.FUTU_AUX_LABELS,
+    "trail_type": orders_store.FUTU_TRAIL_LABELS,
+    "trail_value": orders_store.FUTU_TRAIL_LABELS,
+    "trail_spread": orders_store.FUTU_SPREAD_LABELS,
+}
 
 
 def _futu_open_order(row: dict[str, Any], scope: AccountScope) -> dict[str, Any]:
     out = _open_order(row)
     legs = row.get("legs") if isinstance(row.get("legs"), dict) else {}
-    info = legs.get("futu_order")
-    order_type = (info or {}).get("order_type")
-    # Observed type, else the placement intent (an own order not observed yet).
-    label = orders_store.FUTU_ORDER_LABELS.get(order_type or "") or (legs.get("futu_intent") or {}).get("order_type")
-    if label is not None and label not in orders_store.FUTU_LIMIT_LABELS:
+    info = legs.get("futu_order") or {}
+    intent = legs.get("futu_intent") or {}
+    terms = legs.get("futu_terms") or {}
+    raw = info.get("order_type")
+    # Observed type (an unmapped Futu type is shown raw), else the placement
+    # intent (an own order not observed yet); never inferred from the price.
+    label = orders_store.FUTU_ORDER_LABELS.get(raw, raw) if raw else intent.get("order_type")
+    known = label in orders_store.FUTU_ORDER_LABELS.values()
+    if known and label not in orders_store.FUTU_LIMIT_LABELS:
         out["limitPrice"] = None  # no fixed limit: Futu's `price` is an SDK placeholder
+
+    def term(key: str) -> Any:
+        # Observed value, else the confirmed terms, else the placement; a
+        # term the type does not have is null.
+        if known and label not in _FUTU_TERM_LABELS[key]:
+            return None
+        for source in (info, terms, intent):
+            if source.get(key) is not None:
+                return source[key]
+        return None
+
+    session = info.get("session") or intent.get("session")
     out.update(
         orderId=0,
         permId=0,
         brokerOrderId=_str_or_none(row.get("broker_order_id")),
-        # Observed type and trigger price; never inferred from the limit price.
-        orderType=_FUTU_ORDER_TYPE.get(order_type, order_type) if order_type else "UNKNOWN",
-        auxPrice=_float_or_none((info or {}).get("aux_price")),
+        orderType=label or "UNKNOWN",
+        auxPrice=_float_or_none(term("aux_price")),
+        trailType=term("trail_type"),
+        trailValue=_float_or_none(term("trail_value")),
+        trailSpread=_float_or_none(term("trail_spread")),
+        session=session,
         # Raw Futu status: several statuses map to UNKNOWN, this tells them apart.
-        futuStatus=(info or {}).get("status"),
+        futuStatus=info.get("status"),
         tif=str(row.get("tif") or "DAY"),
         **_scope_fields(scope),
     )

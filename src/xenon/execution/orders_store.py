@@ -1406,6 +1406,9 @@ FUTU_ORDER_LABELS: dict[str, str] = {
 # Labels with a fixed user limit (`limitPrice`); every other label has none
 # (`limit_price` NULL; Futu's `price` is an SDK placeholder for them).
 FUTU_LIMIT_LABELS = frozenset({"LMT", "STP LMT", "LIT"})
+FUTU_AUX_LABELS = frozenset({"STP", "STP LMT", "MIT", "LIT"})  # a trigger (`auxPrice`)
+FUTU_TRAIL_LABELS = frozenset({"TRAIL", "TRAIL LIMIT"})  # `trailType` + `trailValue`
+FUTU_SPREAD_LABELS = frozenset({"TRAIL LIMIT"})  # `trailSpread`
 # `legs.futu_intent`: the frozen placement fingerprint of a Xenon FUTU order,
 # written with the reservation and never changed (not by modify, not by the
 # runbook). `legs.futu_terms`: the current confirmed amendable terms; starts
@@ -1588,13 +1591,28 @@ def _futu_intent_mismatch(row, obs: FutuOrderObservation) -> str | None:
 
 
 def _futu_order_info(obs: FutuOrderObservation) -> dict | None:
-    """Observed order type, trigger price and raw Futu status, stored in the
-    legs payload (`futu_order`); None when the row reported none of them."""
+    """What Futu last reported about the order, stored in the legs payload
+    (`futu_order`, observed and mutable; never `futu_intent` / `futu_terms`):
+    the raw Futu type and its Xenon label, trigger, trail type / value /
+    spread, session and raw status. A term the type does not have is None (an
+    SDK placeholder is never kept). None when the row reported neither type
+    nor status."""
     if obs.order_type is None and obs.futu_status is None:
         return None
+    label = obs.order_label
+
+    def term(value, labels):
+        # Unknown type: keep what Futu reported; a known type keeps only its terms.
+        return str(value) if value is not None and (label is None or label in labels) else None
+
     return {
         "order_type": obs.order_type,
-        "aux_price": str(obs.aux_price) if obs.aux_price is not None else None,
+        "label": label,
+        "aux_price": term(obs.aux_price, FUTU_AUX_LABELS),
+        "trail_type": term(obs.trail_type if obs.trail_type in ("RATIO", "AMOUNT") else None, FUTU_TRAIL_LABELS),
+        "trail_value": term(obs.trail_value, FUTU_TRAIL_LABELS),
+        "trail_spread": term(obs.trail_spread, FUTU_SPREAD_LABELS),
+        "session": obs.session if obs.session in _FUTU_SESSIONS else None,
         "status": obs.futu_status,
     }
 
