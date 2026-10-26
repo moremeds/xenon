@@ -42,6 +42,7 @@ from xenon.futu_quotes.opend import (
 from xenon.futu_quotes.quote_map import (
     HighWaterMark,
     OvernightBaseline,
+    order_book_top,
     overnight_row_to_pricedata,
     row_to_pricedata,
 )
@@ -138,18 +139,29 @@ class FutuQuotesService:
         clock: Callable[[], float] = time.monotonic,
         batch_window_s: float = 0.1,
         wall: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        book_stale_s: float = 10.0,
+        units_per_symbol: int = 2,
     ) -> None:
         self.opend = opend
         opend.on_quote_rows = self._on_quote_rows
+        opend.on_book_rows = self._on_book_rows
         opend.on_disconnected = self._on_opend_down
         opend.on_reconnected = self._on_opend_up
 
         self.clock = clock
-        self.admission = Admission(quota_cap=quota_cap, now=clock)
+        self.admission = Admission(
+            quota_cap=quota_cap, now=clock, units_per_symbol=units_per_symbol
+        )
         self.batcher = Batcher(batch_window_s, clock)
         self.highwater = HighWaterMark()
         # Wall clock (aware UTC): session rule + overnight receipt stamps.
         self.wall = wall
+        # ORDER_BOOK top is nulled on emitted rows when older than this.
+        self.book_stale_s = book_stale_s
+        # Per-symbol last ORDER_BOOK top {fields, recv} and last emitted
+        # RTH quote (pd, quote_ts) — the template book pushes rebuild from.
+        self._book: dict[str, dict] = {}
+        self._last_quote: dict[str, tuple[dict, datetime]] = {}
         # US session from the last poll: "rth" | "overnight" | None (closed).
         self.session: Optional[str] = None
         self.baseline = OvernightBaseline()
@@ -182,6 +194,8 @@ class FutuQuotesService:
         self.batcher.clear()
         self.highwater.reset_all()
         self.baseline.reset_all()
+        self._book.clear()
+        self._last_quote.clear()
         if old is not None and old is not ws:
             try:
                 await old.close()
@@ -257,6 +271,8 @@ class FutuQuotesService:
         self.batcher.clear()  # dead-session ticks must not carry over
         self.session = None  # mark_disconnected also drops overnight readiness
         self.baseline.reset_all()  # overnight baseline is per OpenD session
+        self._book.clear()  # book receipt belongs to the dead session
+        self._last_quote.clear()
         self._opend_down.set()
         self._kick()
 
@@ -277,6 +293,8 @@ class FutuQuotesService:
         self.admission.mark_connected()  # new epoch: nothing is ready yet
         self.batcher.clear()
         self.baseline.reset_all()
+        self._book.clear()
+        self._last_quote.clear()
         await self.refresh_quota_once()
         await self.poll_session_once()
         self._kick()
@@ -478,6 +496,8 @@ class FutuQuotesService:
             self.highwater.reset(sym)
             self.baseline.reset(sym)
             self.batcher.drop(sym)
+            self._book.pop(sym, None)
+            self._last_quote.pop(sym, None)
         self._kick()
 
     async def _op_session(self, op: _Op) -> None:
@@ -589,7 +609,58 @@ class FutuQuotesService:
                 continue
             if not self.admission.is_ok(sym):
                 continue
-            self.batcher.enqueue(pd, ts)
+            if received_at is None:
+                # RTH row: remember it as the template book pushes rebuild
+                # from, then overlay the fresh book top if we have one.
+                self._last_quote[sym] = (pd, ts)
+                self._apply_book(pd, ts)
+            self.batcher.enqueue(pd, ts)  # ordering/mark stays on QUOTE ts
+        self._schedule_flush()
+
+    def _apply_book(self, pd: dict, quote_ts: datetime) -> None:
+        """Overlay the fresh ORDER_BOOK top onto an RTH row, in place.
+
+        The four book fields stay NULL when the book is stale
+        (> ``book_stale_s`` old) or the session is not RTH; a fresh book
+        also lifts ``timestamp`` to ``max(quote_ts, book receipt)``.
+        """
+        book = self._book.get(pd["symbol"])
+        if book is None or self.session != "rth":
+            return
+        if (self.wall() - book["recv"]).total_seconds() > self.book_stale_s:
+            return
+        pd.update(book["fields"])
+        merged = max(quote_ts, book["recv"])
+        pd["timestamp"] = merged.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+
+    def _on_book_rows(self, rows: list[dict]) -> None:
+        """ORDER_BOOK push rows (already on the loop thread).
+
+        US books carry no source timestamp, so freshness is the local
+        receipt time. A push re-emits the last RTH quote with the new top;
+        the coalescer ordering and the high-water mark stay on the QUOTE
+        source ts — book receipt time must never advance them.
+        """
+        recv = self.wall()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            sym = ticker_of(row.get("code"))
+            if sym is None:
+                continue
+            fields = order_book_top(row)
+            self._book[sym] = {"recv": recv, "fields": fields}
+            if self.session != "rth":
+                continue
+            base = self._last_quote.get(sym)
+            if base is None or not self.admission.is_ok(sym):
+                continue
+            pd, quote_ts = base
+            out = dict(pd)
+            out.update(fields)
+            merged = max(quote_ts, recv)
+            out["timestamp"] = merged.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+            self.batcher.enqueue(out, quote_ts)
         self._schedule_flush()
 
     def _schedule_flush(self) -> None:
@@ -717,6 +788,8 @@ async def run_forever(
     quota_poll_s: float = 300.0,
     health_s: float = 5.0,
     unsub_tick_s: float = 1.0,
+    book_stale_s: float = 10.0,
+    units_per_symbol: int = 2,
 ) -> None:
     """Serve the internal relay WebSocket until cancelled."""
     try:
@@ -724,7 +797,13 @@ async def run_forever(
     except ImportError:  # pragma: no cover
         from websockets import serve  # type: ignore
 
-    svc = FutuQuotesService(opend, quota_cap=quota_cap, clock=clock)
+    svc = FutuQuotesService(
+        opend,
+        quota_cap=quota_cap,
+        clock=clock,
+        book_stale_s=book_stale_s,
+        units_per_symbol=units_per_symbol,
+    )
 
     supervisor = asyncio.create_task(_opend_supervisor(svc, opend))
     timers = [

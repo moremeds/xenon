@@ -2,6 +2,8 @@
 
 Env: ``FUTU_QUOTES_HOST``/``FUTU_QUOTES_PORT`` (listen, default
 0.0.0.0:8767), ``FUTU_QUOTE_QUOTA`` (admission ceiling, default 800),
+``FUTU_UNITS_PER_SYMBOL`` (quota units per held symbol, default 2),
+``FUTU_BOOK_STALE_S`` (ORDER_BOOK top staleness cutoff, default 10),
 ``FUTU_OPEND_HOST``/``FUTU_OPEND_PORT`` (OpenD, default 127.0.0.1:11111).
 """
 
@@ -51,12 +53,23 @@ def main(argv: list[str] | None = None) -> int:
     from xenon.futu_quotes.server import run_forever
 
     quota_cap = int(os.environ.get("FUTU_QUOTE_QUOTA", "800"))
+    units_per_symbol = int(os.environ.get("FUTU_UNITS_PER_SYMBOL", "2"))
+    book_stale_s = float(os.environ.get("FUTU_BOOK_STALE_S", "10"))
     opend = FutuOpenD(
         host=os.environ.get("FUTU_OPEND_HOST", "127.0.0.1"),
         port=int(os.environ.get("FUTU_OPEND_PORT", "11111")),
     )
     try:
-        asyncio.run(run_forever(args.host, args.port, opend, quota_cap=quota_cap))
+        asyncio.run(
+            run_forever(
+                args.host,
+                args.port,
+                opend,
+                quota_cap=quota_cap,
+                book_stale_s=book_stale_s,
+                units_per_symbol=units_per_symbol,
+            )
+        )
     except KeyboardInterrupt:  # pragma: no cover
         pass
     log.info("futu-quotes stopped")

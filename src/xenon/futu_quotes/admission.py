@@ -164,9 +164,12 @@ class Admission:
         backoff_cap_s: float = BACKOFF_CAP_S,
         unsub_retry_s: float = UNSUB_RETRY_S,
         unsub_retry_cap_s: float = UNSUB_RETRY_CAP_S,
+        units_per_symbol: int = 2,
     ) -> None:
         self.now = now
         self.quota_cap = quota_cap
+        # Provider quota units one held symbol costs (QUOTE + ORDER_BOOK = 2).
+        self.units_per_symbol = units_per_symbol
         self.min_lifetime_s = min_lifetime_s
         self.unsub_grace_s = unsub_grace_s
         self.backoff_base_s = backoff_base_s
@@ -288,12 +291,14 @@ class Admission:
         )
 
     def own_used(self) -> int:
-        """Local believed-held count (ready or awaiting reconfirm)."""
+        """Local believed-held count in symbols (ready or awaiting reconfirm)."""
         return sum(1 for st in self.symbols.values() if st.subscribed)
 
     def controlled_used(self) -> int:
-        """Held + reserved NEW admissions (the ≤ ceiling invariant).
+        """Held + reserved NEW admissions, in provider quota units.
 
+        One held symbol costs ``units_per_symbol`` provider units (QUOTE +
+        ORDER_BOOK), matching how OpenD counts ``own_used``/``remain``.
         A reconfirm is a subscribe of an already-held symbol: it is inside
         the held count and never charged twice, and its slot is never
         handed to a new admission while it is pending or failing.
@@ -301,7 +306,9 @@ class Admission:
         inflight = sum(
             1 for st in self.symbols.values() if st.op == "subscribe" and not st.subscribed
         )
-        return max(self.provider_own_used or 0, self.own_used()) + inflight
+        return max(
+            self.provider_own_used or 0, self.own_used() * self.units_per_symbol
+        ) + inflight * self.units_per_symbol
 
     def quota_report(self) -> dict:
         """health frame quota block."""
@@ -447,7 +454,9 @@ class Admission:
                     rejected.append({"symbol": sym, "reason": reason})
                 else:
                     pending.append({"symbol": sym, "reason": "backoff"})
-            elif not st.subscribed and self.controlled_used() >= self.ceiling():
+            elif not st.subscribed and (
+                self.controlled_used() + self.units_per_symbol > self.ceiling()
+            ):
                 st.rejected_reason = "quota"
                 st.retry_at = now + self._backoff(st)
                 st.backoff_step += 1

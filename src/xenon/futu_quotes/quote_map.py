@@ -87,6 +87,29 @@ def _int_or_none(value: Any) -> Optional[Any]:
     return int(f) if f.is_integer() else f
 
 
+def order_book_top(row: Mapping[str, Any]) -> dict:
+    """Top level of one ORDER_BOOK push row → bid/ask/bidSize/askSize.
+
+    ``Bid`` / ``Ask`` are per-level ``(price, volume, count, detail)``
+    tuples, best level first (``Qot_UpdateOrderBook`` /
+    ``OrderBookQuery.unpack_rsp``). An empty or malformed side maps to
+    ``None`` fields.
+    """
+
+    def _top(levels: Any) -> tuple[Optional[float], Optional[Any]]:
+        if not levels:
+            return None, None
+        try:
+            price, volume = levels[0][0], levels[0][1]
+        except (TypeError, IndexError, KeyError):
+            return None, None
+        return finite_or_none(price), _int_or_none(volume)
+
+    bid, bid_size = _top(row.get("Bid"))
+    ask, ask_size = _top(row.get("Ask"))
+    return {"bid": bid, "bidSize": bid_size, "ask": ask, "askSize": ask_size}
+
+
 # PriceData fields Futu's QUOTE push never carries.
 _NULL_FIELDS: Mapping[str, None] = {
     "bid": None,
