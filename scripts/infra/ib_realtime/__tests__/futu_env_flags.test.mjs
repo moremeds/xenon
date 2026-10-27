@@ -116,6 +116,55 @@ test("unrecognized XENON_QUOTES_DEFAULT falls back to ib", async (t) => {
   browser.close();
 });
 
+// ─── hermetic spawn ──────────────────────────────────────────────────────
+
+test("parent-exported routing flags do not leak into the spawned relay", async (t) => {
+  // Without a hermetic spawn env the relay inherits futu-first + futu options
+  // from the parent and routes tickets and option keys to Futu.
+  const saved = {
+    XENON_QUOTES_DEFAULT: process.env.XENON_QUOTES_DEFAULT,
+    XENON_FUTU_OPTIONS: process.env.XENON_FUTU_OPTIONS,
+    IB_GATEWAY_HOST: process.env.IB_GATEWAY_HOST,
+  };
+  process.env.XENON_QUOTES_DEFAULT = "futu-first";
+  process.env.XENON_FUTU_OPTIONS = "1";
+  process.env.IB_GATEWAY_HOST = "203.0.113.9"; // TEST-NET-3, never dialed
+  let stack;
+  try {
+    stack = await startStack();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+  t.after(stack.close);
+
+  const browser = await stack.connect({
+    ticket: "t-hermetic",
+    origin: "http://localhost:3200",
+  });
+  const opted = await stack.connect({ apiKey: API_KEY, quotes: "futu-first" });
+  browser.send(JSON.stringify({ action: "subscribe", symbols: ["LEAK"] }));
+  opted.send(
+    JSON.stringify({
+      action: "subscribe",
+      symbols: ["SPY"],
+      contracts: [OPTION],
+    }),
+  );
+
+  // Default ib: the ticket symbol and the option key stay out of want.
+  await stack.admitOnFutu(["SPY"]);
+  await sleep(300);
+  for (const w of stack.wants) {
+    assert.ok(!w.symbols.includes("LEAK"), "ticket symbol routed to futu");
+    assert.ok(!w.symbols.includes(OPTION_KEY), "option key routed to futu");
+  }
+  browser.close();
+  opted.close();
+});
+
 // ─── XENON_FUTU_OPTIONS ──────────────────────────────────────────────────
 
 test("XENON_FUTU_OPTIONS=0 keeps option keys pinned to IB", async (t) => {

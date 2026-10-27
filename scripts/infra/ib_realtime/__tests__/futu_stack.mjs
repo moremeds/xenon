@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import http from "node:http";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
@@ -32,16 +33,37 @@ const TIMING_ENV = {
   FUTU_RECONCILE_MS: "80",
 };
 
+// Hermetic relay env: only PATH plus what the test passes. The parent env is
+// never inherited, and IB_REALTIME_NO_DOTENV=1 stops the relay loading the
+// repo .env, so exported shell vars or a configured checkout cannot change
+// routing flags, the IB host, or tokens under test.
+export function relayEnv(extra = {}) {
+  return {
+    PATH: process.env.PATH ?? "",
+    IB_REALTIME_NO_DOTENV: "1",
+    IB_GATEWAY_HOST: "127.0.0.1",
+    ...extra,
+  };
+}
+
+// Unique per-call runtime dir (fs.mkdtemp) so two stacks or test files never
+// share a runtime file. `cleanup` removes the dir.
+export function makeRuntimeFile() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xenon-relay-test-"));
+  return {
+    file: path.join(dir, "runtime.json"),
+    cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function listen(server) {
   return new Promise((r) => server.listen(0, "127.0.0.1", r));
 }
 
-let stackN = 0;
-
 export async function startStack(extraEnv = {}) {
-  const runtimeFile = path.join(HERE, `e2e-runtime-stack-${++stackN}.json`);
+  const { file: runtimeFile, cleanup: cleanupRuntime } = makeRuntimeFile();
   let relayStdout = "";
 
   const waitFor = (fn, { timeout = 4000, every = 25 } = {}) =>
@@ -127,8 +149,7 @@ export async function startStack(extraEnv = {}) {
     process.execPath,
     [SERVER, "--port", String(relayPort), "--ib-port", "1"],
     {
-      env: {
-        ...process.env,
+      env: relayEnv({
         TICKET_VALIDATE_URL: `http://127.0.0.1:${validator.address().port}/ws-ticket/validate`,
         XENON_QUERY_API_KEY: API_KEY,
         IB_REALTIME_STATUS_TOKEN: "status-tok",
@@ -136,7 +157,7 @@ export async function startStack(extraEnv = {}) {
         IB_REALTIME_RUNTIME_FILE: runtimeFile,
         ...TIMING_ENV,
         ...extraEnv,
-      },
+      }),
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -208,11 +229,7 @@ export async function startStack(extraEnv = {}) {
     relay?.kill("SIGINT");
     validator?.close();
     futuWss?.close();
-    try {
-      fs.unlinkSync(runtimeFile);
-    } catch {
-      /* ignore */
-    }
+    cleanupRuntime();
   };
 
   return {
