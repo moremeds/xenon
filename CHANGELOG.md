@@ -5,6 +5,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.20.2] — 2026-10-27
+
 - **Runtime settings panel: change values in place, no Edit step.** Each row's control is its value and applies on change. A switch (booleans), a segmented control (choices such as the default quote source) or a toggle chip (sets, limited to the env values) applies with one click, from the mouse or with Space / Enter. A number field applies on Enter or blur when the value changed and is valid; Escape restores it, and an invalid value or a value above the env cap shows inline and is not sent. A formatting-only edit (`10000.0`, reordered JSON) sends nothing. "Revert to env" from a field with an unsent edit drops the edit and sends only the revert; tabbing past Revert without activating it keeps the edit and applies it as a normal blur. While a request runs, that row is disabled and shows "Applying"; the control never shows a value the server did not accept, and a refused change returns to the server value with the usual toast. A confirmed change in flight also disables its confirm step. Overridden rows have a small "Revert to env" link. The optional note field is gone (the API contract is unchanged; no note is sent). The typed-confirm safety is unchanged: the change goes out first without `confirm`, the 428 opens the confirm step only for the proposal still on screen, a later change on the same row replaces it, and only that step sends `confirm`.
 
 ## [0.20.1] — 2026-10-27
