@@ -66,18 +66,18 @@ function listen(server) {
 // reserve-then-release race on its ephemeral port (listen EADDRINUSE). Each
 // attempt cleans up after itself; the rejection carries `runtimeDir`, the dir
 // that attempt owned (already removed).
-export async function startStack(extraEnv = {}) {
+export async function startStack(extraEnv = {}, opts = {}) {
   const ATTEMPTS = 3;
   for (let attempt = 1; ; attempt += 1) {
     try {
-      return await bootStack(extraEnv);
+      return await bootStack(extraEnv, opts);
     } catch (err) {
       if (!err?.portInUse || attempt >= ATTEMPTS) throw err;
     }
   }
 }
 
-async function bootStack(extraEnv) {
+async function bootStack(extraEnv, { server = SERVER } = {}) {
   const { file: runtimeFile, cleanup: cleanupRuntime } = makeRuntimeFile();
   const runtimeDir = path.dirname(runtimeFile);
   let relayStdout = "";
@@ -186,7 +186,7 @@ async function bootStack(extraEnv) {
 
     relay = spawn(
       process.execPath,
-      [SERVER, "--port", String(relayPort), "--ib-port", "1"],
+      [server, "--port", String(relayPort), "--ib-port", "1"],
       {
         env: relayEnv({
           TICKET_VALIDATE_URL: `http://127.0.0.1:${validator.address().port}/ws-ticket/validate`,
@@ -213,19 +213,28 @@ async function bootStack(extraEnv) {
       }),
     );
     exited.catch(() => {}); // no unhandled rejection after startup succeeds
+    // Race child exit against the WHOLE startup sequence (bind confirmation,
+    // then the futu upstream socket), cancelling the losing polls. The generic
+    // "IB realtime server listening" banner prints before the bind outcome is
+    // known, so wait for the real bind message.
     const readyAbort = new AbortController();
+    const { signal } = readyAbort;
     try {
       await Promise.race([
-        waitFor(() => relayStdout.includes("listening"), {
-          timeout: 8000,
-          signal: readyAbort.signal,
-        }),
+        (async () => {
+          await waitFor(
+            () => relayStdout.includes("WebSocket server listening on"),
+            { timeout: 8000, signal },
+          );
+          await waitFor(() => futuSock?.readyState === WebSocket.OPEN, {
+            signal,
+          });
+        })(),
         exited,
       ]);
     } finally {
       readyAbort.abort(); // cancel the losing poll leg
     }
-    await waitFor(() => futuSock?.readyState === WebSocket.OPEN);
 
     const connect = ({ apiKey, ticket, quotes, origin } = {}) => {
       const params = [];

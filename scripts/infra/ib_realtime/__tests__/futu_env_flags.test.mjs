@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   API_KEY,
   HD,
@@ -179,6 +181,37 @@ test("startStack cleans up its own tmp dir when the relay fails to start", async
     false,
     "failed startStack leaked its runtime dir",
   );
+});
+
+test("startStack retries when the child prints the banner, then fails to bind", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xenon-fake-relay-"));
+  const counter = path.join(dir, "starts");
+  const fake = path.join(dir, "fake_relay.mjs");
+  // Mimics the real relay losing the port race: banner first, bind error after.
+  fs.writeFileSync(
+    fake,
+    `import fs from "node:fs";
+fs.appendFileSync(process.env.FAKE_COUNTER, "x");
+console.log("IB realtime server listening on ws://127.0.0.1:1");
+setTimeout(() => {
+  console.error("Error: listen EADDRINUSE: address already in use 127.0.0.1:1");
+  process.exit(1);
+}, 100);
+`,
+  );
+  try {
+    const err = await startStack(
+      { FAKE_COUNTER: counter },
+      { server: fake },
+    ).then(
+      () => assert.fail("startStack should reject"),
+      (e) => e,
+    );
+    assert.equal(err.portInUse, true, err.message);
+    assert.equal(fs.readFileSync(counter, "utf8"), "xxx", "3 bounded tries");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ─── XENON_FUTU_OPTIONS ──────────────────────────────────────────────────
