@@ -23,6 +23,10 @@ const GROUPS: { id: SettingCategory; label: string; note?: string }[] = [
   { id: "tuning", label: "Tuning" },
 ];
 
+const TYPED_CONFIRM_NOTE = "Some changes to this setting need a typed confirmation: type the key to apply them.";
+// env is the quiet default; an override is the accent.
+const SOURCE_CHIP: Record<string, string> = { env: "muted", override: "override", "live (relay)": "plain" };
+
 type Toast = (type: ToastType, message: string) => void;
 type PendingConfirm = { key: string; op: "put" | "delete"; value?: unknown; note: string; typed: string };
 type Draft = string | string[] | boolean;
@@ -400,10 +404,12 @@ function SettingRow({
           <span className="rs-row__label" data-testid="label">
             {s.label}
           </span>
-          <span className="rs-row__key" data-testid="key">
-            {s.key}
+          <span className="rs-row__sub">
+            <span className="rs-row__key" data-testid="key">
+              {s.key}
+            </span>
+            <span className="rs-row__desc">{s.description}</span>
           </span>
-          <span className="rs-row__desc">{s.description}</span>
           {change ? (
             <span className="rs-row__change" data-testid="last-change">
               {change}
@@ -413,19 +419,19 @@ function SettingRow({
         </div>
         <div className="rs-row__state">
           <ValueView s={s} v={v} />
-          <span className="rs-row__chips">
-            {v.source ? (
-              <span className={`rs-chip rs-chip--${v.source === "override" ? "override" : "plain"}`} data-testid="source">
-                {v.source}
-              </span>
-            ) : null}
-            {s.confirm_rule ? <span className="rs-chip rs-chip--plain" title="Some changes need a typed confirmation">confirm</span> : null}
-          </span>
-          {!open ? (
-            <button type="button" className="rs-btn" onClick={onEdit}>
-              Edit
-            </button>
+          {v.source ? (
+            <span className={`rs-chip rs-chip--${SOURCE_CHIP[v.source] ?? "plain"}`} data-testid="source">
+              {v.source}
+            </span>
           ) : null}
+          {s.confirm_rule ? (
+            <span className="rs-chip rs-chip--plain" title={TYPED_CONFIRM_NOTE}>
+              typed confirm
+            </span>
+          ) : null}
+          <button type="button" className="rs-btn rs-btn--ghost" onClick={onEdit} disabled={open}>
+            Edit
+          </button>
         </div>
       </div>
       {open ? (
@@ -464,7 +470,10 @@ function SettingRow({
           {pending ? (
             <div className="rs-confirm" data-testid="confirm-step">
               <span className="rs-confirm__proposal" data-testid="confirm-proposal">
-                {pending.op === "delete" ? `Revert ${s.key} to env` : `Set ${s.key} to ${fmt(s, pending.value)}`}
+                {pending.op === "delete" ? `Revert ${s.label} to env` : `Set ${s.label} to ${fmt(s, pending.value)}`}
+              </span>
+              <span className="rs-row__key" data-testid="confirm-key">
+                {s.key}
               </span>
               <label className="rs-confirm__label">
                 Type {s.key} to confirm

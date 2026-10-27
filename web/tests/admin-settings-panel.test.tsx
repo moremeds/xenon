@@ -60,12 +60,15 @@ describe("RuntimeSettingsPanel", () => {
     expect(within(cap).getByTestId("source").textContent).toBe("override");
     expect(cap.dataset.overridden).toBe("true");
     expect(within(cap).getByTestId("last-change").textContent).toContain("internal-ui");
-    expect(within(cap).getByTestId("last-change").textContent).toContain("fixture tighten");
+    expect(within(cap).getByTestId("last-change").textContent).toContain("tighten before first live order");
     const audit = row("XENON_AUDIT_CANCEL");
     expect(within(audit).getByTestId("effective").textContent).toBe("Off");
     expect(within(audit).getByTestId("source").textContent).toBe("env");
     expect(audit.dataset.overridden).toBe("false");
     expect(within(audit).queryByTestId("last-change")).toBeNull(); // only when present
+    const typed = within(audit).getByText("typed confirm");
+    expect(typed.getAttribute("title")).toMatch(/type the key/i);
+    expect(within(row("XENON_GATE4_NETTING")).queryByText("typed confirm")).toBeNull();
   });
 
   it("explains narrow-only once per group, never uses --- placeholders", async () => {
@@ -83,18 +86,30 @@ describe("RuntimeSettingsPanel", () => {
   });
 
   it("relay keys show the relay's live value; futu-quotes keys without override show service default", async () => {
-    mockFetch(() => undefined);
+    mockFetch((c) =>
+      c.method === "GET"
+        ? {
+            status: 200,
+            body: {
+              settings: settingsFixture().map((r) =>
+                r.key === "IB_REALTIME_MAX_LINES" ? { ...r, live_value: undefined } : r,
+              ),
+            },
+          }
+        : undefined,
+    );
     render(<RuntimeSettingsPanel onToast={vi.fn()} />);
     const quotes = await screen.findByTestId("setting-XENON_QUOTES_DEFAULT");
-    expect(within(quotes).getByTestId("effective").textContent).toBe("futu-first");
+    expect(within(quotes).getByTestId("effective").textContent).toBe("ib");
     expect(within(quotes).getByTestId("source").textContent).toBe("live (relay)");
     const lines = row("IB_REALTIME_MAX_LINES");
     expect(within(lines).getByTestId("effective").textContent).toBe("Not reported by relay");
     const book = row("FUTU_BOOK_STALE_S");
     expect(within(book).getByTestId("effective").textContent).toBe("Service default");
+    expect(within(row("IB_REALTIME_STALE_TICK_MS")).getByTestId("effective").textContent).toBe("60,000 ms");
     const quota = row("FUTU_QUOTE_QUOTA");
-    expect(within(quota).getByTestId("effective").textContent).toBe("600 units");
-    expect(within(quota).getByTestId("source").textContent).toBe("override");
+    expect(within(quota).getByTestId("effective").textContent).toBe("Service default");
+    expect(within(quota).queryByTestId("source")).toBeNull();
     expect(screen.getByTestId("runtime-settings").textContent).not.toContain("env: set in");
   });
 
@@ -104,7 +119,7 @@ describe("RuntimeSettingsPanel", () => {
     const tuples = await screen.findByTestId("setting-XENON_FUTU_TUPLES_LIVE");
     const stock = within(tuples).getByText("Stock · Limit · Day · RTH");
     expect(stock.getAttribute("title")).toBe("STK:LMT:DAY:RTH");
-    expect(within(tuples).getByText("Option · Market · GTC · Extended hours")).toBeTruthy();
+    expect(within(tuples).getByText("Option · Limit · GTC · RTH")).toBeTruthy();
   });
 
   it("read mode by default; Edit opens one row's editor; Cancel closes it", async () => {
@@ -165,7 +180,7 @@ describe("RuntimeSettingsPanel", () => {
     fireEvent.click(within(ed).getByRole("button", { name: "Save" }));
     const audit = row("XENON_AUDIT_CANCEL");
     const step = await within(audit).findByTestId("confirm-step");
-    expect(within(step).getByTestId("confirm-proposal").textContent).toBe("Set XENON_AUDIT_CANCEL to On");
+    expect(within(step).getByTestId("confirm-proposal").textContent).toBe("Set Naked-short audit: cancel violations to On");
     const go = within(step).getByRole("button", { name: "Confirm change" });
     expect((go as HTMLButtonElement).disabled).toBe(true);
     fireEvent.change(within(step).getByLabelText("Type XENON_AUDIT_CANCEL to confirm"), {
@@ -431,6 +446,8 @@ describe("RuntimeSettingsPanel (R3 regression)", () => {
     fireEvent.click(within(r).getByRole("switch", { name: "New value" }));
     fireEvent.click(within(r).getByRole("button", { name: "Save" }));
     const step = await within(r).findByTestId("confirm-step");
-    expect(within(step).getByTestId("confirm-proposal").textContent).toBe("Set XENON_AUDIT_CANCEL to On");
+    expect(within(step).getByTestId("confirm-proposal").textContent).toBe("Set Naked-short audit: cancel violations to On");
+    expect(within(step).getByTestId("confirm-key").textContent).toBe("XENON_AUDIT_CANCEL");
+    expect(within(step).getByLabelText("Type XENON_AUDIT_CANCEL to confirm")).toBeTruthy();
   });
 });
