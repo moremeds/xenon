@@ -43,6 +43,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
+from xenon import runtime_settings
 from xenon.db.service_health import record_service_health
 from xenon.execution import coverage
 
@@ -60,8 +61,13 @@ MAX_UNCONFIRMED_PER_TRIGGER = 3
 CONFIRMED, NOT_FOUND, GONE, FAILED, UNCERTAIN = "ok", "not_found", "gone", "failed", "uncertain"
 
 
-def enabled() -> bool:
+def env_enabled() -> bool:
     return os.environ.get(ENV_FLAG) == "1"
+
+
+def enabled() -> bool:
+    """Enforce mode: a `runtime_settings` DB override (on or off), else the env flag."""
+    return bool(runtime_settings.apply(ENV_FLAG, env_enabled()))
 
 
 def audit_from(data: Optional[dict]) -> Optional[dict]:

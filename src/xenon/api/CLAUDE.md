@@ -90,6 +90,19 @@ Surfaces that gate on the flag:
 
 Tests: `src/xenon/api/tests/test_read_only_mode.py` (routes), `scripts/tests/test_ib_sync_read_only.py` (writer no-ops), `scripts/tests/test_writer_entry_points_read_only.py` (writer CLIs).
 
+## Runtime settings (`/admin/settings`)
+
+Some env knobs have a DB override that applies without a restart. Registry, rules and cache: `src/xenon/runtime_settings.py` (one entry per key; the web renders from the API metadata, no TS copy). Tables: `xenon.runtime_settings` (one row per overridden key) and append-only `xenon.runtime_settings_audit` (migration `2026_10_27_runtime_settings`).
+
+- **Effective value** = a valid DB row, else the env/default value read today. No row = today's behavior (`scripts/tests/test_runtime_settings.py::test_no_rows_consumers_equal_env_only`). An invalid or unknown row is ignored with an ERROR log.
+- **Safety keys are narrow-only.** `XENON_FUTU_TRADING`, `XENON_FUTU_TUPLES_LIVE` / `_PAPER`, `XENON_FUTU_MODIFY_TYPES`: DB ⊆ env, effective = env ∩ DB. `XENON_FUTU_MKT_NOTIONAL_CAP`: DB ≤ env, effective = min (an invalid env cap still refuses every MKT). `XENON_GATE4_NETTING`: effective = env AND DB. A PUT that widens is 403 `SETTING_WIDENS_ENV`; the intersection still holds if the env is narrowed later. `XENON_AUDIT_CANCEL` may go on or off from the DB.
+- **Typed confirm** (`confirm` = the key name, else 428 `SETTING_CONFIRM_REQUIRED`): turning `XENON_AUDIT_CANCEL` on, any change of the `real` token in `XENON_FUTU_TRADING`, any change of `XENON_FUTU_TUPLES_LIVE`. DELETE checks the same rule against the env value it reverts to.
+- **`orders_paused`** (DB only, default false): `ensure_order_allowed` returns 403 top-level `reason_code: ORDERS_PAUSED` for the kinds in `guards._PAUSED_KINDS` (place, modify, replace, wizard submit / reprice / protect), right after the read-only check. IB and Futu, routes and in-process callers (wizard, protect) all pass through it. Cancel, wizard abort / plan / session create and the audit cancel are never paused.
+- **Consumers** read the effective value at their existing call sites: `broker_capabilities.futu_trading_envs`, `futu_orders.allowed_tuples` / `modify_types`, `quote_guard.mkt_notional_cap`, `gate4.netting_enabled` (also the audit in the `ib_sync` subprocess), `audit_enforce.enabled`. The `env_*` siblings keep the pure env parse.
+- **Relay / futu-quotes keys** (`XENON_QUOTES_DEFAULT`, `XENON_FUTU_OPTIONS`, `IB_REALTIME_MAX_LINES`, `IB_REALTIME_STALE_TICK_MS`, `FUTU_QUOTE_QUOTA`, `FUTU_UNITS_PER_SYMBOL`, `FUTU_BOOK_STALE_S`, `FUTU_GREEK_FACTORS`): the api stores and serves only the DB value (`env_known: false`); the owning process combines it with its own env.
+- **Cache**: one SELECT per 5 s per process; this process's writes invalidate it; a DB read error keeps the last values (process start = env). Tests reset it per test (root `conftest.py`).
+- **Routes** (`routes/settings.py`): `GET /admin/settings`, `PUT /admin/settings/{key}` `{value, note?, confirm?}`, `DELETE /admin/settings/{key}?note=&confirm=`. `X-Internal-Token` only: an `X-API-Key` header is 403 `API_KEY_FORBIDDEN`, dev-open or no credential is 401. PUT / DELETE are refused under `XENON_READ_ONLY=1` (403 `READ_ONLY_MODE`, before body parsing). Each write appends its audit row in the same transaction. Errors: 404 `SETTING_UNKNOWN`, 400 `SETTING_INVALID_VALUE`, 403 `SETTING_WIDENS_ENV`, 428 `SETTING_CONFIRM_REQUIRED`, all top-level.
+
 ## Order owner (PR-10)
 
 Runbook: `docs/runbooks/pr10-order-owner-cutover.md`. Incident rows 37–40.

@@ -53,6 +53,7 @@ from xenon.api.routes.wizard import router as wizard_router
 from xenon.api.subprocess import ScriptResult, run_entry_point
 from xenon.api.routes.market import router as market_router
 from xenon.api.routes.ratings import router as ratings_router
+from xenon.api.routes.settings import router as settings_router
 from xenon.api.routes.order_entry import router as order_entry_router
 from xenon.api.routes import futu as futu_routes
 from xenon.api.routes.futu import router as futu_router
@@ -790,6 +791,8 @@ def _is_write_path(path: str) -> bool:
     normalized = path.rstrip("/") or "/"
     if normalized in _READ_ONLY_WRITE_PATHS:
         return True
+    if normalized.startswith("/admin/settings/"):
+        return True
     if normalized.startswith("/wizard/sessions/"):
         return normalized.rsplit("/", 1)[-1] in _WIZARD_SESSION_ACTIONS
     return False
@@ -845,6 +848,7 @@ app.include_router(futu_router)
 app.include_router(blotter_router)
 app.include_router(market_router)
 app.include_router(ratings_router)
+app.include_router(settings_router)
 
 
 # ---------------------------------------------------------------------------

@@ -59,6 +59,7 @@ from typing import Any, Literal
 from sqlalchemy import Numeric, case, func, insert, literal_column, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from xenon import runtime_settings
 from xenon.db.engine import get_sync_engine
 from xenon.db.schema import account_snapshots, order_fills, order_submissions, regime_overrides, service_health
 from xenon.execution import coverage, orders_store
@@ -80,9 +81,14 @@ _UNSET = object()
 _NETTING_ENV = "XENON_GATE4_NETTING"
 
 
-def netting_enabled() -> bool:
+def env_netting_enabled() -> bool:
     """Spec §2.3: guaranteed-BAG netting is off unless explicitly enabled."""
     return os.environ.get(_NETTING_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def netting_enabled() -> bool:
+    """The env flag AND a `runtime_settings` DB override (the DB may only turn it off)."""
+    return bool(runtime_settings.apply(_NETTING_ENV, env_netting_enabled()))
 
 
 def scope_lock_key(scope: dict) -> str:

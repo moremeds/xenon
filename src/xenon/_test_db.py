@@ -74,6 +74,8 @@ XENON_TABLES: tuple[str, ...] = (
     "xenon.futu_orders",
     "xenon.futu_order_fees",
     "xenon.futu_closed_trades",
+    "xenon.runtime_settings",
+    "xenon.runtime_settings_audit",
 )
 
 # Module-level rather than @lru_cache because the legacy fixture allowed

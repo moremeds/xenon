@@ -56,6 +56,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from xenon.api.services.futu_observation import FUTU_STATUS_TO_STATE
+from xenon import runtime_settings
 from xenon.execution import orders_store
 from xenon.utils.symbol_norm import futu_to_ib, ib_to_futu
 
@@ -214,6 +215,27 @@ def _parse_tuple(token: str) -> tuple[str, str, str, str] | None:
 
 
 def allowed_tuples(account_env: str, environ: Mapping[str, str] | None = None) -> frozenset[tuple[str, str, str, str]]:
+    """`env_allowed_tuples` narrowed by a `runtime_settings` DB override
+    (`XENON_FUTU_TUPLES_LIVE` / `_PAPER`, subset only)."""
+    env_set = env_allowed_tuples(account_env, environ)
+    if account_env not in TUPLES_ENV:
+        return env_set
+    labels = runtime_settings.apply(TUPLES_ENV[account_env], sorted(_tuple_label(t) for t in env_set))
+    return frozenset(t for t in env_set if _tuple_label(t) in labels)
+
+
+def _tuple_label(t: tuple[str, str, str, str]) -> str:
+    return ":".join(t)
+
+
+def env_tuple_labels(account_env: str) -> list[str]:
+    """The env-only tuples as sorted `SEC:TYPE:TIF:SESSION` labels."""
+    return sorted(_tuple_label(t) for t in env_allowed_tuples(account_env))
+
+
+def env_allowed_tuples(
+    account_env: str, environ: Mapping[str, str] | None = None
+) -> frozenset[tuple[str, str, str, str]]:
     """The env's tuples `(sec, order_type, tif, session)`: the operator
     allowlist (`XENON_FUTU_TUPLES_LIVE` / `_PAPER`, exact `SEC:TYPE:TIF:SESSION`
     entries; unset or blank → `DEFAULT_TUPLES`) intersected with
@@ -239,6 +261,12 @@ def allowed_tuples(account_env: str, environ: Mapping[str, str] | None = None) -
 
 
 def modify_types(environ: Mapping[str, str] | None = None) -> frozenset[str]:
+    """`env_modify_types` narrowed by a `runtime_settings` DB override
+    (`XENON_FUTU_MODIFY_TYPES`, subset only)."""
+    return frozenset(runtime_settings.apply(MODIFY_TYPES_ENV, sorted(env_modify_types(environ))))
+
+
+def env_modify_types(environ: Mapping[str, str] | None = None) -> frozenset[str]:
     """Order types whose modify is on (`XENON_FUTU_MODIFY_TYPES`, labels;
     unset or blank → `LMT`). An unknown label turns modify off for every type
     (fail closed, one ERROR log). Cancel never depends on it."""
