@@ -72,7 +72,7 @@ async def futu_history_loop(
         DATABASE_URL. We don't accept a long-lived engine because dev-mode
         reloads may invalidate it.
     scopes_factory : zero-arg, returns the FUTU AccountScopes to sync, in
-        order (every configured scope). Allowed to connect to OpenD to
+        order (live only: Futu serves history to live accounts). Allowed to connect to OpenD to
         resolve a legacy scope (spec §10); runs off the event loop.
     runner : usually `xenon.cli.futu_history_sync.run_history_sync`. Tests
         pass a synchronous spy.
@@ -117,11 +117,14 @@ async def futu_history_loop(
 
 
 async def _run_scope(engine_factory: Callable[[], Any], scope: Any, runner: Callable[..., Any]) -> None:
-    """One scope's nightly sync; the heartbeat lands in that scope's partition."""
-    engine = None
+    """One scope's nightly sync; the heartbeat lands in that scope's partition.
+
+    The Futu SDK calls are blocking (connect, fetches, per-day throttle
+    sleeps — an inception backfill runs for minutes), so the whole sync runs
+    on a worker thread with its own event loop and engine, never on the API's.
+    """
     try:
-        engine = engine_factory()
-        result = await runner(engine, scope, since=None)
+        result = await asyncio.to_thread(asyncio.run, _sync_one(engine_factory, scope, runner))
         logger.info(
             "futu history sync ok (%s): trades=%s cashflows=%s nav_rows=%s",
             scope.account_env,
@@ -150,12 +153,18 @@ async def _run_scope(engine_factory: Callable[[], Any], scope: Any, runner: Call
             broker_account=scope.broker_account,
             finished_at=datetime.now(tz=ET),
         )
+
+
+async def _sync_one(engine_factory: Callable[[], Any], scope: Any, runner: Callable[..., Any]) -> dict:
+    """Runs inside the worker thread's loop: the engine must live and die there."""
+    engine = engine_factory()
+    try:
+        return await runner(engine, scope, since=None)
     finally:
-        if engine is not None:
-            try:
-                await engine.dispose()
-            except Exception:  # noqa: BLE001
-                pass
+        try:
+            await engine.dispose()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 __all__ = ("next_run_at_et", "futu_history_loop")

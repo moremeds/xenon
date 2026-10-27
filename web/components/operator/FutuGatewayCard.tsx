@@ -31,20 +31,6 @@ function heldEntries(held: FutuScope["held_rows"]) {
   });
 }
 
-/** Per-env scopes; older backends omit `scopes`, so fall back to the top-level block. */
-function scopesOf(futu: FutuInfo): FutuScope[] {
-  if (futu.scopes && futu.scopes.length > 0) return futu.scopes;
-  if (!futu.configured) return [];
-  return [
-    {
-      account_env: futu.scope_env ?? "paper",
-      last_sync_age_s: futu.last_sync_age_s,
-      observation: futu.observation,
-      held_rows: futu.held_rows,
-    },
-  ];
-}
-
 function quotesLine(q: FutuQuotesInfo | null | undefined): string {
   if (!q) return "---";
   const quota = q.quota ? `${q.quota.own_used}/${q.quota.ceiling}` : "---";
@@ -64,11 +50,17 @@ function ScopeRow({
     <div className="operator-scope" data-scope={scope.account_env}>
       <div className="operator-scope__main">
         <span className="operator-scope__env">{scope.account_env}</span>
-        <span
-          className={`operator-pill operator-pill--${trading ? "core" : "neutral"}`}
-        >
-          {trading == null ? "---" : trading ? "orders on" : "orders off"}
-        </span>
+        {scope.configured === false ? (
+          // A rotated-out account kept for its unresolved orders: the env's
+          // trading state belongs to the configured account, not this one.
+          <span className="operator-pill operator-pill--neutral">stored</span>
+        ) : (
+          <span
+            className={`operator-pill operator-pill--${trading ? "core" : "neutral"}`}
+          >
+            {trading == null ? "---" : trading ? "orders on" : "orders off"}
+          </span>
+        )}
         <span title="last sync">{fmtAgeShort(scope.last_sync_age_s)}</span>
         <span
           className={
@@ -136,7 +128,7 @@ export function FutuGatewayCard({
   futu: FutuInfo;
   quotes?: FutuQuotesInfo | null;
 }) {
-  const scopes = scopesOf(futu);
+  const scopes = futu.scopes ?? [];
   const anyHeld = scopes.some((s) => heldEntries(s.held_rows).length > 0);
   const verdict = !futu.configured
     ? { label: "off", tone: "neutral" }
@@ -167,9 +159,9 @@ export function FutuGatewayCard({
       </dl>
       {scopes.length > 0 ? (
         <div className="operator-scopes">
-          {scopes.map((s) => (
+          {scopes.map((s, i) => (
             <ScopeRow
-              key={s.account_env}
+              key={`${s.account_env}:${i}`}
               scope={s}
               trading={futu.trading?.[s.account_env]}
             />

@@ -9,8 +9,8 @@
   Window:      the job compares the PREVIOUS New York day (yesterday 00:00 ET to
                today 00:00 ET), so it runs in the morning, after IB has
                processed the prior day's Flex data.
-  Schedule:    every day 07:30 ET. Weekend mornings compare a weekend day
-               (zero rows compared), which is harmless.
+  Schedule:    every day 07:30 ET. Sunday and Monday mornings compare a
+               weekend day: the CLI prints {"skipped": true} and writes no row.
   TZ / guard / lock / Watchtower: same scheme as com.xenon.nav-flex-refresh.plist.
                System zone is Asia/Hong_Kong; 07:30 ET = 19:30 HKT (EDT) /
                20:30 HKT (EST); fires at both, the sh guard runs the job only

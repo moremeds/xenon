@@ -190,7 +190,7 @@ async def test_error_heartbeat_uses_futu_scope(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_loop_runs_every_scope_and_one_failure_does_not_skip_the_next(monkeypatch):
-    """Paper and live both sync each night; each records its own heartbeat."""
+    """The loop syncs every scope it is given; each records its own heartbeat."""
     from unittest.mock import AsyncMock, MagicMock
 
     import xenon.api.services.futu_history_scheduler as sched_mod

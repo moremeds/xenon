@@ -141,6 +141,11 @@ def main(argv: list[str] | None = None) -> int:
 
     scope = resolve_from_env()
     start_utc, end_utc = yesterday_session_window()
+    # ponytail: weekends only; a holiday still records a 0/0 row (add the
+    # market calendar if that matters).
+    if start_utc.astimezone(_NY).weekday() >= 5:
+        print(json.dumps({"skipped": True, "reason": "no_session"}, indent=2))
+        return 0
     days = max(1, int((datetime.now(timezone.utc) - start_utc).total_seconds() // 86400) + 1)
 
     engine = get_sync_engine()

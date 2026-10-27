@@ -184,10 +184,16 @@ describe("FutuGatewayCard", () => {
     expect(paper.getByText("held ---")).toBeTruthy();
   });
 
-  it("degrades to one row from the top-level block when scopes is absent", () => {
-    render(<FutuGatewayCard futu={{ ...rich, scopes: undefined }} />);
-    expect(scopeRow("paper")).toBeTruthy();
-    expect(scopeRow("live")).toBeNull();
+  it("marks a stored (rotated-out) scope instead of giving it the env's trading state", () => {
+    const stored = { ...rich.scopes![0], configured: false };
+    const { container } = render(
+      <FutuGatewayCard futu={{ ...rich, scopes: [rich.scopes![0], stored] }} />,
+    );
+    const rows = container.querySelectorAll('[data-scope="paper"]');
+    expect(rows).toHaveLength(2);
+    expect(within(rows[0] as HTMLElement).getByText("orders on")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("stored")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).queryByText("orders on")).toBeNull();
   });
 
   it("shows the quotes line from realtime futu_quotes", () => {

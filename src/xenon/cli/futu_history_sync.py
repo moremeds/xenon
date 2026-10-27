@@ -6,8 +6,8 @@ Usage
 
 Flow
 ----
-1. Resolve scopes: every configured Futu account (FUTU_TRADE_ACC_ID_SIMULATE
-   / _REAL), else the account OpenD matches. Steps 2-5 run per scope.
+1. Resolve the live scope: FUTU_TRADE_ACC_ID_REAL, else the account OpenD
+   matches. Paper is skipped (Futu has no history for paper accounts).
 2. Connect to Futu OpenD, fetch_account() for today's net_liquidation.
 3. backfill_history_sync() — pulls deals + cashflows, UPSERTs into
    xenon.futu_trades + xenon.futu_cash_flow.
@@ -47,14 +47,16 @@ _DEFAULT_INCEPTION = date(2024, 1, 1)
 
 
 def resolve_scopes() -> list[AccountScope]:
-    """Every configured Futu scope (paper first); else the legacy OpenD match.
+    """The live Futu scope(s) to sync; empty when only paper is set up.
 
-    Spec §10: without a configured account the scope is not resolvable from
-    env — connect once to discover the matched account, then disconnect.
+    Futu serves history deals and cash flow to live accounts only (paper
+    returns an error), so paper is never synced here. Spec §10: without a
+    configured account the scope is not resolvable from env — connect once
+    to discover the matched account, then disconnect.
     """
-    configured = list(futu_scope.configured_scopes().values())
+    configured = futu_scope.configured_scopes()
     if configured:
-        return configured
+        return [configured["live"]] if "live" in configured else []
     probe = futu_scope.new_client(None)
     probe.connect()
     try:
@@ -62,8 +64,9 @@ def resolve_scopes() -> list[AccountScope]:
         acc_id = str(probe._acc_id)
     finally:
         probe.disconnect()
-    account_env = {"REAL": "live", "SIMULATE": "paper"}.get(matched_env, "paper")
-    return [AccountScope(broker="FUTU", account_env=account_env, broker_account=acc_id)]
+    if matched_env != "REAL":
+        return []
+    return [AccountScope(broker="FUTU", account_env="live", broker_account=acc_id)]
 
 
 async def run_history_sync(
@@ -172,7 +175,10 @@ def main() -> int:
         finally:
             await engine.dispose()
 
-    for scope in resolve_scopes():
+    scopes = resolve_scopes()
+    if not scopes:
+        print("No live Futu account configured; Futu has no history for paper. Nothing to sync.", flush=True)
+    for scope in scopes:
         result = asyncio.run(_run(scope))
         print()
         print(f"xenon-futu-history-sync — scope={scope}")

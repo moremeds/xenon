@@ -18,6 +18,7 @@ import pytest
 
 from xenon.clients.futu_client import FutuClient
 from xenon.clients.futu_exceptions import FutuConnectionError
+from xenon.execution.account_scope import AccountScope
 
 
 def _closed_port() -> int:
@@ -87,3 +88,46 @@ async def test_hanging_scope_factory_does_not_block_event_loop(monkeypatch):
     # Inline, the 2 s blocking call would freeze the loop for >= 2 s.
     assert elapsed < 1.0
     runner.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_blocking_runner_does_not_block_event_loop(monkeypatch):
+    """The sync itself (SDK connect, fetches, throttle sleeps) runs off the API loop."""
+    import xenon.api.services.futu_history_scheduler as sched_mod
+
+    real_sleep = asyncio.sleep
+
+    async def _instant_sleep(seconds):
+        return await real_sleep(0)
+
+    monkeypatch.setattr(sched_mod.asyncio, "sleep", _instant_sleep)
+    done = asyncio.Event()
+    monkeypatch.setattr(sched_mod, "record_service_health", lambda *a, **k: done.set())
+
+    async def _blocking_runner(engine, scope, since):
+        time.sleep(1.0)  # stands in for FutuClient's synchronous calls
+        return {}
+
+    def _engine_factory():
+        eng = MagicMock()
+        eng.dispose = AsyncMock()
+        return eng
+
+    scope = AccountScope(broker="FUTU", account_env="live", broker_account="pytest")
+    task = asyncio.create_task(
+        sched_mod.futu_history_loop(
+            engine_factory=_engine_factory, scopes_factory=lambda: [scope], runner=_blocking_runner
+        )
+    )
+    ticks = 0
+    while not done.is_set():
+        before = time.monotonic()
+        await real_sleep(0.05)
+        assert time.monotonic() - before < 0.5, "API event loop stalled behind the Futu sync"
+        ticks += 1
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert ticks >= 5

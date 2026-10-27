@@ -206,9 +206,12 @@ async def test_since_none_resolves_incremental_watermark(aengine):
     assert start.date() == date(2024, 1, 1)
 
 
-def test_resolve_scopes_returns_every_configured_scope(monkeypatch):
+def test_resolve_scopes_syncs_live_only(monkeypatch):
+    """Futu serves history deals + cash flow to live accounts only."""
     from xenon.cli.futu_history_sync import resolve_scopes
 
     monkeypatch.setenv("FUTU_TRADE_ACC_ID_SIMULATE", "111")
     monkeypatch.setenv("FUTU_TRADE_ACC_ID_REAL", "222")
-    assert [(s.account_env, s.broker_account) for s in resolve_scopes()] == [("paper", "111"), ("live", "222")]
+    assert [(s.account_env, s.broker_account) for s in resolve_scopes()] == [("live", "222")]
+    monkeypatch.delenv("FUTU_TRADE_ACC_ID_REAL")
+    assert resolve_scopes() == []
