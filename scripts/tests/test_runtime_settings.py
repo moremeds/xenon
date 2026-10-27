@@ -700,7 +700,7 @@ def test_sync_spawn_passes_effective_netting_in_child_env(monkeypatch, db, child
     seen = {}
 
     async def fake(entry, args, timeout=30, env=None):
-        seen.update(entry=entry, env=env)
+        seen.update(entry=entry, env=env())
         return ScriptResult(ok=True, data={})
 
     monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake)
@@ -739,3 +739,63 @@ def test_ib_sync_child_reads_no_settings_from_the_db(monkeypatch):
     rs.invalidate()
     assert gate4.netting_enabled() is True  # env only
     assert calls == []
+
+
+def _sync_spawn_harness(monkeypatch):
+    from xenon.api import server as server_mod
+
+    monkeypatch.setenv("XENON_GATE4_NETTING", "1")
+    monkeypatch.setattr(server_mod, "_ib_last_failure", {"data": 0.0})
+    monkeypatch.setattr(server_mod, "is_cloud_mode", lambda: False)
+    monkeypatch.setattr(server_mod, "is_docker_mode", lambda: False)
+    monkeypatch.setattr(server_mod, "ib_pool", None)
+    return server_mod
+
+
+def test_netting_narrowed_during_preflight_reaches_the_spawn(monkeypatch):
+    from xenon.api.routes import portfolio
+    from xenon.api.subprocess import ScriptResult
+
+    server_mod = _sync_spawn_harness(monkeypatch)
+    spawns = []
+
+    async def preflight():
+        _put("XENON_GATE4_NETTING", False)  # committed while the sync waits
+        return {"port_listening": True, "upstream_dead": False}
+
+    async def spawn(entry, args, timeout=30, env=None):
+        spawns.append(env["XENON_GATE4_NETTING"])
+        return ScriptResult(ok=True, data={})
+
+    monkeypatch.setattr(server_mod, "_pool_has_any_connection", lambda: False)
+    monkeypatch.setattr(server_mod, "check_ib_gateway", preflight)
+    monkeypatch.setattr(server_mod, "run_entry_point", spawn)
+    assert gate4.netting_enabled() is True
+    assert asyncio.run(portfolio._run_sync_pass()).ok
+    assert spawns == ["0"]
+
+
+def test_netting_narrowed_during_recovery_reaches_the_retry(monkeypatch):
+    from xenon.api.routes import portfolio
+    from xenon.api.subprocess import ScriptResult
+
+    server_mod = _sync_spawn_harness(monkeypatch)
+    spawns = []
+
+    async def spawn(entry, args, timeout=30, env=None):
+        spawns.append(env["XENON_GATE4_NETTING"])
+        return ScriptResult(ok=len(spawns) > 1, error=None if len(spawns) > 1 else "Connection refused")
+
+    async def gateway_down():
+        return {"port_listening": False, "upstream_dead": True}
+
+    async def restart():
+        _put("XENON_GATE4_NETTING", False)  # committed during recovery
+        return {"restarted": True, "port_listening": True}
+
+    monkeypatch.setattr(server_mod, "_pool_has_any_connection", lambda: True)
+    monkeypatch.setattr(server_mod, "check_ib_gateway", gateway_down)
+    monkeypatch.setattr(server_mod, "restart_ib_gateway", restart)
+    monkeypatch.setattr(server_mod, "run_entry_point", spawn)
+    assert asyncio.run(portfolio._run_sync_pass()).ok
+    assert spawns == ["1", "0"]

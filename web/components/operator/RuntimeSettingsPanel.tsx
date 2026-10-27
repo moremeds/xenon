@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { RuntimeSetting, SettingCategory } from "@/lib/runtimeSettingsTypes";
 import { settingsErrorMessage } from "@/lib/settingsReasonCodes";
@@ -58,6 +58,13 @@ function initialDraft(s: RuntimeSetting): string | string[] {
   return v == null ? "" : String(v);
 }
 
+/** Number limits from the API metadata: registry bounds, and for a `min`
+ * (narrow-only) key the env value as the ceiling. The API checks again. */
+function numberLimits(s: RuntimeSetting): { min?: number; max?: number; envCap: boolean } {
+  const envCap = s.rule === "min" && s.env_known && typeof s.env_value === "number";
+  return { min: s.bounds?.[0], max: envCap ? (s.env_value as number) : s.bounds?.[1], envCap };
+}
+
 /** Draft → JSON value, or an error message. */
 function parseDraft(s: RuntimeSetting, draft: string | string[]): { value?: unknown; error?: string } {
   if (s.type === "set") return { value: draft as string[] };
@@ -65,8 +72,12 @@ function parseDraft(s: RuntimeSetting, draft: string | string[]): { value?: unkn
   if (s.type === "bool") return { value: text === "true" };
   if (s.type === "enum") return { value: text };
   if (s.type === "int" || s.type === "number") {
-    if (text === "" || !Number.isFinite(Number(text))) return { error: `${s.key}: enter a number` };
-    return { value: Number(text) };
+    const n = Number(text);
+    if (text === "" || !Number.isFinite(n)) return { error: `${s.key}: enter a number` };
+    const { min, max, envCap } = numberLimits(s);
+    if (max != null && n > max) return { error: `${s.key}: ${n} is above the ${envCap ? "env cap" : "maximum"} ${max}` };
+    if (min != null && n < min) return { error: `${s.key}: ${n} is below the minimum ${min}` };
+    return { value: n };
   }
   try {
     return { value: JSON.parse(text) };
@@ -94,10 +105,15 @@ export default function RuntimeSettingsPanel({ onToast }: { onToast: Toast }) {
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [pending, setPending] = useState<PendingConfirm | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // Bumped by every load and write: a load whose response arrives after a
+  // newer load or write started is obsolete and is dropped.
+  const seq = useRef(0);
 
   const load = useCallback(async () => {
+    const mine = ++seq.current;
     try {
       const r = await send("/api/admin/settings", { method: "GET" });
+      if (mine !== seq.current) return;
       if (!r.ok) {
         setLoadError(settingsErrorMessage(r.body, `HTTP ${r.status}`));
         return;
@@ -105,7 +121,7 @@ export default function RuntimeSettingsPanel({ onToast }: { onToast: Toast }) {
       setSettings(((r.body as { settings?: RuntimeSetting[] })?.settings ?? []) as RuntimeSetting[]);
       setLoadError(null);
     } catch (e) {
-      setLoadError(e instanceof Error ? e.message : "settings unreachable");
+      if (mine === seq.current) setLoadError(e instanceof Error ? e.message : "settings unreachable");
     }
   }, []);
 
@@ -118,6 +134,8 @@ export default function RuntimeSettingsPanel({ onToast }: { onToast: Toast }) {
   const write = useCallback(
     async (key: string, op: "put" | "delete", value: unknown, note: string, confirm?: string) => {
       setBusy(key);
+      seq.current += 1; // a load already in flight is now obsolete
+      if (!confirm) setPending(null); // a fresh request replaces any pending confirm
       try {
         const url = `/api/admin/settings/${key}`;
         let r;
@@ -130,7 +148,11 @@ export default function RuntimeSettingsPanel({ onToast }: { onToast: Toast }) {
           const qs = new URLSearchParams();
           if (note) qs.set("note", note);
           if (confirm) qs.set("confirm", confirm);
-          r = await send(qs.toString() ? `${url}?${qs}` : url, { method: "DELETE" });
+          // JSON content type: web/middleware.ts refuses any other non-GET /api request.
+          r = await send(qs.toString() ? `${url}?${qs}` : url, {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+          });
         }
         if (r.status === 428 && !confirm) {
           setPending({ key, op, value, note, typed: "" });
@@ -217,8 +239,15 @@ export default function RuntimeSettingsPanel({ onToast }: { onToast: Toast }) {
                   note={notes[s.key] ?? ""}
                   busy={busy === s.key}
                   pending={pending?.key === s.key ? pending : null}
-                  onDraft={(v) => setDrafts((d) => ({ ...d, [s.key]: v }))}
-                  onNote={(v) => setNotes((n) => ({ ...n, [s.key]: v }))}
+                  onDraft={(v) => {
+                    // the pending confirm was for the old proposal: drop it
+                    setPending((p) => (p?.key === s.key ? null : p));
+                    setDrafts((d) => ({ ...d, [s.key]: v }));
+                  }}
+                  onNote={(v) => {
+                    setPending((p) => (p?.key === s.key ? null : p));
+                    setNotes((n) => ({ ...n, [s.key]: v }));
+                  }}
                   onSave={() => {
                     const parsed = parseDraft(s, drafts[s.key] ?? initialDraft(s));
                     if (parsed.error) onToast("error", parsed.error);
@@ -404,13 +433,13 @@ function Editor({
       />
     );
   }
-  const max = s.rule === "min" && s.env_known && typeof s.env_value === "number" ? s.env_value : s.bounds?.[1];
+  const { min, max } = numberLimits(s);
   return (
     <input
       className="runtime-settings__input runtime-settings__mono"
       aria-label="New value"
       type="number"
-      min={s.bounds?.[0]}
+      min={min}
       max={max}
       step={s.type === "int" ? 1 : "any"}
       value={String(draft)}

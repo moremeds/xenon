@@ -16,7 +16,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -922,10 +922,14 @@ def _pool_has_any_connection() -> bool:
 
 
 async def _run_ib_script_with_recovery(
-    entry: str, args: list, timeout: float = 30, env: dict[str, str] | None = None
+    entry: str, args: list, timeout: float = 30, env: Callable[[], dict[str, str]] | None = None
 ) -> ScriptResult:
     """Run an IB-dependent xenon-* DATA entry point with pre-flight health
     check and cooldown. Order writes never come here (order owner).
+
+    `env` builds extra child env variables; it is called immediately before
+    each actual spawn (also the retry), after every gateway wait, so a value
+    narrowed meanwhile reaches the child.
 
     Three layers of fast-fail:
     1. Cooldown: if a recent IB script failed, skip for _IB_SCRIPT_COOLDOWN_SECS
@@ -970,7 +974,7 @@ async def _run_ib_script_with_recovery(
                 spawned=False,
             )
 
-    result = await run_entry_point(entry, args, timeout=timeout, env=env)
+    result = await run_entry_point(entry, args, timeout=timeout, env=env() if env else None)
 
     # Clear cooldown on success
     if result.ok:
@@ -1028,7 +1032,7 @@ async def _run_ib_script_with_recovery(
                     await ib_pool.disconnect_all(roles=("sync", "data"))
                     await ib_pool.connect_all(roles=("sync", "data"))
                 logger.info("IB Gateway restarted, retrying %s", entry)
-                result = await run_entry_point(entry, args, timeout=timeout, env=env)
+                result = await run_entry_point(entry, args, timeout=timeout, env=env() if env else None)
             else:
                 logger.error("IB Gateway restart failed: %s", gw_result)
                 result = ScriptResult(

@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import RuntimeSettingsPanel from "@/components/operator/RuntimeSettingsPanel";
 import { settingsErrorMessage } from "@/lib/settingsReasonCodes";
@@ -154,7 +154,8 @@ describe("RuntimeSettingsPanel", () => {
     const toast = vi.fn();
     render(<RuntimeSettingsPanel onToast={toast} />);
     const quota = await screen.findByTestId("setting-FUTU_QUOTE_QUOTA");
-    fireEvent.change(within(quota).getByLabelText("New value"), { target: { value: "0" } });
+    // in bounds but not an integer: only the API rejects it
+    fireEvent.change(within(quota).getByLabelText("New value"), { target: { value: "1.5" } });
     fireEvent.click(within(quota).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(toast).toHaveBeenCalled());
     expect(toast.mock.calls[0][1]).toContain("must be an integer in [1, 100000]");
@@ -175,5 +176,145 @@ describe("ORDERS_PAUSED order toast", () => {
   it("order paths render a pause message, not the unknown fallback", async () => {
     const { getReasonToast } = await import("@/lib/orderReasonCodes");
     expect(getReasonToast("ORDERS_PAUSED").copy).toMatch(/paused/i);
+  });
+});
+
+// ─── R2 review regressions ────────────────────────────────────────────────
+
+const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+const pausedRows = (paused: boolean) =>
+  settingsFixture().map((s) => (s.key === "orders_paused" ? { ...s, effective: paused, db_value: paused ? true : null } : s));
+
+describe("RuntimeSettingsPanel (R2 regressions)", () => {
+  it("Resume and a confirmed Revert pass the real /api middleware", async () => {
+    const { NextRequest } = await import("next/server");
+    const { default: middleware } = await import("../middleware");
+    const passed: { method: string; url: string }[] = [];
+    const blocked: unknown[] = [];
+    let deletes = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (!init || !init.method || init.method === "GET") return reply({ settings: pausedRows(true) });
+        const headers = new Headers(init.headers);
+        headers.set("host", "localhost:3200");
+        headers.set("origin", "http://localhost:3200");
+        const res = middleware(new NextRequest(`http://localhost:3200${url}`, { ...init, headers }));
+        if (!res.headers.get("x-middleware-next")) {
+          blocked.push(await res.clone().json());
+          return res;
+        }
+        passed.push({ method: init.method, url });
+        deletes += 1;
+        // the cap revert needs a confirm the first time (handler-level 428)
+        if (url.includes("MKT_NOTIONAL_CAP") && !url.includes("confirm=")) {
+          return reply({ reason_code: "SETTING_CONFIRM_REQUIRED" }, 428);
+        }
+        return reply({ changed: true });
+      }),
+    );
+    const toast = vi.fn();
+    render(<RuntimeSettingsPanel onToast={toast} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Resume orders" }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith("success", "orders_paused reverted to env"));
+
+    const cap = row("XENON_FUTU_MKT_NOTIONAL_CAP");
+    fireEvent.click(within(cap).getByRole("button", { name: "Revert to env" }));
+    const step = await within(cap).findByTestId("confirm-step");
+    fireEvent.change(within(step).getByLabelText("Type XENON_FUTU_MKT_NOTIONAL_CAP to confirm"), {
+      target: { value: "XENON_FUTU_MKT_NOTIONAL_CAP" },
+    });
+    fireEvent.click(within(step).getByRole("button", { name: "Confirm change" }));
+    await waitFor(() => expect(deletes).toBe(3));
+    expect(blocked).toEqual([]);
+    expect(passed.map((p) => p.method)).toEqual(["DELETE", "DELETE", "DELETE"]);
+    expect(passed[2].url).toContain("confirm=XENON_FUTU_MKT_NOTIONAL_CAP");
+  });
+
+  it("editing the value after a 428 drops the pending confirm; a fresh unconfirmed request follows", async () => {
+    const sent: { value: boolean; confirm?: string }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        if (!init || !init.method || init.method === "GET") return reply({ settings: pausedRows(false) });
+        const body = JSON.parse(String(init.body));
+        sent.push(body);
+        return body.confirm ? reply({ changed: true }) : reply({ reason_code: "SETTING_CONFIRM_REQUIRED" }, 428);
+      }),
+    );
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    const r = await screen.findByTestId("setting-XENON_AUDIT_CANCEL");
+    const editor = within(r).getByLabelText("New value") as HTMLSelectElement;
+    fireEvent.change(editor, { target: { value: "true" } });
+    fireEvent.click(within(r).getByRole("button", { name: "Save" }));
+    await within(r).findByTestId("confirm-step");
+    fireEvent.change(editor, { target: { value: "false" } });
+    expect(within(r).queryByTestId("confirm-step")).toBeNull();
+    // a note change also drops it
+    fireEvent.change(editor, { target: { value: "true" } });
+    fireEvent.click(within(r).getByRole("button", { name: "Save" }));
+    await within(r).findByTestId("confirm-step");
+    fireEvent.change(within(r).getByLabelText("Note"), { target: { value: "why" } });
+    expect(within(r).queryByTestId("confirm-step")).toBeNull();
+    expect(sent).toEqual([{ value: true }, { value: true }]);
+  });
+
+  it("a delayed pre-write poll cannot overwrite the post-write state", async () => {
+    let poll!: () => Promise<void>;
+    const realInterval = globalThis.setInterval;
+    vi.spyOn(globalThis, "setInterval").mockImplementation(((fn: () => Promise<void>, delay: number) => {
+      if (delay === 15000) {
+        poll = fn;
+        return 999;
+      }
+      return realInterval(fn, delay);
+    }) as typeof setInterval);
+    let gets = 0;
+    let resolveOld!: (value: Response) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        if (init?.method === "PUT") return reply({ changed: true });
+        gets += 1;
+        if (gets === 2) return new Promise<Response>((resolve) => (resolveOld = resolve));
+        return reply({ settings: pausedRows(gets >= 3) });
+      }),
+    );
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    await screen.findByRole("button", { name: "Pause orders" });
+    let pendingPoll!: Promise<void>;
+    act(() => {
+      pendingPoll = poll();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Pause orders" }));
+    await screen.findByRole("button", { name: "Resume orders" });
+    await act(async () => {
+      resolveOld(reply({ settings: pausedRows(false) }));
+      await pendingPoll;
+    });
+    expect(screen.getByTestId("orders-paused-banner").textContent).toContain("Orders paused");
+    expect(screen.getByRole("button", { name: "Resume orders" })).toBeTruthy();
+  });
+
+  it("a value above the env cap is refused before sending", async () => {
+    const sent: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        if (!init || !init.method || init.method === "GET") return reply({ settings: pausedRows(false) });
+        sent.push(JSON.parse(String(init.body)));
+        return reply({ changed: true });
+      }),
+    );
+    const toast = vi.fn();
+    render(<RuntimeSettingsPanel onToast={toast} />);
+    const r = await screen.findByTestId("setting-XENON_FUTU_MKT_NOTIONAL_CAP");
+    fireEvent.change(within(r).getByLabelText("New value"), { target: { value: "25001" } });
+    fireEvent.click(within(r).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith("error", expect.stringContaining("25000")));
+    expect(sent).toEqual([]);
+    fireEvent.change(within(r).getByLabelText("New value"), { target: { value: "25000" } });
+    fireEvent.click(within(r).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(sent).toEqual([{ value: 25000 }]));
   });
 });

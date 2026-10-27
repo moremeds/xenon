@@ -194,14 +194,14 @@ async def _run_sync_pass() -> ScriptResult:
 
     try:
         # D5: the child never reads runtime_settings; it gets the effective
-        # (env AND DB) netting flag for its naked-short audit in its env.
+        # (env AND DB) netting flag for its naked-short audit in its env,
+        # resolved at each actual spawn (after gateway waits, also a retry).
         # Cached read (TTL 5 s), same as the order guard's orders_paused().
-        netting = gate4.netting_enabled()
         result = await server._run_ib_script_with_recovery(
             "xenon-ib-sync",
             ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)],
             timeout=30,
-            env={"XENON_GATE4_NETTING": "1" if netting else "0"},
+            env=lambda: {"XENON_GATE4_NETTING": "1" if gate4.netting_enabled() else "0"},
         )
     except Exception as exc:  # noqa: BLE001 — a detached task must log, not raise into the void
         logger.exception("Portfolio sync failed")

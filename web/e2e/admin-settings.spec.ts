@@ -42,6 +42,10 @@ test.beforeEach(async ({ page }) => {
       );
       return r.fulfill(json({ settings: rows }));
     }
+    // Same rule as web/middleware.ts (this route mock replaces it in the browser).
+    if (!(req.headers()["content-type"] ?? "").startsWith("application/json")) {
+      return r.fulfill(json({ error: "Forbidden", reason: "content_type" }, 403));
+    }
     const key = new URL(req.url()).pathname.split("/").pop();
     if (method === "PUT") {
       const body = req.postDataJSON() as { value: unknown; confirm?: string };
@@ -112,4 +116,15 @@ test("admin runtime settings: groups, owner env, pause toggle, typed confirm", a
   const puts = (page as unknown as { puts: { key: string; confirm?: string }[] }).puts;
   const auditPuts = puts.filter((p) => p.key === "XENON_AUDIT_CANCEL");
   expect(auditPuts.map((p) => p.confirm ?? null)).toEqual([null, "XENON_AUDIT_CANCEL"]);
+
+  // Resume = DELETE, sent as JSON (the mock refuses it otherwise, like the middleware).
+  await banner.getByRole("button", { name: "Resume orders" }).click();
+  await expect(banner).toContainText("Orders active");
+
+  // A cap above the env value is refused in the browser; nothing is sent.
+  const before = puts.length;
+  await cap.getByLabel("New value").fill("25001");
+  await cap.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByText("XENON_FUTU_MKT_NOTIONAL_CAP: 25001 is above the env cap 25000")).toBeVisible();
+  expect(puts.length).toBe(before);
 });
