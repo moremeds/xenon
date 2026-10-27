@@ -13,11 +13,14 @@ from sqlalchemy import select, text
 
 from xenon import runtime_settings as rs
 from xenon.api import guards
+from xenon.api.routes import system as system_routes
 from xenon.api.services import audit_enforce, order_entry
 from xenon.db.engine import get_sync_engine
 from xenon.db.schema import runtime_settings as settings_table
 from xenon.db.schema import runtime_settings_audit as audit_table
 from xenon.execution import broker_capabilities, futu_orders, gate4, quote_guard
+
+_REAL_FETCH = system_routes._fetch_realtime_status_json
 
 pytestmark = pytest.mark.usefixtures("pg_test_engine")
 
@@ -40,6 +43,17 @@ def _clean_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("XENON_READ_ONLY", raising=False)
     monkeypatch.setenv("XENON_INTERNAL_API_TOKEN", TOKEN)
+
+
+@pytest.fixture(autouse=True)
+def _no_relay(monkeypatch):
+    """GET /admin/settings reads relay /status: no real network in tests."""
+    from xenon.api.routes import system
+
+    def down(url, timeout=0.5):
+        raise OSError("relay down (test)")
+
+    monkeypatch.setattr(system, "_fetch_realtime_status_json", down)
 
 
 @pytest.fixture
@@ -799,3 +813,68 @@ def test_netting_narrowed_during_recovery_reaches_the_retry(monkeypatch):
     monkeypatch.setattr(server_mod, "run_entry_point", spawn)
     assert asyncio.run(portfolio._run_sync_pass()).ok
     assert spawns == ["1", "0"]
+
+
+# ---------- labels and relay live values (UX task 4) ----------
+
+
+def test_every_key_has_a_label_and_a_plain_description():
+    for s in rs.REGISTRY.values():
+        assert s.label and s.label != s.key, s.key
+        assert "Narrow-only" not in s.description and "DB value" not in s.description, s.key
+    rows = {r["key"]: r for r in rs.describe()}
+    cap = rows["XENON_FUTU_MKT_NOTIONAL_CAP"]
+    assert (cap["label"], cap["unit"]) == ("Futu market-order cap", "USD")
+    assert rows["IB_REALTIME_STALE_TICK_MS"]["unit"] == "ms"
+    assert rows["XENON_AUDIT_CANCEL"]["unit"] is None
+
+
+def test_get_settings_adds_relay_live_values(client, monkeypatch):
+    from xenon.api.routes import system
+
+    seen = {}
+
+    def up(url, timeout=0.5):
+        seen["timeout"] = timeout
+        return {
+            "runtime_settings": {
+                "effective": {"IB_REALTIME_MAX_LINES": 60, "XENON_QUOTES_DEFAULT": "futu-first", "FUTU_QUOTE_QUOTA": 1}
+            }
+        }
+
+    monkeypatch.setattr(system, "_fetch_realtime_status_json", up)
+    rows = {r["key"]: r for r in client.get("/admin/settings", headers=HDR).json()["settings"]}
+    assert rows["IB_REALTIME_MAX_LINES"]["live_value"] == 60
+    assert rows["XENON_QUOTES_DEFAULT"]["live_value"] == "futu-first"
+    assert "live_value" not in rows["FUTU_QUOTE_QUOTA"]  # futu-quotes key: relay value not used
+    assert "live_value" not in rows["XENON_FUTU_MKT_NOTIONAL_CAP"]
+    assert seen["timeout"] <= 1
+
+
+def test_get_settings_relay_down_leaves_live_value_absent(client):
+    resp = client.get("/admin/settings", headers=HDR)  # autouse: relay down
+    assert resp.status_code == 200
+    assert all("live_value" not in r for r in resp.json()["settings"])
+
+
+def test_get_settings_relay_without_status_token(client, monkeypatch):
+    import io
+    import urllib.error
+    import urllib.request
+
+    from xenon.api.routes import system
+
+    monkeypatch.setattr(system, "_fetch_realtime_status_json", _REAL_FETCH)  # the real helper
+    monkeypatch.delenv("IB_REALTIME_STATUS_TOKEN", raising=False)
+    monkeypatch.setenv("IB_REALTIME_STATUS_URL", "http://relay.test/status")
+    sent = {}
+
+    def urlopen(req, timeout=None):
+        sent["headers"] = dict(req.header_items())
+        raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, io.BytesIO(b"{}"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    resp = client.get("/admin/settings", headers=HDR)
+    assert resp.status_code == 200
+    assert "X-status-token" not in sent["headers"]
+    assert all("live_value" not in r for r in resp.json()["settings"])

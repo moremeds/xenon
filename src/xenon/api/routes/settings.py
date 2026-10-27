@@ -68,7 +68,25 @@ async def get_settings(request: Request):
     _, denial = _internal_actor(request)
     if denial is not None:
         return denial
-    return {"settings": await asyncio.to_thread(runtime_settings.describe)}
+    rows, live = await asyncio.gather(asyncio.to_thread(runtime_settings.describe), asyncio.to_thread(_relay_live))
+    for row in rows:
+        if row["owner"] == "relay" and row["key"] in live:
+            row["live_value"] = live[row["key"]]
+    return {"settings": rows}
+
+
+def _relay_live() -> dict:
+    """The relay's effective values (its /status `runtime_settings.effective`):
+    the api cannot see the relay's env. Short timeout; any failure = {} and
+    the UI shows no live value. The status token stays server-side."""
+    from xenon.api.routes import system
+
+    try:
+        status = system._fetch_realtime_status_json(system._resolve_realtime_status_url(), timeout=0.5)
+        effective = (status.get("runtime_settings") or {}).get("effective") or {}
+        return effective if isinstance(effective, dict) else {}
+    except Exception:  # noqa: BLE001 — relay down / 401 / bad body: no live values
+        return {}
 
 
 @router.put("/admin/settings/{key}", dependencies=[Depends(require_writable)])

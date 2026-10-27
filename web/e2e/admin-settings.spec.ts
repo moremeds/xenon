@@ -24,7 +24,7 @@ const OPERATOR = {
 
 const json = (body: unknown, status = 200) => ({ status, contentType: "application/json", body: JSON.stringify(body) });
 
-// Tall viewport so the panel screenshot is not clipped by the console scroll area.
+// 1440 wide; tall so the panel screenshot is not clipped by the console scroll area.
 test.use({ viewport: { width: 1440, height: 2400 } });
 
 test.beforeEach(async ({ page }) => {
@@ -85,16 +85,21 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/api/prices**", (r) => r.abort());
 });
 
-test("admin runtime settings: groups, owner env, pause toggle, typed confirm", async ({ page }) => {
+test("admin runtime settings: labels, sources, read/edit, pause, typed confirm", async ({ page }) => {
   await page.goto("/admin");
   const panel = page.getByTestId("runtime-settings");
   await expect(panel.getByTestId("settings-group-safety")).toBeVisible();
-  await expect(panel.getByTestId("settings-group-toggle")).toBeVisible();
+  await expect(panel.getByTestId("settings-group-toggle")).toContainText("Quote routing");
   await expect(panel.getByTestId("settings-group-tuning")).toBeVisible();
-  await expect(page.getByTestId("setting-XENON_QUOTES_DEFAULT").getByTestId("env")).toHaveText("env: set in relay");
+  const quotes = page.getByTestId("setting-XENON_QUOTES_DEFAULT");
+  await expect(quotes.getByTestId("effective")).toHaveText("futu-first");
+  await expect(quotes.getByTestId("source")).toHaveText("live (relay)");
   const cap = page.getByTestId("setting-XENON_FUTU_MKT_NOTIONAL_CAP");
-  await expect(cap.getByTestId("effective")).toHaveText("10000");
-  await expect(cap.getByTestId("env")).toHaveText("25000");
+  await expect(cap.getByTestId("label")).toHaveText("Futu market-order cap");
+  await expect(cap.getByTestId("effective")).toHaveText("10,000 USD");
+  await expect(cap.getByTestId("source")).toHaveText("override");
+  await expect(panel).not.toContainText("---");
+  await panel.screenshot({ path: "../output/playwright/admin-settings-ux-2026-10-27-read.png" });
 
   const banner = page.getByTestId("orders-paused-banner");
   await expect(banner).toContainText("Orders active");
@@ -102,16 +107,18 @@ test("admin runtime settings: groups, owner env, pause toggle, typed confirm", a
   await expect(banner).toContainText("Orders paused");
 
   const audit = page.getByTestId("setting-XENON_AUDIT_CANCEL");
-  await audit.getByLabel("New value").selectOption("true");
+  await audit.getByRole("button", { name: "Edit" }).click();
+  await audit.getByRole("switch", { name: "New value" }).click();
   await audit.getByRole("button", { name: "Save" }).click();
   const step = audit.getByTestId("confirm-step");
   await expect(step).toBeVisible();
+  await expect(step.getByTestId("confirm-proposal")).toHaveText("Set XENON_AUDIT_CANCEL to On");
   await expect(step.getByRole("button", { name: "Confirm change" })).toBeDisabled();
   await step.getByLabel("Type XENON_AUDIT_CANCEL to confirm").fill("XENON_AUDIT_CANCEL");
   await expect(step.getByRole("button", { name: "Confirm change" })).toBeEnabled();
-  await panel.screenshot({ path: "../output/playwright/admin-settings-2026-10-27.png" });
+  await panel.screenshot({ path: "../output/playwright/admin-settings-ux-2026-10-27-edit.png" });
   await step.getByRole("button", { name: "Confirm change" }).click();
-  await expect(step).toBeHidden();
+  await expect(audit.getByTestId("editor")).toBeHidden();
 
   const puts = (page as unknown as { puts: { key: string; confirm?: string }[] }).puts;
   const auditPuts = puts.filter((p) => p.key === "XENON_AUDIT_CANCEL");
@@ -123,8 +130,22 @@ test("admin runtime settings: groups, owner env, pause toggle, typed confirm", a
 
   // A cap above the env value is refused in the browser; nothing is sent.
   const before = puts.length;
+  await cap.getByRole("button", { name: "Edit" }).click();
+  await expect(cap.getByTestId("editor")).toContainText("Env cap 25,000 USD");
   await cap.getByLabel("New value").fill("25001");
   await cap.getByRole("button", { name: "Save" }).click();
-  await expect(page.getByText("XENON_FUTU_MKT_NOTIONAL_CAP: 25001 is above the env cap 25000")).toBeVisible();
+  await expect(page.getByText("Futu market-order cap: 25001 is above the env cap 25,000 USD")).toBeVisible();
   expect(puts.length).toBe(before);
+});
+
+test.describe("narrow screen", () => {
+  test.use({ viewport: { width: 390, height: 2400 } });
+  test("admin runtime settings render at 390 wide", async ({ page }) => {
+    await page.goto("/admin");
+    const panel = page.getByTestId("runtime-settings");
+    await expect(page.getByTestId("setting-XENON_FUTU_TUPLES_LIVE")).toContainText("Stock · Limit · Day · RTH");
+    const overflow = await panel.evaluate((el) => el.scrollWidth - el.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(1);
+    await panel.screenshot({ path: "../output/playwright/admin-settings-ux-2026-10-27-mobile.png" });
+  });
 });
