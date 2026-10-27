@@ -319,3 +319,193 @@ def test_quote_timeout_env_parsing(monkeypatch):
     assert ib_pool_mod.ib_quote_timeout_s() == 10.0
     monkeypatch.setenv("XENON_IB_QUOTE_TIMEOUT_S", "3")
     assert ib_pool_mod.ib_quote_timeout_s() == 3.0
+
+
+# --- Astra PR #254 review fixes ------------------------------------------------
+
+
+def test_abandoned_real_reconnect_fences_role_no_duplicate_connect(monkeypatch):
+    """Finding 1: the executor-backed reconnect (`reconnect_role` →
+    `_connect_owned` → `_connect_in_thread`) abandoned by a deadline fences
+    the role; a second caller never queues another connect on the clientId."""
+    gate = threading.Event()
+    made: list = []
+
+    def fake_connect(host, port, client_id, timeout=5):
+        made.append(client_id)
+        if len(made) == 1:
+            gate.wait(10)
+        return _StateClient(READINESS_READY)
+
+    monkeypatch.setattr(ib_pool_mod, "_connect_in_thread", fake_connect)
+    pool = IBPool()  # data not connected → acquire reconnects on the worker
+
+    async def go():
+        with pytest.raises(IBDataTimeout):
+            await call_data_bounded(pool, lambda c: "x", timeout=0.2)
+        assert pool.is_fenced("data")
+        assert not pool._locks["data"].locked()
+        with pytest.raises(ib_pool_mod.IBRoleFenced):
+            await call_data_bounded(pool, lambda c: "x", timeout=0.2)
+        gate.set()
+        for _ in range(300):
+            if not pool.is_fenced("data"):
+                break
+            await asyncio.sleep(0.01)
+        assert not pool.is_fenced("data")
+        return await call_data_bounded(pool, lambda c: c, timeout=1)
+
+    client = asyncio.run(go())
+    assert len(made) == 1  # one connect only; the third call reuses it
+    assert pool._clients["data"] is client
+
+
+def _spec():
+    return {"con_id": 123, "sym": "SPY", "right": "C", "exp": "20261120", "strike": 500.0}
+
+
+class _MetaClient(_StateClient):
+    def __init__(self, readiness):
+        super().__init__(readiness)
+        self.detail_calls = 0
+        self.seen_timeout = None
+
+    def get_contract_details(self, contract):
+        self.detail_calls += 1
+        self.seen_timeout = self.ib.RequestTimeout
+        return []
+
+
+def _run_resolver(pool):
+    from xenon.api.services import futu_observation as fo
+
+    fo._IB_META_CACHE.clear()
+    loop = asyncio.new_event_loop()
+    t = threading.Thread(target=loop.run_forever, daemon=True)
+    t.start()
+    try:
+        return fo.make_ib_meta_resolver(loop, lambda: pool)([_spec()])
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        t.join(2)
+
+
+def test_futu_meta_resolver_refuses_on_lost_upstream_without_ib_call():
+    """Finding 2: upstream lost → unresolved at once, no IB call, no fence."""
+    client = _MetaClient(READINESS_LOST)
+    pool = _pool_with(client)
+    assert _run_resolver(pool) == [None]
+    assert client.detail_calls == 0 and not pool.is_fenced("data")
+
+
+def test_futu_meta_resolver_bounds_the_worker_request_timeout():
+    """Finding 2: the worker's IB requests carry a RequestTimeout below the
+    caller's META_TIMEOUT_S (was 0 = wait forever)."""
+    from xenon.api.services import futu_observation as fo
+
+    client = _MetaClient(READINESS_READY)
+    pool = _pool_with(client)
+    assert _run_resolver(pool) == [None]
+    assert client.detail_calls == 1
+    assert 0 < client.seen_timeout < fo.META_TIMEOUT_S
+    assert client.ib.RequestTimeout == 0
+
+
+def _hist_request(pool):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ib_pool=pool)))
+
+
+@pytest.mark.parametrize("route", ["head", "bars"])
+def test_historical_lock_wait_is_under_the_deadline(route, monkeypatch):
+    """Finding 3: lock wait counts against the qualify deadline."""
+    from xenon.api.routes import historical as hist
+
+    monkeypatch.setenv("XENON_IB_QUOTE_TIMEOUT_S", "0.2")
+    pool = _pool_with(_StateClient(READINESS_READY))
+    spec = hist.ContractSpec(sec_type="STK", symbol="SPY")
+    req = (
+        hist.HeadTimestampRequest(contract=spec)
+        if route == "head"
+        else hist.HistoricalBarsRequest(contract=spec, duration="1 D")
+    )
+    fn = hist.head_timestamp if route == "head" else hist.historical_bars
+
+    async def go():
+        await pool._locks["data"].acquire()  # a stuck holder
+        try:
+            with pytest.raises(HTTPException) as err:
+                await asyncio.wait_for(fn(req, _hist_request(pool)), 2)
+            return err.value.status_code
+        finally:
+            pool._locks["data"].release()
+
+    assert asyncio.run(go()) == 503
+
+
+def test_historical_blocked_qualify_times_out_and_fences(monkeypatch):
+    """Finding 3: a qualify that ignores its worker bound is abandoned at the
+    deadline and fences the role."""
+    from xenon.api.routes import historical as hist
+
+    monkeypatch.setenv("XENON_IB_QUOTE_TIMEOUT_S", "0.2")
+    client = _StateClient(READINESS_READY)
+    gate = threading.Event()
+    client.qualify_contracts = lambda *cs: gate.wait(10)
+    pool = _pool_with(client)
+    req = hist.HeadTimestampRequest(contract=hist.ContractSpec(sec_type="STK", symbol="SPY"))
+
+    async def go():
+        with pytest.raises(HTTPException) as err:
+            await asyncio.wait_for(hist.head_timestamp(req, _hist_request(pool)), 2)
+        return err.value.status_code
+
+    try:
+        assert asyncio.run(go()) == 503
+        assert pool.is_fenced("data") and not pool._locks["data"].locked()
+    finally:
+        gate.set()
+
+
+def test_upstream_last_code_follows_event_time_not_state_entry(monkeypatch):
+    """Finding 4: data 1100 @100, sync 1100 @200, data 2110 @300 (still lost)
+    → last_code 2110; since = first state entry (100)."""
+    import xenon.clients.ib_client as ibc
+
+    now = {"t": 50.0}
+    monkeypatch.setattr(ibc.time, "time", lambda: now["t"])
+    data, sync = IBClient(), IBClient()
+    for t, client, code in ((100.0, data, 1100), (200.0, sync, 1100), (300.0, data, 2110)):
+        now["t"] = t
+        client._on_error(-1, code, "connectivity")
+    monkeypatch.undo()
+    pool = IBPool()
+    pool._clients = {"data": data, "sync": sync}
+    monkeypatch.setattr(pool, "is_connected", lambda role: True)
+    up = pool.upstream_status()
+    assert up["state"] == "lost" and up["last_code"] == 2110
+    assert up["since"].startswith("1970-01-01T00:01:40")
+
+
+def test_wizard_quote_fn_is_bounded_and_refuses_lost_upstream(monkeypatch):
+    """Review item 5: the background combo snapshot runs through the bounded
+    wrapper (worker RequestTimeout, upstream fast-fail)."""
+    from xenon.api.services import wizard_risk_alert as wra
+
+    seen = {}
+
+    def fake_combo(client, session_id):
+        seen["timeout"] = client.ib.RequestTimeout
+        return None
+
+    monkeypatch.setattr(wra, "_combo_quote_with_client", fake_combo)
+    ready = _pool_with(_StateClient(READINESS_READY))
+    assert asyncio.run(wra.build_pool_quote_fn(ready)({"session_id": "s1"})) is None
+    assert 0 < seen["timeout"] <= wra.QUOTE_TIMEOUT_S
+
+    seen.clear()
+    lost = _pool_with(_StateClient(READINESS_LOST, 1100))
+    with pytest.raises(IBUpstreamLost):
+        asyncio.run(wra.build_pool_quote_fn(lost)({"session_id": "s1"}))
+    assert seen == {}

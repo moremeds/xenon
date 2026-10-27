@@ -17,7 +17,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from xenon.api.ib_pool import bounded_data_job, call_data_bounded, data_deadline
+from xenon.api.ib_pool import call_data_bounded, data_session
 
 logger = logging.getLogger("xenon.historical")
 
@@ -197,10 +197,9 @@ async def head_timestamp(req: HeadTimestampRequest, request: Request):
     contract = make_ib_contract(req.contract)
 
     try:
-        async with pool.acquire("data") as client:
-            # The qualify step is bounded (fails fast on a lost upstream); the
-            # historical download keeps its own ib_async timeout.
-            await pool.run_sync("data", bounded_data_job, data_deadline(), _qualify, client, contract)
+        # Lock wait + reconnect + qualify run under one deadline with fencing
+        # (fails fast on a lost upstream); the download keeps its own timeout.
+        async with data_session(pool, _qualify, contract) as client:
             ts = await pool.run_sync(
                 "data",
                 client.get_head_timestamp,
@@ -229,10 +228,9 @@ async def historical_bars(req: HistoricalBarsRequest, request: Request):
         )
 
     try:
-        async with pool.acquire("data") as client:
-            # The qualify step is bounded (fails fast on a lost upstream); the
-            # historical download keeps its own ib_async timeout.
-            await pool.run_sync("data", bounded_data_job, data_deadline(), _qualify, client, contract)
+        # Lock wait + reconnect + qualify run under one deadline with fencing
+        # (fails fast on a lost upstream); the download keeps its own timeout.
+        async with data_session(pool, _qualify, contract) as client:
             _require_qualified([req.contract], [contract])
             started = time.monotonic()
             bars = await pool.run_sync(

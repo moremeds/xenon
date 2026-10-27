@@ -363,6 +363,7 @@ class IBClient:
         # the current readiness state began — reported by /health.
         self._readiness_code: Optional[int] = None
         self._readiness_since: float = time.time()
+        self._readiness_event_at: float = 0.0
 
         # Wire up error callback
         self._ib.errorEvent += self._on_error
@@ -853,6 +854,11 @@ class IBClient:
         return self._readiness_code
 
     @property
+    def readiness_event_at(self) -> float:
+        """Wall time of the last readiness event (orders ``readiness_code``)."""
+        return self._readiness_event_at
+
+    @property
     def readiness_since(self) -> float:
         """Wall time (epoch seconds) the current readiness state began."""
         return self._readiness_since
@@ -877,6 +883,7 @@ class IBClient:
 
     def _apply_readiness_event(self, code: int) -> None:
         self._readiness_code = code
+        self._readiness_event_at = time.time()
         if code in _READINESS_LOST_CODES:
             self._set_readiness(READINESS_LOST)
         elif code == _READINESS_RESTORED_CODE:

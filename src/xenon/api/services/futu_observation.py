@@ -45,6 +45,7 @@ import concurrent.futures
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -756,6 +757,8 @@ OBSERVATION_INTERVAL_S = 60.0
 # own); no new pass starts while it is still running.
 PASS_TIMEOUT_S = 50.0
 META_TIMEOUT_S = 20.0
+# Worker-side IB budget, below META_TIMEOUT_S so the worker returns first.
+META_WORKER_BUDGET_S = 15.0
 
 Connector = Callable[[], tuple[Any, Callable[[], None]]]
 
@@ -780,6 +783,7 @@ def make_ib_meta_resolver(loop: asyncio.AbstractEventLoop, get_pool: Callable[[]
         pool = get_pool()
         if pool is None or not todo:
             return out
+        from xenon.api.ib_pool import bounded_data_job
         from xenon.api.services.order_entry import _resolve_leg_meta_with_client
 
         async def _qualify() -> list[dict | None] | None:
@@ -789,7 +793,17 @@ def make_ib_meta_resolver(loop: asyncio.AbstractEventLoop, get_pool: Callable[[]
             if not pool.is_connected("data"):
                 return None
             async with pool.acquire("data") as client:
-                return await pool.run_sync("data", _resolve_leg_meta_with_client, client, todo)
+                # Worker bound + upstream check (`bounded_data_job`): a gateway
+                # that never answers frees the worker before the caller's
+                # META_TIMEOUT_S, so the shared data role is not left fenced.
+                return await pool.run_sync(
+                    "data",
+                    bounded_data_job,
+                    time.monotonic() + META_WORKER_BUDGET_S,
+                    _resolve_leg_meta_with_client,
+                    client,
+                    todo,
+                )
 
         fut = asyncio.run_coroutine_threadsafe(_qualify(), loop)
         try:

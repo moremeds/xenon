@@ -18,6 +18,7 @@ import os
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, Optional
 
@@ -127,6 +128,34 @@ async def call_data_bounded(pool: Any, fn: Callable[..., Any], *args: Any, timeo
                 return await pool.run_sync(DATA_ROLE, bounded_data_job, deadline_at, fn, client, *args)
     except TimeoutError as exc:
         raise IBDataTimeout(f"IB data call did not finish within {timeout:g}s") from exc
+
+
+@asynccontextmanager
+async def data_session(pool: Any, prep: Callable[..., Any], *args: Any, timeout: Optional[float] = None):
+    """Hold the data role for a longer job whose first step is bounded.
+
+    Lock wait + reconnect + ``prep(client, *args)`` (e.g. qualify) run under
+    one ``XENON_IB_QUOTE_TIMEOUT_S`` deadline with the same worker bound and
+    fencing as ``call_data_bounded``; then the client is yielded with the
+    lock still held for the caller's own (separately timed) work.
+    """
+    timeout = ib_quote_timeout_s() if timeout is None else timeout
+    deadline_at = time.monotonic() + timeout
+    ctx = pool.acquire(DATA_ROLE)
+    try:
+        async with asyncio.timeout(timeout):
+            client = await ctx.__aenter__()
+    except TimeoutError as exc:
+        raise IBDataTimeout(f"IB data role not acquired within {timeout:g}s") from exc
+    try:
+        try:
+            async with asyncio.timeout(max(0.0, deadline_at - time.monotonic())):
+                await pool.run_sync(DATA_ROLE, bounded_data_job, deadline_at, prep, client, *args)
+        except TimeoutError as exc:
+            raise IBDataTimeout(f"IB data call did not finish within {timeout:g}s") from exc
+        yield client
+    finally:
+        await ctx.__aexit__(None, None, None)
 
 # Database names that identify the production stack. Base 0 (the prod clientId
 # block) belongs to the prod DB only; every other DB must use another base.
@@ -475,15 +504,18 @@ class IBPool:
         its socket and readiness state never outlive the replacement.
         """
         client_id = pool_client_id(role)
-        loop = asyncio.get_running_loop()
         old = self._clients.pop(role, None)
         self._connected[role] = False
+        # Both steps go through the fence-aware dispatch: a caller deadline
+        # during a running disconnect / connect fences the role until that
+        # step returns, so a second caller cannot queue another connect on
+        # the same clientId (Astra PR #254 finding 1).
         if old is not None:
             try:
-                await loop.run_in_executor(self._role_executors[role], old.disconnect)
+                await self._dispatch(role, old.disconnect, fence=True)
             except Exception as exc:  # noqa: BLE001 — a dead socket may refuse a clean close
                 logger.debug("IB pool: %s old client disconnect failed: %s", role, exc)
-        await loop.run_in_executor(self._role_executors[role], self._connect_owned, role, client_id, 5)
+        await self._dispatch(role, functools.partial(self._connect_owned, role, client_id, 5), fence=True)
         logger.info("IB pool: %s reconnected (client_id=%d)", role, client_id)
 
     async def _reconnect(self, role: str) -> bool:
@@ -513,14 +545,18 @@ class IBPool:
         """
         if role not in POOL_ROLES:
             raise ValueError(f"Unknown pool role: {role}. Valid: {list(POOL_ROLES.keys())}")
-        job = self._role_executors[role].submit(functools.partial(fn, *args, **kwargs))
+        return await self._dispatch(role, functools.partial(fn, *args, **kwargs), fence=role in _FENCED_ROLES)
+
+    async def _dispatch(self, role: str, call: Callable[[], Any], *, fence: bool) -> Any:
+        """Run ``call`` on the role's worker. A queued job whose caller gives
+        up never starts. With ``fence``, a job already running when its caller
+        gives up keeps the client until it returns: the role is fenced so
+        later ``acquire`` callers fail fast instead of queueing behind it."""
+        job = self._role_executors[role].submit(call)
         try:
             return await asyncio.wrap_future(job)
         except asyncio.CancelledError:
-            # A queued job never starts. A job already running on a fenced
-            # role keeps the client until it returns: fence the role so later
-            # callers fail fast instead of queueing behind it.
-            if not job.cancel() and role in _FENCED_ROLES and not job.done():
+            if not job.cancel() and fence and not job.done():
                 self._fence(role, job)
             raise
 
@@ -559,8 +595,10 @@ class IBPool:
         else:
             state, group = "unknown", clients
         sinces = [s for s in (getattr(c, "readiness_since", None) for c in group) if isinstance(s, (int, float))]
+        # last_code = the latest event across the group (event time, not
+        # state-entry time: a 2110 while already lost does not move `since`).
         codes = [
-            (getattr(c, "readiness_since", 0) or 0, getattr(c, "readiness_code", None))
+            (getattr(c, "readiness_event_at", 0) or 0, getattr(c, "readiness_code", None))
             for c in group
             if isinstance(getattr(c, "readiness_code", None), int)
         ]
