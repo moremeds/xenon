@@ -22,6 +22,8 @@ export interface RuntimeSetting {
   rule: "free" | "subset" | "min" | "and";
   narrow_only: boolean;
   confirm_rule: string | null;
+  label: string;
+  unit: string | null;
   description: string;
   consumers: string[];
   choices: string[];
@@ -36,4 +38,6 @@ export interface RuntimeSetting {
   updated_by: string | null;
   note: string | null;
   last_change: SettingChange | null;
+  /** Relay-owned keys only: the relay's effective value from its /status (absent when unreachable). */
+  live_value?: unknown;
 }

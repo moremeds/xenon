@@ -272,7 +272,10 @@ def _resolve_realtime_status_url() -> str:
     return f"http://127.0.0.1:{_resolve_realtime_port()}/status"
 
 
-def _fetch_realtime_status_json(url: str, timeout: float = 0.5) -> dict:
+def _fetch_realtime_status_json(url: str, timeout: float = 0.5, deadline_s: float | None = None) -> dict:
+    """`timeout` bounds each socket wait. `deadline_s` (optional) bounds the
+    whole body read: a peer that trickles bytes raises TimeoutError."""
+    import time
     import urllib.request
 
     headers = {}
@@ -280,8 +283,16 @@ def _fetch_realtime_status_json(url: str, timeout: float = 0.5) -> dict:
     if token:
         headers["X-Status-Token"] = token
     request = urllib.request.Request(url, headers=headers)  # noqa: S310
+    started = time.monotonic()
     with urllib.request.urlopen(request, timeout=timeout) as resp:  # noqa: S310
-        return json.loads(resp.read().decode("utf-8"))
+        if deadline_s is None:
+            return json.loads(resp.read().decode("utf-8"))
+        chunks = []
+        while chunk := resp.read1(65536):
+            chunks.append(chunk)
+            if time.monotonic() - started > deadline_s:
+                raise TimeoutError("realtime /status read exceeded its deadline")
+        return json.loads(b"".join(chunks).decode("utf-8"))
 
 
 def _realtime_subscribers_health() -> dict:
