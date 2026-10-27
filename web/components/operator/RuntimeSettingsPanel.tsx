@@ -132,6 +132,17 @@ function parseText(s: RuntimeSetting, raw: string): { value?: unknown; error?: s
   }
 }
 
+/** Deep equality for setting values (numbers, strings, arrays, plain JSON objects). */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const x = a as Record<string, unknown>;
+  const y = b as Record<string, unknown>;
+  const keys = Object.keys(x);
+  return keys.length === Object.keys(y).length && keys.every((k) => Object.hasOwn(y, k) && sameValue(x[k], y[k]));
+}
+
 const fieldText = (s: RuntimeSetting, v: unknown) =>
   v == null ? "" : s.type === "object" ? JSON.stringify(v) : String(v);
 
@@ -370,7 +381,10 @@ function SettingRow({
             <button
               type="button"
               className="rs-link"
+              data-revert=""
               disabled={busy}
+              // keep focus in a dirty field: its blur would apply the draft before this DELETE
+              onMouseDown={(e) => e.preventDefault()}
               title={s.env_known ? `Environment value: ${fmt(s, s.env_value)}` : undefined}
               onClick={() => onWrite("delete")}
             >
@@ -393,6 +407,7 @@ function SettingRow({
               className="rs-input rs-input--mono"
               aria-label={`Type ${s.key} to confirm`}
               value={pending.typed}
+              disabled={busy}
               onChange={(e) => onTyped(e.target.value)}
             />
           </label>
@@ -405,7 +420,7 @@ function SettingRow({
             >
               Confirm change
             </button>
-            <button type="button" className="rs-btn" onClick={onCancelConfirm}>
+            <button type="button" className="rs-btn" disabled={busy} onClick={onCancelConfirm}>
               Back
             </button>
           </div>
@@ -523,11 +538,20 @@ function FieldControl({
   const [error, setError] = useState<string | null>(null);
   const sent = useRef<string | null>(null); // the text already sent for this mount
 
+  const restore = () => {
+    setText(server);
+    setError(null);
+    onPropose();
+  };
   const apply = () => {
     if (busy || text.trim() === server || text === sent.current) return;
     const parsed = parseText(s, text);
     if (parsed.error) {
       setError(parsed.error);
+      return;
+    }
+    if (sameValue(parsed.value, v.value)) {
+      restore(); // formatting only (10000.0, reordered JSON): nothing to send
       return;
     }
     setError(null);
@@ -555,13 +579,14 @@ function FieldControl({
         }}
         onKeyDown={(e) => {
           if (e.key === "Enter") apply();
-          if (e.key === "Escape") {
-            setText(server);
-            setError(null);
-            onPropose();
-          }
+          if (e.key === "Escape") restore();
         }}
-        onBlur={apply}
+        onBlur={(e) => {
+          // focus moving to this row's Revert means "back to env": drop the draft
+          const to = e.relatedTarget as HTMLElement | null;
+          if (to?.hasAttribute("data-revert") && e.currentTarget.closest(".rs-row")?.contains(to)) restore();
+          else apply();
+        }}
       />
       {s.unit ? <span className="rs-number__unit">{s.unit}</span> : null}
       {envCap && max != null ? <span className="rs-hint">Env cap {fmtNumber(max, s.unit)}</span> : null}

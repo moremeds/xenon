@@ -411,6 +411,109 @@ describe("RuntimeSettingsPanel", () => {
   });
 });
 
+describe("RuntimeSettingsPanel (toggles review T5)", () => {
+  it("T5-1 pointer: mousedown on Revert keeps the draft from applying; only DELETE is sent", async () => {
+    const calls = mockFetch(() => undefined);
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    await screen.findByTestId("setting-XENON_FUTU_MKT_NOTIONAL_CAP");
+    const f = field("XENON_FUTU_MKT_NOTIONAL_CAP", "Futu market-order cap");
+    f.focus();
+    fireEvent.change(f, { target: { value: "12000" } });
+    const revert = within(row("XENON_FUTU_MKT_NOTIONAL_CAP")).getByRole("button", { name: "Revert to env" });
+    // the browser's default mousedown action (focus move -> field blur) is prevented
+    expect(fireEvent.mouseDown(revert)).toBe(false);
+    // a browser that still moves focus to the link blurs the field toward Revert
+    fireEvent.blur(f, { relatedTarget: revert });
+    fireEvent.click(revert);
+    await waitFor(() => expect(writes(calls)).toHaveLength(1));
+    expect(writes(calls)[0]).toEqual(
+      expect.objectContaining({ method: "DELETE", url: "/api/admin/settings/XENON_FUTU_MKT_NOTIONAL_CAP" }),
+    );
+  });
+
+  it("T5-1 keyboard: tabbing from a dirty field to Revert discards the draft; Revert sends only DELETE", async () => {
+    const calls = mockFetch(() => undefined);
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    await screen.findByTestId("setting-XENON_FUTU_MKT_NOTIONAL_CAP");
+    const f = field("XENON_FUTU_MKT_NOTIONAL_CAP", "Futu market-order cap");
+    f.focus();
+    fireEvent.change(f, { target: { value: "12000" } });
+    const revert = within(row("XENON_FUTU_MKT_NOTIONAL_CAP")).getByRole("button", { name: "Revert to env" });
+    fireEvent.blur(f, { relatedTarget: revert }); // Tab moves focus to Revert
+    revert.focus();
+    expect(field("XENON_FUTU_MKT_NOTIONAL_CAP", "Futu market-order cap").value).toBe("10000");
+    expect(writes(calls)).toHaveLength(0);
+    fireEvent.click(revert); // Enter / Space on the focused button
+    await waitFor(() => expect(writes(calls)).toHaveLength(1));
+    expect(writes(calls)[0].method).toBe("DELETE");
+  });
+
+  it("T5-2 a formatting-only number edit sends nothing and normalizes the field", async () => {
+    const calls = mockFetch(() => undefined);
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    await screen.findByTestId("setting-XENON_FUTU_MKT_NOTIONAL_CAP");
+    const cap = field("XENON_FUTU_MKT_NOTIONAL_CAP", "Futu market-order cap");
+    fireEvent.change(cap, { target: { value: "10000.0" } });
+    fireEvent.blur(cap);
+    expect(field("XENON_FUTU_MKT_NOTIONAL_CAP", "Futu market-order cap").value).toBe("10000");
+    // relay key without an override: the live value counts as current
+    const lines = field("IB_REALTIME_MAX_LINES", "IB line budget");
+    fireEvent.change(lines, { target: { value: "85.0" } });
+    fireEvent.keyDown(lines, { key: "Enter" });
+    expect(field("IB_REALTIME_MAX_LINES", "IB line budget").value).toBe("85");
+    expect(writes(calls)).toHaveLength(0);
+  });
+
+  it("T5-2 a JSON reformat or key reorder sends nothing; a real change does", async () => {
+    const calls = mockFetch((c) =>
+      c.method === "GET"
+        ? {
+            status: 200,
+            body: {
+              settings: settingsFixture().map((r) =>
+                r.key === "FUTU_GREEK_FACTORS" ? { ...r, db_value: { iv: 0.01, delta: 1 } } : r,
+              ),
+            },
+          }
+        : undefined,
+    );
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    await screen.findByTestId("setting-FUTU_GREEK_FACTORS");
+    const label = "Futu greek factors";
+    expect(field("FUTU_GREEK_FACTORS", label).value).toBe('{"iv":0.01,"delta":1}');
+    fireEvent.change(field("FUTU_GREEK_FACTORS", label), { target: { value: '{ "delta" : 1.0, "iv" : 0.01 }' } });
+    fireEvent.blur(field("FUTU_GREEK_FACTORS", label));
+    expect(field("FUTU_GREEK_FACTORS", label).value).toBe('{"iv":0.01,"delta":1}');
+    expect(writes(calls)).toHaveLength(0);
+    fireEvent.change(field("FUTU_GREEK_FACTORS", label), { target: { value: '{"iv":0.01,"delta":2}' } });
+    fireEvent.keyDown(field("FUTU_GREEK_FACTORS", label), { key: "Enter" });
+    await waitFor(() => expect(writes(calls)).toHaveLength(1));
+    expect(writes(calls)[0].body).toEqual({ value: { iv: 0.01, delta: 2 } });
+  });
+
+  it("T5-3 the confirm input and Back are disabled while the confirmed write runs", async () => {
+    let release!: () => void;
+    mockFetch((c) => {
+      if (c.method !== "PUT") return undefined;
+      if (!(c.body as { confirm?: string }).confirm) return need428;
+      return new Promise<Response>((resolve) => (release = () => resolve(reply({ changed: true }))));
+    });
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    await screen.findByTestId("setting-XENON_AUDIT_CANCEL");
+    const audit = row("XENON_AUDIT_CANCEL");
+    fireEvent.click(within(audit).getByRole("switch"));
+    const step = await within(audit).findByTestId("confirm-step");
+    const typed = within(step).getByLabelText("Type XENON_AUDIT_CANCEL to confirm") as HTMLInputElement;
+    fireEvent.change(typed, { target: { value: "XENON_AUDIT_CANCEL" } });
+    fireEvent.click(within(step).getByRole("button", { name: "Confirm change" }));
+    await waitFor(() => expect(audit.getAttribute("aria-busy")).toBe("true"));
+    expect(typed.disabled).toBe(true);
+    expect((within(step).getByRole("button", { name: "Back" }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => release());
+    await waitFor(() => expect(within(row("XENON_AUDIT_CANCEL")).queryByTestId("confirm-step")).toBeNull());
+  });
+});
+
 describe("settingsErrorMessage", () => {
   it("maps settings and auth reason codes, keeps validator detail", () => {
     expect(settingsErrorMessage({ reason_code: "READ_ONLY_MODE" }, "f")).toMatch(/read-only/i);

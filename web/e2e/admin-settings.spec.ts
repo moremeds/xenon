@@ -62,6 +62,7 @@ test.beforeEach(async ({ page }) => {
       return r.fulfill(json({ key, changed: true }));
     }
     if (method === "DELETE") {
+      puts.push({ key, deleted: true });
       if (key === "orders_paused") paused = false;
       return r.fulfill(json({ key, changed: true }));
     }
@@ -155,6 +156,20 @@ test("admin runtime settings: in-row controls, pause, typed confirm, inline numb
   await field.fill("20000");
   await field.press("Enter");
   await expect.poll(() => puts.slice(before)).toEqual([{ key: "XENON_FUTU_MKT_NOTIONAL_CAP", value: 20000 }]);
+
+  // Pointer on Revert from a dirty field: only the DELETE goes out, the draft is dropped.
+  const mark = puts.length;
+  await field.fill("12000");
+  await cap.getByRole("button", { name: "Revert to env" }).click();
+  await expect.poll(() => puts.slice(mark)).toEqual([{ key: "XENON_FUTU_MKT_NOTIONAL_CAP", deleted: true }]);
+  await expect(field).toHaveValue("10000");
+
+  // Formatting-only edit (85 -> 85.0): nothing is sent, the field normalizes.
+  const lines = page.getByTestId("setting-IB_REALTIME_MAX_LINES").getByLabel("IB line budget");
+  await lines.fill("85.0");
+  await lines.press("Enter");
+  await expect(lines).toHaveValue("85");
+  expect(puts.length).toBe(mark + 1);
 });
 
 test.describe("narrow screen", () => {
