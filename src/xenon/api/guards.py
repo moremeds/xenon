@@ -13,6 +13,7 @@ import os
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from xenon import runtime_settings
 from xenon.api import trading_mode
 from xenon.execution import broker_capabilities
 from xenon.execution.account_scope import AccountScope, resolve_from_app_state
@@ -109,6 +110,32 @@ _KIND_TO_OP = {
     "order replacement": "replace",
     "naked-short audit cancel": "cancel",
 }
+
+
+# Kinds `orders_paused` refuses: every place and modify path (IB and Futu,
+# routes and in-process callers; the wizard and protect reach
+# order_entry.place / modify, which check again). Cancel, abort, plan and
+# session create stay allowed.
+_PAUSED_KINDS = frozenset(
+    {
+        "order placement",
+        "order modification",
+        "order replacement",
+        "wizard submit",
+        "wizard reprice",
+        "wizard protect",
+    }
+)
+ORDERS_PAUSED = ReasonCode.ORDERS_PAUSED.value
+
+
+def orders_paused_403() -> JSONResponse:
+    """403 while the `orders_paused` runtime setting is on (top-level reason_code)."""
+    message = "Orders are paused (runtime setting orders_paused): place and modify are refused; cancel still works."
+    return JSONResponse(
+        status_code=403,
+        content={"detail": message, "reason_code": ORDERS_PAUSED, "reason_detail": message},
+    )
 
 
 def _op_for_kind(kind: str) -> str | None:
@@ -239,7 +266,9 @@ def ensure_order_allowed(
     in-process `_orders_*_from_body` helpers the wizard reaches without
     going through a route). Checks, in order:
 
-    1. `XENON_READ_ONLY=1` → 403 `READ_ONLY_MODE` JSONResponse.
+    1. `XENON_READ_ONLY=1` → 403 `READ_ONLY_MODE` JSONResponse; then the
+       `orders_paused` runtime setting → 403 `ORDERS_PAUSED` for place /
+       modify / replace kinds (`_PAUSED_KINDS`; cancel is never paused).
     2. Non-IB `app.state.broker` → capability check
        (`broker_capability_denial`; `op` defaults to the operation `kind`
        names) → 403 `READ_ONLY_BROKER` JSONResponse. FUTU first needs the
@@ -261,6 +290,8 @@ def ensure_order_allowed(
     """
     if is_read_only():
         return read_only_403()
+    if kind in _PAUSED_KINDS and runtime_settings.orders_paused():
+        return orders_paused_403()
     broker = str(getattr(state, "broker", "IB") or "IB").upper()
     if broker != "IB":
         from xenon.execution import futu_scope

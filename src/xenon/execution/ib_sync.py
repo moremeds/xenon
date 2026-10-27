@@ -30,6 +30,7 @@ except ImportError:
     print("Install with: pip install ib_async")
     sys.exit(1)
 
+from xenon import runtime_settings
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 from xenon.db.engine import get_sync_engine
 from xenon.execution import naked_short_audit
@@ -1364,6 +1365,9 @@ def _observation_stamp(pass_started: datetime, reads: dict, ib_account: str | No
 
 
 def main(argv=None):
+    # D5: only the api reads runtime_settings from the DB. This process uses
+    # env values only; the api spawn passes the effective values in the env.
+    runtime_settings.env_only()
     parser = argparse.ArgumentParser(description="Sync portfolio from Interactive Brokers")
     parser.add_argument("--host", default=DEFAULT_HOST, help="TWS/Gateway host")
     parser.add_argument(
@@ -1606,8 +1610,11 @@ def main(argv=None):
             # (never Postgres). Logs + records service_health only; it has no
             # cancel path. It gets this pass's observation stamp; any failed
             # IB read or accountless order skips it. The Postgres persist step
-            # is left out of the audit's `complete`: the audit reads no PG,
-            # so a read-only pass still audits what it saw.
+            # is left out of the audit's `complete`: the audit reads no
+            # portfolio/order state from PG, so a read-only pass still audits
+            # what it saw. Its netting flag is env only (runtime_settings.
+            # env_only() in main): spawned by the api, XENON_GATE4_NETTING is
+            # the api's effective value; a direct CLI run uses the shell env.
             # The summary is also handed to the API (PR-11): when
             # XENON_AUDIT_CANCEL=1 the API's order owner — the only process
             # that can cancel — enforces it. This subprocess never cancels.

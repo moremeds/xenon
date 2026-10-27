@@ -6,6 +6,9 @@ per ``docs/architecture/futu-quotes.md``:
 - in:  ``{"action": "want", "gen": N, "symbols": [...],
          "tiers": {"<sym>": "held"|"view"}}`` (``tiers`` optional;
          a symbol missing from it = ``held``)
+- in:  ``{"action": "config", "values": {"FUTU_QUOTE_QUOTA": n|null, ...}}``
+       runtime-settings overrides forwarded by the relay; null, missing or
+       invalid = this process's env value (``apply_config``)
 - out: ``assign`` / ``batch`` / ``health``
 
 The service owns an ``OpenDLike`` (real ``FutuOpenD`` in prod, fake in
@@ -171,6 +174,13 @@ class FutuQuotesService:
         self._last_quote: dict[str, tuple[dict, datetime]] = {}
         # Parsed FUTU_GREEK_FACTORS; None = greeks/IV stay NULL (contract).
         self.greek_factors = greek_factors
+        # Env/start values the runtime-settings config frame falls back to.
+        self._env_config = {
+            "FUTU_QUOTE_QUOTA": quota_cap,
+            "FUTU_UNITS_PER_SYMBOL": units_per_symbol,
+            "FUTU_BOOK_STALE_S": book_stale_s,
+            "FUTU_GREEK_FACTORS": greek_factors,
+        }
         # US session from the last poll: "rth" | "overnight" | None (closed).
         self.session: Optional[str] = None
         self.baseline = OvernightBaseline()
@@ -220,6 +230,9 @@ class FutuQuotesService:
         except Exception:
             logger.warning("relay frame not JSON: %r", raw[:200] if hasattr(raw, "__getitem__") else raw)
             return
+        if isinstance(msg, dict) and msg.get("action") == "config":
+            self.apply_config(msg.get("values"))
+            return
         if not isinstance(msg, dict) or msg.get("action") != "want":
             return  # pong and anything else: liveness only
         try:
@@ -244,6 +257,44 @@ class FutuQuotesService:
         # later re-add before any evaluation must not revive it.
         for s in prev.difference(self.admission.desired):
             self.batcher.drop(s)
+        self._kick(emit_always=True)
+
+    def effective_config(self) -> dict:
+        return {
+            "FUTU_QUOTE_QUOTA": self.admission.quota_cap,
+            "FUTU_UNITS_PER_SYMBOL": self.admission.units_per_symbol,
+            "FUTU_BOOK_STALE_S": self.book_stale_s,
+            "FUTU_GREEK_FACTORS": self.greek_factors,
+        }
+
+    def apply_config(self, values: Any) -> None:
+        """Apply a relay ``config`` frame (runtime settings, D6): each key's
+        value when valid per the registry (`xenon.runtime_settings`), else
+        the env value. Quota and units take effect on the next admission
+        evaluation (kicked here), book staleness and greek factors on the
+        next emit."""
+        from xenon import runtime_settings
+
+        if not isinstance(values, dict):
+            logger.warning("config frame without a values object ignored")
+            return
+        nxt = {}
+        for key, env_value in self._env_config.items():
+            raw = values.get(key)
+            value = env_value
+            if raw is not None:
+                try:
+                    value = runtime_settings.validate(key, raw)[1]
+                except runtime_settings.SettingError as exc:
+                    logger.warning("config %s ignored: %s", key, exc.detail)
+            nxt[key] = value
+        if nxt == self.effective_config():
+            return
+        self.admission.quota_cap = nxt["FUTU_QUOTE_QUOTA"]
+        self.admission.units_per_symbol = nxt["FUTU_UNITS_PER_SYMBOL"]
+        self.book_stale_s = nxt["FUTU_BOOK_STALE_S"]
+        self.greek_factors = nxt["FUTU_GREEK_FACTORS"]
+        logger.info("runtime config applied: %s", nxt)
         self._kick(emit_always=True)
 
     async def on_ws_close(self, ws: Any) -> None:

@@ -426,7 +426,7 @@ def glue(monkeypatch):
     recorded store / health writes. Flag on, writable, mode verified."""
     state = {"runs": [], "results": [], "cancels": [], "replies": [], "marks": [], "health": []}
 
-    async def _runner(entry, args, timeout=30):
+    async def _runner(entry, args, timeout=30, env=None):
         state["runs"].append(entry)
         return state["results"].pop(0) if state["results"] else ScriptResult(ok=True, data={})
 

@@ -7,6 +7,7 @@ from sqlalchemy import (
     Date,
     ForeignKey,
     ForeignKeyConstraint,
+    Identity,
     Index,
     Integer,
     LargeBinary,
@@ -878,6 +879,36 @@ service_health = Table(
     Column("last_finished_at", TIMESTAMP(timezone=True)),
     Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
     PrimaryKeyConstraint("service", "broker", "account_env", "broker_account", name="pk_service_health"),
+)
+
+# ---------- Runtime settings ----------
+
+# DB overrides for runtime knobs (registry: xenon.runtime_settings). No row =
+# the env/default value. Process config, not an execution row: no AccountScope
+# columns (safety keys are narrow-only, so a row copied by the nightly
+# core_dev -> core_test refresh can only restrict, never widen).
+runtime_settings = Table(
+    "runtime_settings",
+    xenon_metadata,
+    Column("key", Text, primary_key=True),
+    Column("value", JSONB, nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Column("updated_by", Text),
+    Column("note", Text),
+)
+
+# Append-only change log; one row per PUT / DELETE, same transaction.
+runtime_settings_audit = Table(
+    "runtime_settings_audit",
+    xenon_metadata,
+    Column("id", BigInteger, Identity(always=False), primary_key=True),
+    Column("key", Text, nullable=False),
+    Column("old_value", JSONB),
+    Column("new_value", JSONB),
+    Column("changed_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Column("changed_by", Text),
+    Column("note", Text),
+    Index("ix_runtime_settings_audit_key_changed", "key", "changed_at"),
 )
 
 # ---------- Watchlist ----------

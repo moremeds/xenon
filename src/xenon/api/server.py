@@ -16,7 +16,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -53,6 +53,8 @@ from xenon.api.routes.wizard import router as wizard_router
 from xenon.api.subprocess import ScriptResult, run_entry_point
 from xenon.api.routes.market import router as market_router
 from xenon.api.routes.ratings import router as ratings_router
+from xenon.api.routes import settings as settings_routes
+from xenon.api.routes.settings import router as settings_router
 from xenon.api.routes.order_entry import router as order_entry_router
 from xenon.api.routes import futu as futu_routes
 from xenon.api.routes.futu import router as futu_router
@@ -790,6 +792,8 @@ def _is_write_path(path: str) -> bool:
     normalized = path.rstrip("/") or "/"
     if normalized in _READ_ONLY_WRITE_PATHS:
         return True
+    if normalized.startswith("/admin/settings/"):
+        return True
     if normalized.startswith("/wizard/sessions/"):
         return normalized.rsplit("/", 1)[-1] in _WIZARD_SESSION_ACTIONS
     return False
@@ -826,6 +830,11 @@ async def auth_middleware(request: Request, call_next):
 
     decision = classify_auth(request)
 
+    if settings_routes.is_settings_path(request.url.path):
+        refusal = settings_routes.auth_refusal(request, decision.identity)
+        if refusal is not None:
+            return refusal
+
     if decision.action == "pass":
         request.state.user = decision.identity
         return await call_next(request)
@@ -845,6 +854,7 @@ app.include_router(futu_router)
 app.include_router(blotter_router)
 app.include_router(market_router)
 app.include_router(ratings_router)
+app.include_router(settings_router)
 
 
 # ---------------------------------------------------------------------------
@@ -911,9 +921,15 @@ def _pool_has_any_connection() -> bool:
     return False
 
 
-async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 30) -> ScriptResult:
+async def _run_ib_script_with_recovery(
+    entry: str, args: list, timeout: float = 30, env: Callable[[], dict[str, str]] | None = None
+) -> ScriptResult:
     """Run an IB-dependent xenon-* DATA entry point with pre-flight health
     check and cooldown. Order writes never come here (order owner).
+
+    `env` builds extra child env variables; it is called immediately before
+    each actual spawn (also the retry), after every gateway wait, so a value
+    narrowed meanwhile reaches the child.
 
     Three layers of fast-fail:
     1. Cooldown: if a recent IB script failed, skip for _IB_SCRIPT_COOLDOWN_SECS
@@ -958,7 +974,7 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
                 spawned=False,
             )
 
-    result = await run_entry_point(entry, args, timeout=timeout)
+    result = await run_entry_point(entry, args, timeout=timeout, env=env() if env else None)
 
     # Clear cooldown on success
     if result.ok:
@@ -1016,7 +1032,7 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
                     await ib_pool.disconnect_all(roles=("sync", "data"))
                     await ib_pool.connect_all(roles=("sync", "data"))
                 logger.info("IB Gateway restarted, retrying %s", entry)
-                result = await run_entry_point(entry, args, timeout=timeout)
+                result = await run_entry_point(entry, args, timeout=timeout, env=env() if env else None)
             else:
                 logger.error("IB Gateway restart failed: %s", gw_result)
                 result = ScriptResult(

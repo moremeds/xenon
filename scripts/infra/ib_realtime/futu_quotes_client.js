@@ -39,6 +39,7 @@ export function createFutuQuotesClient({
   let lastPongAt = 0;
   let gen = 0;
   let want = { symbols: [], tiers: {} };
+  let config = null; // runtime-settings overrides for the service; null = none known
   let pingTimer = null;
   let healthTimer = null; // armed/reset per health frame — the hard deadline
   let reconnectTimer = null;
@@ -73,6 +74,24 @@ export function createFutuQuotesClient({
 
   // `tiers` is {symbol: "held"|"view"} for the wanted symbols (service treats
   // a missing symbol/key as held). A tier-only change re-sends the want.
+  // Runtime-settings config frame (relay → service): every forwarded key,
+  // null = the service's own env value. Sent on every open (before want, so
+  // the first evaluation uses it) and on each change.
+  function sendConfig() {
+    if (!open || !ws || config == null) return;
+    try {
+      ws.send(JSON.stringify({ action: "config", values: config }));
+    } catch {
+      /* socket dying — close/error path handles it */
+    }
+  }
+
+  function setConfig(values) {
+    if (values == null || JSON.stringify(values) === JSON.stringify(config)) return;
+    config = { ...values };
+    sendConfig();
+  }
+
   function setWant(symbols, tiers) {
     const nextSymbols = Array.isArray(symbols) ? symbols : [];
     const nextTiers =
@@ -198,6 +217,7 @@ export function createFutuQuotesClient({
       if (ws !== sock || stopped) return;
       open = true;
       socketDead = false;
+      sendConfig();
       if (want.symbols.length) sendWant(); // re-arm on reconnect; fresh epoch starts empty
       onSocket(true);
       startPing();
@@ -241,5 +261,12 @@ export function createFutuQuotesClient({
     }
   }
 
-  return { start, stop, setWant, isOpen: () => open, sentGen: () => gen };
+  return {
+    start,
+    stop,
+    setWant,
+    setConfig,
+    isOpen: () => open,
+    sentGen: () => gen,
+  };
 }

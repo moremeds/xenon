@@ -138,6 +138,10 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
     severity: "warn",
     copy: "This attempt id belongs to an existing order. The requested terms are not confirmed. Check working orders; do not resubmit.",
   },
+  ORDERS_PAUSED: {
+    severity: "warn",
+    copy: "Orders are paused (Admin → Runtime settings): place and modify are refused; cancel still works.",
+  },
   READ_ONLY_BROKER: {
     severity: "error",
     copy: "Selected broker is read-only for order placement.",

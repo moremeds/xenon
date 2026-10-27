@@ -55,6 +55,10 @@ export function createFutuRouting({ holdDownMs = FUTU_HOLD_DOWN_MS } = {}) {
     ibPinned.add(symbol);
   }
 
+  function unpinIbOnly(symbol) {
+    ibPinned.delete(symbol);
+  }
+
   function isIbPinned(symbol) {
     return ibPinned.has(symbol);
   }
@@ -203,6 +207,7 @@ export function createFutuRouting({ holdDownMs = FUTU_HOLD_DOWN_MS } = {}) {
     removeClient,
     isFutuFirst,
     pinIbOnly,
+    unpinIbOnly,
     isIbPinned,
     noteSocket,
     noteHealth,

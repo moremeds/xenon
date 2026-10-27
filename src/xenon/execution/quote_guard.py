@@ -16,6 +16,7 @@ from typing import Callable, Literal
 
 from pydantic import BaseModel
 
+from xenon import runtime_settings
 from xenon.execution import quote_tokens
 from xenon.execution.preflight import ReasonCode
 from xenon.utils import market_calendar
@@ -144,6 +145,27 @@ MKT_NOTIONAL_CAP_DEFAULT = Decimal("25000")  # USD
 
 
 def mkt_notional_cap(environ: Mapping[str, str] | None = None) -> Decimal | None:
+    """`env_mkt_notional_cap` narrowed by a `runtime_settings` DB override:
+    effective = min(env, DB); an invalid env value (None) stays None."""
+    env = env_mkt_notional_cap(environ)
+    if env is None:
+        return None
+    env_json = _cap_json(env)
+    effective = runtime_settings.apply(MKT_NOTIONAL_CAP_ENV, env_json)
+    return env if effective == env_json else Decimal(str(effective))
+
+
+def _cap_json(cap: Decimal) -> int | float:
+    return int(cap) if cap == cap.to_integral_value() else float(cap)
+
+
+def env_mkt_notional_cap_json() -> int | float | None:
+    """The env cap as a JSON number for the settings API (None = invalid)."""
+    cap = env_mkt_notional_cap()
+    return None if cap is None else _cap_json(cap)
+
+
+def env_mkt_notional_cap(environ: Mapping[str, str] | None = None) -> Decimal | None:
     """`XENON_FUTU_MKT_NOTIONAL_CAP` (USD, default 25 000). None for a value
     that is not a positive finite number: every MKT order is then refused
     (fail closed, never a guessed cap)."""

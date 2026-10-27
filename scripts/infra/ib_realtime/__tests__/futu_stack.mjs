@@ -31,7 +31,9 @@ const TIMING_ENV = {
   FUTU_RECONNECT_MS: "150",
   FUTU_HOLD_DOWN_MS: String(HD),
   FUTU_RECONCILE_MS: "80",
+  XENON_SETTINGS_POLL_MS: "100",
 };
+export const INTERNAL_TOKEN = "stack-internal-token";
 
 // Hermetic relay env: only PATH plus what the test passes. The parent env is
 // never inherited, and IB_REALTIME_NO_DOTENV=1 stops the relay loading the
@@ -131,7 +133,21 @@ async function bootStack(extraEnv, { server = SERVER } = {}) {
         poll();
       });
 
+    // Fake api runtime settings: tests mutate `settings.rows` (GET
+    // /admin/settings body rows) or `settings.status` (non-200 = api failing).
+    // Default: no route (404) — the relay keeps its env values.
+    const settings = { rows: null, status: 200, requests: [] };
     validator = http.createServer((req, res) => {
+      if (req.method === "GET" && req.url === "/admin/settings") {
+        settings.requests.push(req.headers);
+        if (settings.rows == null) {
+          res.writeHead(404).end();
+          return;
+        }
+        res.writeHead(settings.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ settings: settings.rows }));
+        return;
+      }
       if (req.method === "POST" && req.url === "/ws-ticket/validate") {
         req.on("data", () => {});
         req.on("end", () => {
@@ -147,6 +163,7 @@ async function bootStack(extraEnv, { server = SERVER } = {}) {
     futuWss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     await new Promise((r) => futuWss.on("listening", r));
     const wants = [];
+    const configs = [];
     let futuSock = null;
     futuWss.on("connection", (sock) => {
       futuSock = sock;
@@ -158,6 +175,7 @@ async function bootStack(extraEnv, { server = SERVER } = {}) {
           return;
         }
         if (msg.action === "want") wants.push(msg);
+        if (msg.action === "config") configs.push(msg);
       });
     });
     // A healthy service keeps the health stream alive — arm it before the relay
@@ -194,6 +212,7 @@ async function bootStack(extraEnv, { server = SERVER } = {}) {
           IB_REALTIME_STATUS_TOKEN: "status-tok",
           FUTU_QUOTES_URL: `ws://127.0.0.1:${futuWss.address().port}/`,
           IB_REALTIME_RUNTIME_FILE: runtimeFile,
+          XENON_INTERNAL_API_TOKEN: INTERNAL_TOKEN,
           ...TIMING_ENV,
           ...extraEnv,
         }),
@@ -296,8 +315,18 @@ async function bootStack(extraEnv, { server = SERVER } = {}) {
     const hasFutuFrame = (ws, symbol) =>
       ws.msgs.some((m) => m.symbol === symbol || m.updates?.[symbol] != null);
 
+    const status = async () => {
+      const res = await fetch(`http://127.0.0.1:${relayPort}/status`, {
+        headers: { "x-status-token": "status-tok" },
+      });
+      return res.json();
+    };
+
     return {
       wants,
+      configs,
+      settings,
+      status,
       futuSend,
       connect,
       admitOnFutu,

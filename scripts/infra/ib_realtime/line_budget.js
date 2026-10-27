@@ -62,6 +62,27 @@ export function pickEvictable(entries, exceptKey = null, allowHeld = false) {
 }
 
 /**
+ * Lines to evict when the budget shrinks to `max` live lines (runtime
+ * setting IB_REALTIME_MAX_LINES): repeated pickEvictable with held lines
+ * allowed — every idlest view line goes first, then the idlest held lines.
+ * Returns the keys in eviction order.
+ */
+export function linesToShed(entries, max) {
+  const live = entries.filter((e) => e.tickerId != null);
+  const out = [];
+  while (live.length - out.length > max) {
+    const victim = pickEvictable(
+      live.filter((e) => !out.includes(e.key)),
+      null,
+      true,
+    );
+    if (victim == null) break;
+    out.push(victim);
+  }
+  return out;
+}
+
+/**
  * Pick the evicted-but-wanted symbol to re-admit when a line frees: held keys
  * first, then the NEWEST lastAccessAt (hottest) within the tier, so a pending
  * held position wins the freed slot over any amount of chain demand.
