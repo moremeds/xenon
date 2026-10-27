@@ -14,8 +14,11 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, Optional
 
 logger = logging.getLogger("xenon.ib_pool")
@@ -24,6 +27,8 @@ from xenon.clients.ib_client import (
     DEFAULT_GATEWAY_PORT,
     DEFAULT_HOST,
     POOL_ROLES,
+    READINESS_LOST,
+    READINESS_READY,
     READINESS_UNKNOWN,
     IBClient,
     client_id_base,
@@ -32,6 +37,96 @@ from xenon.clients.ib_client import (
 
 # The role that owns every order action (PR-10).
 ORDERS_ROLE = "orders"
+
+# The quote / qualify role. A job on it that its caller abandoned while it
+# runs fences the role until the job returns (see ``IBPool.run_sync``).
+DATA_ROLE = "data"
+_FENCED_ROLES = frozenset({DATA_ROLE})
+
+# Deadline for one request-path quote / qualify call on the data role
+# (lock wait + reconnect + IB work), incident 2026-10-26.
+DEFAULT_IB_QUOTE_TIMEOUT_S = 10.0
+# get_quote(snapshot=True) waits this long after reqMktData; the in-thread
+# request bound leaves room for it inside the deadline.
+_SNAPSHOT_WAIT_S = 2.0
+_MIN_REQUEST_TIMEOUT_S = 0.5
+
+
+class IBDataTimeout(ConnectionError):
+    """A data-role call did not finish within ``XENON_IB_QUOTE_TIMEOUT_S``."""
+
+
+class IBUpstreamLost(ConnectionError):
+    """The gateway reported 1100 / 2110: socket open, IB servers unreachable."""
+
+
+class IBRoleFenced(ConnectionError):
+    """An abandoned job still runs on the role's worker; refused at once."""
+
+
+def ib_quote_timeout_s() -> float:
+    """``XENON_IB_QUOTE_TIMEOUT_S`` (default 10); invalid / non-positive → default."""
+    raw = os.environ.get("XENON_IB_QUOTE_TIMEOUT_S", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_IB_QUOTE_TIMEOUT_S
+    return value if value > 0 else DEFAULT_IB_QUOTE_TIMEOUT_S
+
+
+def data_deadline() -> float:
+    """Monotonic deadline ``XENON_IB_QUOTE_TIMEOUT_S`` from now (for ``bounded_data_job``)."""
+    return time.monotonic() + ib_quote_timeout_s()
+
+
+def bounded_data_job(deadline_at: float, fn: Callable[..., Any], client: Any, *args: Any) -> Any:
+    """Worker side of ``call_data_bounded``: refuse on a lost upstream, then
+    run ``fn`` with every blocking ib_async request bounded by the time left.
+
+    ``IB.RequestTimeout`` bounds each sync wrapper (qualifyContracts,
+    reqContractDetails, ...) so the worker thread frees itself even when the
+    gateway never answers. It is set only for this job and restored after:
+    the role's single worker never runs two jobs on the client at once.
+    """
+    pump = getattr(client, "pump_events", None)
+    if callable(pump):
+        pump()
+    if getattr(client, "broker_readiness", None) == READINESS_LOST:
+        code = getattr(client, "readiness_code", None)
+        raise IBUpstreamLost(f"IB Gateway is not connected to IB servers (code {code})")
+    remaining = deadline_at - time.monotonic()
+    if remaining <= 0:
+        raise IBDataTimeout("IB data call deadline passed before it started")
+    ib = getattr(client, "ib", None)
+    previous = getattr(ib, "RequestTimeout", None)
+    if ib is not None:
+        ib.RequestTimeout = max(_MIN_REQUEST_TIMEOUT_S, remaining - _SNAPSHOT_WAIT_S)
+    try:
+        return fn(client, *args)
+    except asyncio.TimeoutError as exc:
+        raise IBDataTimeout(f"IB did not answer within {remaining:.1f}s") from exc
+    finally:
+        if ib is not None:
+            ib.RequestTimeout = previous
+
+
+async def call_data_bounded(pool: Any, fn: Callable[..., Any], *args: Any, timeout: Optional[float] = None) -> Any:
+    """Run ``fn(client, *args)`` on the data role within one deadline.
+
+    The deadline covers the lock wait, any reconnect and the IB work. Raises
+    ``IBDataTimeout`` past it, ``IBUpstreamLost`` at once when the data
+    connection reports 1100 / 2110, ``IBRoleFenced`` while an abandoned job
+    still runs, ``ConnectionError`` when the role is down. Never leaves the
+    role lock held; an abandoned running job fences the role (``run_sync``).
+    """
+    timeout = ib_quote_timeout_s() if timeout is None else timeout
+    deadline_at = time.monotonic() + timeout
+    try:
+        async with asyncio.timeout(timeout):
+            async with pool.acquire(DATA_ROLE) as client:
+                return await pool.run_sync(DATA_ROLE, bounded_data_job, deadline_at, fn, client, *args)
+    except TimeoutError as exc:
+        raise IBDataTimeout(f"IB data call did not finish within {timeout:g}s") from exc
 
 # Database names that identify the production stack. Base 0 (the prod clientId
 # block) belongs to the prod DB only; every other DB must use another base.
@@ -184,6 +279,8 @@ class IBPool:
         # caller ever needs one (Astra T5 R2-1/R3-1/R4-1 races).
         self._closing = False
         self._close_lock = threading.Lock()
+        # Abandoned-but-running job per fenced role (incident 2026-10-26).
+        self._fences: Dict[str, Future] = {}
 
         for role in POOL_ROLES:
             self._locks[role] = asyncio.Lock()
@@ -416,11 +513,62 @@ class IBPool:
         """
         if role not in POOL_ROLES:
             raise ValueError(f"Unknown pool role: {role}. Valid: {list(POOL_ROLES.keys())}")
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            self._role_executors[role],
-            functools.partial(fn, *args, **kwargs),
-        )
+        job = self._role_executors[role].submit(functools.partial(fn, *args, **kwargs))
+        try:
+            return await asyncio.wrap_future(job)
+        except asyncio.CancelledError:
+            # A queued job never starts. A job already running on a fenced
+            # role keeps the client until it returns: fence the role so later
+            # callers fail fast instead of queueing behind it.
+            if not job.cancel() and role in _FENCED_ROLES and not job.done():
+                self._fence(role, job)
+            raise
+
+    def _fence(self, role: str, job: Future) -> None:
+        self._fences[role] = job
+        logger.warning("IB pool: %s fenced — an abandoned job still runs on its worker", role)
+
+        def _clear(done: Future) -> None:
+            if self._fences.get(role) is done:
+                self._fences.pop(role, None)
+                logger.info("IB pool: %s fence cleared — the abandoned job returned", role)
+
+        job.add_done_callback(_clear)
+
+    def is_fenced(self, role: str) -> bool:
+        """True while an abandoned job still runs on the role's worker."""
+        job = self._fences.get(role)
+        return job is not None and not job.done()
+
+    def upstream_status(self) -> dict:
+        """Gateway ↔ IB servers state seen by the pool connections.
+
+        ``lost`` when any connected role last saw 1100 / 2110, ``connected``
+        when a role is ready (round trip or 1102) and none is lost, else
+        ``unknown``. A role only sees an event once its loop runs again, so
+        the value can lag (module notes in ``ib_client``).
+        """
+        clients = [c for r, c in list(self._clients.items()) if self.is_connected(r)]
+        by_state: Dict[str, list] = {}
+        for c in clients:
+            by_state.setdefault(getattr(c, "broker_readiness", READINESS_UNKNOWN), []).append(c)
+        if by_state.get(READINESS_LOST):
+            state, group = "lost", by_state[READINESS_LOST]
+        elif by_state.get(READINESS_READY):
+            state, group = "connected", by_state[READINESS_READY]
+        else:
+            state, group = "unknown", clients
+        sinces = [s for s in (getattr(c, "readiness_since", None) for c in group) if isinstance(s, (int, float))]
+        codes = [
+            (getattr(c, "readiness_since", 0) or 0, getattr(c, "readiness_code", None))
+            for c in group
+            if isinstance(getattr(c, "readiness_code", None), int)
+        ]
+        return {
+            "state": state,
+            "since": datetime.fromtimestamp(min(sinces), timezone.utc).isoformat() if sinces else None,
+            "last_code": max(codes)[1] if codes else None,
+        }
 
     def broker_readiness(self, role: str) -> str:
         """Broker readiness of a role's connection (A4), separate from the socket.
@@ -440,6 +588,7 @@ class IBPool:
                 "connected": self.is_connected(role),
                 "broker_readiness": self.broker_readiness(role),
                 "client_id": pool_client_id(role),
+                "fenced": self.is_fenced(role),
             }
             for role in POOL_ROLES
         }
@@ -453,22 +602,32 @@ class _PoolContext:
         self._role = role
 
     async def __aenter__(self) -> IBClient:
-        await self._pool._locks[self._role].acquire()
+        if self._pool.is_fenced(self._role):
+            raise IBRoleFenced(f"IB pool: {self._role} is busy with an abandoned call")
+        lock = self._pool._locks[self._role]
+        await lock.acquire()
+        try:
+            return await self._enter_locked()
+        except BaseException:
+            # Includes CancelledError (a caller deadline during a reconnect):
+            # the lock must never outlive the caller.
+            lock.release()
+            raise
 
+    async def _enter_locked(self) -> IBClient:
+        if self._pool.is_fenced(self._role):
+            raise IBRoleFenced(f"IB pool: {self._role} is busy with an abandoned call")
         # Auto-reconnect if connection dropped — never for ``orders``: only
         # the order owner's supervisor replaces that connection (A2).
         if not self._pool.is_connected(self._role):
             if self._role == ORDERS_ROLE:
-                self._pool._locks[self._role].release()
                 raise ConnectionError(f"IB pool: {self._role} is not connected")
             reconnected = await self._pool._reconnect(self._role)
             if not reconnected:
-                self._pool._locks[self._role].release()
                 raise ConnectionError(f"IB pool: {self._role} is not connected")
 
         client = self._pool.get(self._role)
         if client is None:
-            self._pool._locks[self._role].release()
             raise ConnectionError(f"IB pool: {self._role} has no client")
 
         return client

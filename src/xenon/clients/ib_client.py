@@ -359,6 +359,10 @@ class IBClient:
         self._pool_role: Optional[str] = None
         self._readiness: str = READINESS_UNKNOWN
         self._readiness_generation: int = 0
+        # Last readiness event code (1100/1101/1102/2110) and the wall time
+        # the current readiness state began — reported by /health.
+        self._readiness_code: Optional[int] = None
+        self._readiness_since: float = time.time()
 
         # Wire up error callback
         self._ib.errorEvent += self._on_error
@@ -843,10 +847,28 @@ class IBClient:
         """``unknown`` / ``ready`` / ``lost`` — see the module notes (A4)."""
         return self._readiness
 
+    @property
+    def readiness_code(self) -> Optional[int]:
+        """Last readiness event code seen on this connection, or None."""
+        return self._readiness_code
+
+    @property
+    def readiness_since(self) -> float:
+        """Wall time (epoch seconds) the current readiness state began."""
+        return self._readiness_since
+
+    def pump_events(self) -> None:
+        """Run this connection's event loop once so buffered messages
+        (1100 / 1102 / 2110) reach ``_on_error`` before a readiness check.
+        Runs on the caller's thread — pool callers use the role executor."""
+        if self.is_connected():
+            self._ib.sleep(0)
+
     def _set_readiness(self, state: str) -> None:
         self._readiness_generation += 1
         if state != self._readiness:
             self.logger.info("IB broker readiness %s -> %s", self._readiness, state)
+            self._readiness_since = time.time()
         self._readiness = state
 
     def _reset_readiness(self) -> None:
@@ -854,6 +876,7 @@ class IBClient:
         self._set_readiness(READINESS_UNKNOWN)
 
     def _apply_readiness_event(self, code: int) -> None:
+        self._readiness_code = code
         if code in _READINESS_LOST_CODES:
             self._set_readiness(READINESS_LOST)
         elif code == _READINESS_RESTORED_CODE:
