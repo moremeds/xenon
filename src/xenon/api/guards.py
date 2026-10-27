@@ -126,7 +126,7 @@ _PAUSED_KINDS = frozenset(
         "wizard protect",
     }
 )
-ORDERS_PAUSED = "ORDERS_PAUSED"
+ORDERS_PAUSED = ReasonCode.ORDERS_PAUSED.value
 
 
 def orders_paused_403() -> JSONResponse:

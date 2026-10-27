@@ -6,7 +6,10 @@ import { isWriterStale, NON_WRITER_SERVICES } from "@/lib/serviceHealthWindows";
 import type { FlexTokenInfo, OperatorData } from "@/lib/operatorTypes";
 import { useMarketHours } from "@/lib/useMarketHours";
 
+import type { ToastType } from "@/lib/useToast";
+
 import { BrokersCard } from "./BrokersCard";
+import RuntimeSettingsPanel from "./RuntimeSettingsPanel";
 import { ReliabilityRollupHeader } from "./ReliabilityRollupHeader";
 import { SignalTile, type SignalTone } from "./SignalTile";
 import { UwQuotaTile } from "./UwQuotaTile";
@@ -33,7 +36,13 @@ function flexTokenTile(ft: FlexTokenInfo | undefined): {
   return { value: `${ft.days_remaining}d`, sub, tone };
 }
 
-export default function OperatorConsole() {
+const noToast = () => {};
+
+export default function OperatorConsole({
+  onToast = noToast,
+}: {
+  onToast?: (type: ToastType, message: string) => void;
+} = {}) {
   const market = useMarketHours();
   const [data, setData] = useState<OperatorData | null>(null);
   const [fetchedAt, setFetchedAt] = useState<number | null>(null);
@@ -158,6 +167,7 @@ export default function OperatorConsole() {
         <UwQuotaTile market={market} />
       </div>
       <WriterFreshnessTable writers={writers} market={market} />
+      <RuntimeSettingsPanel onToast={onToast} />
     </div>
   );
 }

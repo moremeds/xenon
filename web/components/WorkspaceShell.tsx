@@ -584,7 +584,7 @@ export default function WorkspaceShell({
             />
           ) : null}
 
-          {activeSection === "operator" ? <OperatorConsole /> : null}
+          {activeSection === "operator" ? <OperatorConsole onToast={addToast} /> : null}
 
           {activeSection !== "dashboard" &&
           activeSection !== "ticker-detail" &&
