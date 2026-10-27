@@ -62,8 +62,24 @@ function listen(server) {
   return new Promise((r) => server.listen(0, "127.0.0.1", r));
 }
 
+// Boots the stack, retrying startup when the relay child loses the
+// reserve-then-release race on its ephemeral port (listen EADDRINUSE). Each
+// attempt cleans up after itself; the rejection carries `runtimeDir`, the dir
+// that attempt owned (already removed).
 export async function startStack(extraEnv = {}) {
+  const ATTEMPTS = 3;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await bootStack(extraEnv);
+    } catch (err) {
+      if (!err?.portInUse || attempt >= ATTEMPTS) throw err;
+    }
+  }
+}
+
+async function bootStack(extraEnv) {
   const { file: runtimeFile, cleanup: cleanupRuntime } = makeRuntimeFile();
+  const runtimeDir = path.dirname(runtimeFile);
   let relayStdout = "";
   let validator;
   let futuWss;
@@ -81,10 +97,18 @@ export async function startStack(extraEnv = {}) {
   };
 
   try {
-    const waitFor = (fn, { timeout = 4000, every = 25 } = {}) =>
+    // `signal` cancels the poll: the pending timer is cleared and the promise
+    // rejects, so a losing race leg leaves no timeout behind.
+    const waitFor = (fn, { timeout = 4000, every = 25, signal } = {}) =>
       new Promise((resolve, reject) => {
         const deadline = Date.now() + timeout;
+        let timer;
+        signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new Error("waitFor aborted"));
+        });
         const poll = () => {
+          if (signal?.aborted) return;
           try {
             const v = fn();
             if (v) {
@@ -101,7 +125,7 @@ export async function startStack(extraEnv = {}) {
               ),
             );
           } else {
-            setTimeout(poll, every);
+            timer = setTimeout(poll, every);
           }
         };
         poll();
@@ -180,19 +204,27 @@ export async function startStack(extraEnv = {}) {
     relay.stderr.on("data", (d) => (relayStdout += d));
     // Reject at once if the relay exits before it listens (bad env, crash).
     const exited = new Promise((_, reject) =>
-      relay.once("exit", (code, signal) =>
-        reject(
-          new Error(
-            `relay exited before listening (code=${code} signal=${signal})\nrelay tail: ${relayStdout.slice(-1500)}`,
-          ),
-        ),
-      ),
+      relay.once("exit", (code, signal) => {
+        const err = new Error(
+          `relay exited before listening (code=${code} signal=${signal})\nrelay tail: ${relayStdout.slice(-1500)}`,
+        );
+        err.portInUse = relayStdout.includes("EADDRINUSE");
+        reject(err);
+      }),
     );
     exited.catch(() => {}); // no unhandled rejection after startup succeeds
-    await Promise.race([
-      waitFor(() => relayStdout.includes("listening"), { timeout: 8000 }),
-      exited,
-    ]);
+    const readyAbort = new AbortController();
+    try {
+      await Promise.race([
+        waitFor(() => relayStdout.includes("listening"), {
+          timeout: 8000,
+          signal: readyAbort.signal,
+        }),
+        exited,
+      ]);
+    } finally {
+      readyAbort.abort(); // cancel the losing poll leg
+    }
     await waitFor(() => futuSock?.readyState === WebSocket.OPEN);
 
     const connect = ({ apiKey, ticket, quotes, origin } = {}) => {
@@ -267,6 +299,7 @@ export async function startStack(extraEnv = {}) {
     };
   } catch (err) {
     close();
+    err.runtimeDir = runtimeDir;
     throw err;
   }
 }

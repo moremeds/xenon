@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import {
   API_KEY,
   HD,
@@ -167,20 +166,17 @@ test("parent-exported routing flags do not leak into the spawned relay", async (
   opted.close();
 });
 
-test("startStack cleans up its tmp dir when the relay fails to start", async () => {
-  const dirs = () =>
-    fs
-      .readdirSync(os.tmpdir())
-      .filter((n) => n.startsWith("xenon-relay-test-"));
-  const before = new Set(dirs());
+test("startStack cleans up its own tmp dir when the relay fails to start", async () => {
   // An invalid client-id base makes the relay exit(2) before it listens.
-  await assert.rejects(
-    startStack({ XENON_IB_CLIENT_ID_BASE: "invalid" }),
-    /relay exited before listening/,
+  const err = await startStack({ XENON_IB_CLIENT_ID_BASE: "invalid" }).then(
+    () => assert.fail("startStack should reject"),
+    (e) => e,
   );
-  assert.deepEqual(
-    dirs().filter((n) => !before.has(n)),
-    [],
+  assert.match(err.message, /relay exited before listening/);
+  assert.ok(err.runtimeDir, "rejection must name the dir the stack owned");
+  assert.equal(
+    fs.existsSync(err.runtimeDir),
+    false,
     "failed startStack leaked its runtime dir",
   );
 });
