@@ -10,11 +10,14 @@ Rules (docs/architecture/futu-quotes.md):
 - The whole quote is dropped only when ``last`` or the timestamp is invalid.
 - A per-symbol high-water mark drops quotes older than the last one
   forwarded; the mark resets when the symbol is unsubscribed.
-- US overnight session (``overnight_row_to_pricedata``): ``last`` /
-  ``high`` / ``low`` / ``volume`` come from the ``overnight_*`` fields,
-  ``close`` is the RTH ``last_price``, ``open`` is null and ``timestamp`` is
-  the receipt time (Futu carries no overnight time). The row is dropped when
-  ``overnight_price`` or ``overnight_volume`` is missing, non-finite or ≤ 0.
+- US extended sessions (``extended_row_to_pricedata``: pre-market,
+  after-hours, overnight): ``last`` / ``high`` / ``low`` / ``volume`` come
+  from the session's ``pre_*`` / ``after_*`` / ``overnight_*`` fields,
+  ``close`` is the previous session day's close (``last_price`` pre-market
+  and overnight, ``prev_close_price`` after-hours, when ``last_price`` is
+  already today's close), ``open`` is null and ``timestamp`` is the receipt
+  time (Futu carries no extended-session time). The row is dropped when the
+  session price or volume is missing, non-finite or ≤ 0.
 """
 
 from __future__ import annotations
@@ -183,19 +186,28 @@ def row_to_pricedata(ticker: str, row: Mapping[str, Any]) -> Optional[tuple[dict
     return pd, ts
 
 
-def overnight_row_to_pricedata(
-    ticker: str, row: Mapping[str, Any], received_at: datetime
+# Extended session → (field prefix, field holding the previous day's close).
+_EXTENDED_FIELDS = {
+    "pre": ("pre", "last_price"),
+    "after": ("after", "prev_close_price"),
+    "overnight": ("overnight", "last_price"),
+}
+
+
+def extended_row_to_pricedata(
+    ticker: str, row: Mapping[str, Any], received_at: datetime, session: str
 ) -> Optional[tuple[dict, datetime]]:
-    """Map one Futu QUOTE row in the US overnight session.
+    """Map one Futu QUOTE row in a US extended session (pre / after / overnight).
 
     ``received_at`` is the aware UTC receipt time; it is the timestamp
-    because the QUOTE push has no overnight time field (``data_date`` /
-    ``data_time`` still name the last RTH quote). Returns ``None`` when
-    ``overnight_price`` or ``overnight_volume`` is missing, non-finite or
-    ≤ 0 (no overnight trade yet, e.g. a holiday night or a rolled row).
+    because the QUOTE push has no extended-session time field
+    (``data_date`` / ``data_time`` still name the last RTH quote). Returns
+    ``None`` when the session price or volume is missing, non-finite or
+    ≤ 0 (no trade in this session yet, e.g. a holiday or a rolled row).
     """
-    last = finite_or_none(row.get("overnight_price"))
-    volume = finite_or_none(row.get("overnight_volume"))
+    prefix, close_field = _EXTENDED_FIELDS[session]
+    last = finite_or_none(row.get(f"{prefix}_price"))
+    volume = finite_or_none(row.get(f"{prefix}_volume"))
     if last is None or last <= 0 or volume is None or volume <= 0:
         return None
     ts = received_at.astimezone(timezone.utc)
@@ -206,39 +218,41 @@ def overnight_row_to_pricedata(
         **_NULL_FIELDS,
     }
     pd["volume"] = int(volume) if volume.is_integer() else volume
-    pd["high"] = finite_or_none(row.get("overnight_high_price"))
-    pd["low"] = finite_or_none(row.get("overnight_low_price"))
+    pd["high"] = finite_or_none(row.get(f"{prefix}_high_price"))
+    pd["low"] = finite_or_none(row.get(f"{prefix}_low_price"))
     pd["open"] = None
-    pd["close"] = finite_or_none(row.get("last_price"))  # latest RTH close
+    pd["close"] = finite_or_none(row.get(close_field))
     pd["timestamp"] = ts.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
     pd["source"] = "futu"
-    pd["session"] = "overnight"
+    pd["session"] = session
     return pd, ts
 
 
-class OvernightBaseline:
-    """Per-symbol last ``(overnight_volume, overnight_price)`` seen.
+class ExtendedBaseline:
+    """Per-symbol last ``(volume, price)`` of the current extended session.
 
-    Callers pass only rows that ``overnight_row_to_pricedata`` accepts (a
-    real overnight trade: price and volume > 0). Overnight rows are stamped
-    with receipt time, so a cached push replayed after a subscribe would
-    look fresh. ``changed`` is True only when the pair differs from the last
-    pair seen for the symbol; the first row after a reset is the baseline
-    and returns False. ``seen`` (a baseline exists) gates overnight
-    readiness: until then the symbol stays ``pending/session`` on IB.
+    Callers pass only rows that ``extended_row_to_pricedata`` accepts (a
+    real trade in the session: price and volume > 0). Extended rows are
+    stamped with receipt time, so a cached push replayed after a subscribe
+    would look fresh. ``changed`` is True only when the pair differs from
+    the last pair seen for the symbol; the first row after a reset is the
+    baseline and returns False. ``seen`` (a baseline exists) gates
+    readiness: until then the symbol stays ``pending/session`` on IB. The
+    caller resets it at every session change.
 
     ponytail: ceiling — the first trade row after every reset is swallowed
     as the baseline, and an ``ok`` symbol publishes nothing until its next
-    overnight trade changes volume or price.
+    trade in the session changes volume or price.
     """
 
     def __init__(self) -> None:
         self._last: dict[str, tuple[Optional[float], Optional[float]]] = {}
 
-    def changed(self, symbol: str, row: Mapping[str, Any]) -> bool:
+    def changed(self, symbol: str, row: Mapping[str, Any], session: str) -> bool:
+        prefix = _EXTENDED_FIELDS[session][0]
         key = (
-            finite_or_none(row.get("overnight_volume")),
-            finite_or_none(row.get("overnight_price")),
+            finite_or_none(row.get(f"{prefix}_volume")),
+            finite_or_none(row.get(f"{prefix}_price")),
         )
         prev = self._last.get(symbol)
         self._last[symbol] = key

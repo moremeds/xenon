@@ -23,8 +23,8 @@ from scripts.tests.test_futu_quotes import (
 from xenon.futu_quotes.admission import us_session
 from xenon.futu_quotes.quote_map import (
     ET,
-    OvernightBaseline,
-    overnight_row_to_pricedata,
+    ExtendedBaseline,
+    extended_row_to_pricedata,
     row_to_pricedata,
 )
 
@@ -94,7 +94,7 @@ def test_session_rule_overnight_state_and_unknown():
     in_window = et(2026, 10, 25, 21, 0)
     assert us_session("OVERNIGHT", sat_noon) == "overnight"
     assert us_session("overnight", in_window) == "overnight"
-    for state in ("BOGUS", None, "", "CLOSED", "PRE_MARKET_BEGIN", "AFTER_HOURS_BEGIN"):
+    for state in ("BOGUS", None, "", "CLOSED", "PRE_MARKET_END"):
         assert us_session(state, in_window) is None, state
 
 
@@ -127,7 +127,7 @@ def _on_row(code: str = "US.SPY", **kw) -> dict:
 
 
 def test_overnight_row_maps_overnight_fields():
-    pd, ts = overnight_row_to_pricedata("SPY", _on_row(), NOW)  # type: ignore[misc]
+    pd, ts = extended_row_to_pricedata("SPY", _on_row(), NOW, "overnight")  # type: ignore[misc]
     assert ts == NOW
     assert pd["last"] == 761.08
     assert pd["volume"] == 17485
@@ -145,18 +145,18 @@ def test_overnight_row_maps_overnight_fields():
 @pytest.mark.parametrize("bad", [None, "N/A", "NaN", float("nan"), float("inf"), 0, -1.0])
 def test_overnight_row_without_price_dropped(bad):
     row = _on_row(overnight_price=bad)
-    assert overnight_row_to_pricedata("SPY", row, NOW) is None
+    assert extended_row_to_pricedata("SPY", row, NOW, "overnight") is None
     row.pop("overnight_price")
-    assert overnight_row_to_pricedata("SPY", row, NOW) is None
+    assert extended_row_to_pricedata("SPY", row, NOW, "overnight") is None
 
 
 @pytest.mark.parametrize("bad", [None, "N/A", float("nan"), 0, -5])
 def test_overnight_row_without_volume_dropped(bad):
     """A rolled or empty row (volume missing or ≤ 0) is not a trade."""
     row = _on_row(overnight_volume=bad)
-    assert overnight_row_to_pricedata("SPY", row, NOW) is None
+    assert extended_row_to_pricedata("SPY", row, NOW, "overnight") is None
     row.pop("overnight_volume")
-    assert overnight_row_to_pricedata("SPY", row, NOW) is None
+    assert extended_row_to_pricedata("SPY", row, NOW, "overnight") is None
 
 
 def test_rth_mapping_ignores_overnight_fields():
@@ -176,16 +176,16 @@ def test_rth_mapping_ignores_overnight_fields():
 
 
 def test_baseline_first_row_unchanged_changed_reset():
-    b = OvernightBaseline()
-    assert not b.changed("SPY", _on_row())  # first row: baseline
-    assert not b.changed("SPY", _on_row())  # unchanged
-    assert b.changed("SPY", _on_row(overnight_volume=18132))  # new trade
-    assert not b.changed("SPY", _on_row(overnight_volume=18132))
-    assert b.changed("SPY", _on_row(overnight_volume=18132, overnight_price=761.25))
+    b = ExtendedBaseline()
+    assert not b.changed("SPY", _on_row(), "overnight")  # first row: baseline
+    assert not b.changed("SPY", _on_row(), "overnight")  # unchanged
+    assert b.changed("SPY", _on_row(overnight_volume=18132), "overnight")  # new trade
+    assert not b.changed("SPY", _on_row(overnight_volume=18132), "overnight")
+    assert b.changed("SPY", _on_row(overnight_volume=18132, overnight_price=761.25), "overnight")
     b.reset("SPY")
-    assert not b.changed("SPY", _on_row(overnight_volume=1))  # baseline again
+    assert not b.changed("SPY", _on_row(overnight_volume=1), "overnight")  # baseline again
     b.reset_all()
-    assert not b.changed("SPY", _on_row(overnight_volume=2))
+    assert not b.changed("SPY", _on_row(overnight_volume=2), "overnight")
 
 
 # ---------------------------------------------------------------------------
@@ -444,4 +444,89 @@ async def test_session_kind_flip_drops_buffered_row():
     assert svc.admission.is_ok("SPY")
     clock.advance(0.11)
     await svc.flush_now()
+    assert ws.frames("batch") == []
+
+
+# ---------------------------------------------------------------------------
+# pre-market / after-hours (same receipt-time rules, own fields and close)
+# ---------------------------------------------------------------------------
+
+
+def test_session_rule_pre_and_after_states():
+    assert us_session("PRE_MARKET_BEGIN", et(2026, 10, 27, 5, 0)) == "pre"
+    assert us_session("AFTER_HOURS_BEGIN", et(2026, 10, 27, 17, 0)) == "after"
+
+
+def _ext_row(**kw) -> dict:
+    """Day D after-hours shape: last_price = D close, prev_close = D-1 close (prices synthetic)."""
+    row = _on_row(
+        overnight_price=None,
+        overnight_volume=None,
+        pre_price=758.2,
+        pre_volume=900,
+        pre_high_price=758.9,
+        pre_low_price=757.1,
+        after_price=760.9,
+        after_volume=4200,
+        after_high_price=761.2,
+        after_low_price=760.1,
+    )
+    row.update(kw)
+    return row
+
+
+def test_pre_row_maps_pre_fields_close_is_last_price():
+    pd, _ = extended_row_to_pricedata("SPY", _ext_row(), NOW, "pre")  # type: ignore[misc]
+    assert (pd["last"], pd["volume"], pd["high"], pd["low"]) == (758.2, 900, 758.9, 757.1)
+    assert pd["close"] == 760.5  # previous day's close = last_price before the open
+    assert pd["session"] == "pre"
+
+
+def test_after_row_maps_after_fields_close_is_prev_close():
+    pd, _ = extended_row_to_pricedata("SPY", _ext_row(), NOW, "after")  # type: ignore[misc]
+    assert (pd["last"], pd["volume"], pd["high"], pd["low"]) == (760.9, 4200, 761.2, 760.1)
+    assert pd["close"] == 757.0  # last_price is already today's close
+    assert pd["session"] == "after"
+    assert pd["bid"] is None and pd["ask"] is None
+
+
+def test_extended_row_without_session_trade_dropped():
+    assert extended_row_to_pricedata("SPY", _ext_row(after_volume=0), NOW, "after") is None
+    assert extended_row_to_pricedata("SPY", _ext_row(pre_price="N/A"), NOW, "pre") is None
+
+
+@pytest.mark.asyncio
+async def test_after_hours_baseline_then_published_then_overnight_rebaselines():
+    """RTH → after-hours: SPY waits for an after-hours trade row (baseline,
+    not published), then a changed row publishes with session "after";
+    at 20:00 the overnight session starts from a fresh baseline."""
+    clock, wall = Clock(1000.0), Wall(et(2026, 10, 27, 16, 5))
+    fake = FakeOpenD(snapshots=SNAPS, market_us="AFTER_HOURS_BEGIN")
+    svc, ws = await _overnight_service(clock, wall, fake)
+    assert svc.session == "after"
+    assert _pending(ws) == SESSION_PENDING
+
+    await _push_flush(svc, fake, clock, _ext_row())  # baseline: ok, not published
+    assert ws.last("assign")["ok"] == ["SPY"]
+    assert ws.frames("batch") == []
+
+    await _push_flush(svc, fake, clock, _ext_row(after_volume=4300, after_price=761.0))
+    pd = ws.frames("batch")[-1]["updates"]["SPY"]
+    assert (pd["last"], pd["session"], pd["close"]) == (761.0, "after", 757.0)
+
+    wall.dt = et(2026, 10, 27, 20, 1)
+    fake.market_us = AHE
+    await svc.poll_session_once()
+    await svc.drain()
+    assert svc.session == "overnight"
+    assert _pending(ws) == SESSION_PENDING  # new session: needs its own trade row
+
+
+@pytest.mark.asyncio
+async def test_pre_market_option_rows_not_published():
+    clock, wall = Clock(1000.0), Wall(et(2026, 10, 27, 8, 0))
+    fake = FakeOpenD(snapshots=SNAPS, market_us="PRE_MARKET_BEGIN")
+    svc, ws = await _overnight_service(clock, wall, fake)
+    await _push_flush(svc, fake, clock, _ext_row(code="US.SPY261030C770000"))
+    await _push_flush(svc, fake, clock, _ext_row(code="US.SPY261030C770000", pre_volume=950))
     assert ws.frames("batch") == []

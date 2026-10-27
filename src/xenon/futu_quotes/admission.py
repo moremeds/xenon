@@ -42,6 +42,8 @@ PENDING_REASONS = ("subscribing", "session", "opend_down", "backoff")
 REJECTED_REASONS = ("quota", "unknown_symbol", "not_supported", "provider_error")
 
 _RTH_US_STATES = frozenset({"MORNING", "AFTERNOON"})
+# Extended sessions: rows carry last only from the session's own fields.
+EXTENDED_SESSIONS = frozenset({"pre", "after", "overnight"})
 # Blue Ocean overnight: starts Sun-Thu 20:00 ET, ends next day 03:50 ET.
 # Live OpenD (SDK 10.03) reports AFTER_HOURS_END in that window, not OVERNIGHT.
 _OVERNIGHT_START = dtime(20, 0)
@@ -54,13 +56,18 @@ _DEFINITE_SUB_REJECTIONS = frozenset({"quota", "unknown_symbol", "not_supported"
 def us_session(market_us: Any, now_utc: datetime) -> Optional[str]:
     """US session from ``get_global_state().market_us`` and the wall clock.
 
-    ``"rth"`` for MORNING/AFTERNOON; ``"overnight"`` for OVERNIGHT, or for
+    ``"rth"`` for MORNING/AFTERNOON; ``"pre"`` for PRE_MARKET_BEGIN;
+    ``"after"`` for AFTER_HOURS_BEGIN; ``"overnight"`` for OVERNIGHT, or for
     AFTER_HOURS_END while the ET clock is inside Sun-Thu 20:00 → next day
     03:50; ``None`` (closed) for everything else, including unknown states.
     """
     state = str(market_us or "").upper()
     if state in _RTH_US_STATES:
         return "rth"
+    if state == "PRE_MARKET_BEGIN":
+        return "pre"
+    if state == "AFTER_HOURS_BEGIN":
+        return "after"
     if state == "OVERNIGHT":
         return "overnight"
     if state == "AFTER_HOURS_END" and _in_overnight_window(now_utc):
@@ -249,10 +256,10 @@ class Admission:
         self.epoch = 0
         self.desired: list[str] = []
         self.session_open = False
-        # Overnight session only (else None): has the service seen a real
-        # overnight trade row for this symbol since the last baseline reset?
-        # A ready symbol is ``ok`` overnight only once this is True.
-        self.overnight_trade_seen: Optional[Callable[[str], bool]] = None
+        # Extended sessions only (else None): has the service seen a real
+        # trade row of this session for the symbol since the last baseline
+        # reset? A ready symbol is ``ok`` there only once this is True.
+        self.extended_trade_seen: Optional[Callable[[str], bool]] = None
         self.opend_connected = False
         self.symbols: dict[str, SymbolState] = {}
 
@@ -343,7 +350,7 @@ class Admission:
         self._bump_epoch()
         self.opend_connected = False
         self.session_open = False
-        self.overnight_trade_seen = None
+        self.extended_trade_seen = None
         self.provider_own_used = None
         self.provider_remain = None
         self.provider_all_used = None
@@ -534,7 +541,7 @@ class Admission:
                 # but the assign truth is "not routed" already.
                 rejected.append({"symbol": sym, "reason": "quota"})
             elif self.is_ready(st):
-                if self._overnight_unseen(sym):
+                if self._extended_unseen(sym):
                     pending.append({"symbol": sym, "reason": "session"})
                 else:
                     ok.append(sym)
@@ -764,11 +771,11 @@ class Admission:
             and self.session_open
             and symbol in self.desired
             and self.is_ready(self.state(symbol))
-            and not self._overnight_unseen(symbol)
+            and not self._extended_unseen(symbol)
         )
 
-    def _overnight_unseen(self, symbol: str) -> bool:
-        seen = self.overnight_trade_seen
+    def _extended_unseen(self, symbol: str) -> bool:
+        seen = self.extended_trade_seen
         return seen is not None and not seen(symbol)
 
 
