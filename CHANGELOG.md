@@ -5,8 +5,11 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.18.1] — 2026-10-27
+
 - **IB quote / qualify deadline (incident 2026-10-26).** Every request-path data-role quote and qualify call (`/orders/quote`, the place quote gate including Futu SIMULATE, Gate-4 leg meta, `/contract/qualify`, and the qualify step of historical bars and head-timestamp) now finishes or fails within `XENON_IB_QUOTE_TIMEOUT_S` (default 10 s): 503 with top-level `reason_code` `QUOTE_UNAVAILABLE`, and no order is sent. The IB request inside the worker is bounded too, so the worker frees itself. A call abandoned while it still runs fences the `data` role (fail fast, never two calls on one client) until it returns; `/health` `ib_pool.<role>.fenced`. The role lock is no longer leaked when a caller is cancelled during a reconnect, and a reconnect abandoned mid-connect fences the role until it registers (no second connect on the same clientId). Historical bars / head-timestamp put lock wait + reconnect + qualify under the deadline (the download keeps its own timeout); the Futu observation metadata resolver and the wizard risk-alert combo snapshot run with the same worker bound and upstream check.
 - **Gateway lost IB servers is visible (incident 2026-10-26).** `/health` `ib_gateway.upstream` = `{state: connected|lost|unknown, since, last_code}` from 1100 / 2110 / 1101 / 1102 on the pool connections (matched by code), and top-level `status: degraded` while it is lost (`orders_halted` still wins; HTTP stays 200). While the data connection reports lost, quote / qualify calls fail at once with 503 `IB_BROKER_DISCONNECTED`. The sidebar IB Gateway row shows `NO IB SERVERS` with the warning dot, and the last code and time.
+- **Relay tests are hermetic.** Relay test spawns no longer read the repo `.env` (`IB_REALTIME_NO_DOTENV=1`) or the parent env, target IB port 1 only, use a private temp dir per stack, and retry a lost ephemeral-port race.
 
 ## [0.18.0] — 2026-10-26
 
