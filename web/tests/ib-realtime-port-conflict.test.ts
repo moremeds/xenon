@@ -67,7 +67,7 @@ describe("ib realtime server startup", () => {
 
       const child = spawn(
         process.execPath,
-        [serverScript, "--port", String(port)],
+        [serverScript, "--port", String(port), "--ib-port", "1"],
         {
           cwd: projectRoot,
           // Hermetic: no parent env, no repo .env (IB_REALTIME_NO_DOTENV).

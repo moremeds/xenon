@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import {
   API_KEY,
   HD,
@@ -165,6 +167,24 @@ test("parent-exported routing flags do not leak into the spawned relay", async (
   opted.close();
 });
 
+test("startStack cleans up its tmp dir when the relay fails to start", async () => {
+  const dirs = () =>
+    fs
+      .readdirSync(os.tmpdir())
+      .filter((n) => n.startsWith("xenon-relay-test-"));
+  const before = new Set(dirs());
+  // An invalid client-id base makes the relay exit(2) before it listens.
+  await assert.rejects(
+    startStack({ XENON_IB_CLIENT_ID_BASE: "invalid" }),
+    /relay exited before listening/,
+  );
+  assert.deepEqual(
+    dirs().filter((n) => !before.has(n)),
+    [],
+    "failed startStack leaked its runtime dir",
+  );
+});
+
 // ─── XENON_FUTU_OPTIONS ──────────────────────────────────────────────────
 
 test("XENON_FUTU_OPTIONS=0 keeps option keys pinned to IB", async (t) => {
@@ -235,9 +255,7 @@ test("XENON_FUTU_OPTIONS=1 sends option keys in want and routes their ticks", as
   browser.send(JSON.stringify({ action: "subscribe", contracts: [OPTION] }));
 
   // The option key enters want like a stock symbol; every other pin holds.
-  await stack.waitFor(() =>
-    stack.wants.at(-1)?.symbols?.includes(OPTION_KEY),
-  );
+  await stack.waitFor(() => stack.wants.at(-1)?.symbols?.includes(OPTION_KEY));
   for (const w of stack.wants) {
     assert.ok(!w.symbols.includes("VIX"), "index leaked into want");
     assert.ok(!w.symbols.includes("USD.JPY"), "forex leaked into want");
