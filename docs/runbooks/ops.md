@@ -10,7 +10,7 @@ Two layers prevent log bloat in `logs/`:
 
 ## Change a runtime setting
 
-Runtime settings are DB overrides of some env knobs (registry: `src/xenon/runtime_settings.py`; rules: `src/xenon/api/CLAUDE.md` § Runtime settings). They apply without a restart, within about 5 s on the api.
+Runtime settings are DB overrides of some env knobs (registry: `src/xenon/runtime_settings.py`; rules: `src/xenon/api/CLAUDE.md` § Runtime settings). They apply without a restart: within about 5 s on the api, about 10 s on the realtime relay and futu-quotes (the relay pulls them from the api; check relay `/status` → `runtime_settings`). If the api is down the relay keeps its last values.
 
 1. Read the current state: `GET /admin/settings` (needs `X-Internal-Token`). Each key shows `env_value`, `db_value`, `effective`, `narrow_only` and `last_change`.
 2. Set an override: `PUT /admin/settings/<key>` with `{"value": <json>, "note": "<why>"}`. Safety keys accept only values inside the env value (403 `SETTING_WIDENS_ENV` otherwise). Turning `XENON_AUDIT_CANCEL` on, changing the `real` token of `XENON_FUTU_TRADING`, or changing `XENON_FUTU_TUPLES_LIVE` also needs `"confirm": "<key>"`.

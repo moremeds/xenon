@@ -51,7 +51,7 @@ import {
   applyAuthoritativeClose,
   selectCompletedBarClose,
 } from "./ib_tick_handler.js";
-import { pickEvictable, pickAdmittable } from "./line_budget.js";
+import { pickEvictable, pickAdmittable, linesToShed } from "./line_budget.js";
 import { LRUCache } from "../../lib/lru-cache.js";
 import { RateLimiter } from "../../lib/rate-limiter.js";
 import { createSubscriberRegistry } from "./subscriber_registry.js";
@@ -59,7 +59,12 @@ import { createLiveness } from "./liveness.js";
 import { createFutuRouting, FUTU_HOLD_DOWN_MS } from "./futu_routing.js";
 import { createFutuQuotesClient } from "./futu_quotes_client.js";
 import { recordMdType, resetMdType } from "./md_type.js";
-import { authorizeUpgrade } from "./ws_upgrade_auth.js";
+import { authorizeUpgrade, ticketValidateUrl } from "./ws_upgrade_auth.js";
+import {
+  createRuntimeSettings,
+  relayEnvValues,
+  settingsUrl,
+} from "./runtime_settings.js";
 import { resolveRelayClientIds } from "./client_id_zone.js";
 
 const DEFAULT_WS_PORT = 8765;
@@ -468,6 +473,7 @@ const httpServer = http.createServer((req, res) => {
         ttl_ms: SUBSCRIBER_TTL_MS,
         subscribers: subscriberRegistry.snapshot(now),
         anonymous_count: Math.max(0, clients.size - clientId.size),
+        runtime_settings: runtimeSettings?.status() ?? null,
       }),
     );
     return;
@@ -637,18 +643,22 @@ const liveness = createLiveness({
  * authenticated via X-API-Key may still opt into Futu-first with
  * ?quotes=futu-first (there is no ?quotes=ib). Enabled only when
  * FUTU_QUOTES_URL is set — unset means the relay behaves exactly as before
- * (no upstream socket, all routes "ib"). Both env flags are read once at
- * startup: a flip needs a relay restart and reaches existing sockets only on
- * reconnect.
+ * (no upstream socket, all routes "ib"). Both flags start from env and
+ * follow the runtime settings (DB override pulled from the api,
+ * applyRuntimeSettings) live: a default flip re-routes every connected
+ * client that did not opt in itself; an options flip re-pins or unpins
+ * every subscribed option key; reconcileFutuRoutes runs either way.
  */
 const FUTU_QUOTES_URL = process.env.FUTU_QUOTES_URL || "";
 const FUTU_RECONCILE_MS = Number(process.env.FUTU_RECONCILE_MS) || 5_000;
-const XENON_QUOTES_DEFAULT =
-  process.env.XENON_QUOTES_DEFAULT === "futu-first" ? "futu-first" : "ib";
+const RELAY_ENV = relayEnvValues();
+let XENON_QUOTES_DEFAULT = RELAY_ENV.XENON_QUOTES_DEFAULT;
 // XENON_FUTU_OPTIONS=1 lets option contract keys route to Futu like stocks
 // (they enter `want`); 0/unset keeps them pinned to IB. Indexes, forex and
 // non-US native venues stay pinned either way.
-const XENON_FUTU_OPTIONS = process.env.XENON_FUTU_OPTIONS === "1";
+let XENON_FUTU_OPTIONS = RELAY_ENV.XENON_FUTU_OPTIONS;
+const optionRouteKeys = new Set(); // option keys ever subscribed (re-pin on flip)
+const explicitFutuFirst = new Set(); // api-key clients that asked ?quotes=futu-first
 const futuRouting = createFutuRouting({
   holdDownMs: Number(process.env.FUTU_HOLD_DOWN_MS) || FUTU_HOLD_DOWN_MS,
 });
@@ -656,6 +666,7 @@ const clientAuth = new Map(); // ws -> "api-key" | "ticket" (authorizeUpgrade)
 const clientRoutes = new Map(); // ws -> Map<symbol, "futu"|"ib">
 let futuClient = null;
 let futuReconcileTimer = null;
+let runtimeSettings = null; // runtime settings poller (started after the Futu client)
 // Required shared secret for GET /status — the api service sends it as
 // `X-Status-Token` (constant-time compare, no loopback exception). When empty
 // /status answers 403 to everyone; dev.sh exports an ephemeral token per
@@ -1097,6 +1108,7 @@ function disconnectClient(client) {
   disconnectClientFromDepth(client);
   clientAuth.delete(client);
   futuRouting.removeClient(client);
+  explicitFutuFirst.delete(client);
   clientRoutes.delete(client);
   const clientSet = clientSymbols.get(client);
   if (!clientSet) {
@@ -1541,7 +1553,7 @@ async function handleSnapshotRequest(client, symbols) {
 // budget → error 101, or a no-security-def / not-subscribed drop) or hasn't
 // produced a real value change within STALE_TICK_MS. Lets consumers distinguish
 // a live tick from a held cache instead of trusting the (now honest) timestamp.
-const STALE_TICK_MS = Number(process.env.IB_REALTIME_STALE_TICK_MS) || 60_000;
+let STALE_TICK_MS = RELAY_ENV.IB_REALTIME_STALE_TICK_MS; // runtime setting: next computation
 function computeStale(state) {
   if (!state) return true;
   if (state.tickerId == null) return true; // no active IB market-data line
@@ -1580,10 +1592,10 @@ function futuStale(data, now) {
  */
 // Default 85, not the full ~100: leave headroom for L2 depth/tape tickets (up to
 // MAX_CONCURRENT_DEPTH×2) and transient snapshot lines, which also draw the cap.
-const MAX_CONCURRENT_LINES = Math.max(
-  10,
-  Number(process.env.IB_REALTIME_MAX_LINES) || 85,
-); // floor guards against a misconfigured/negative env evicting every line
+// Floor 10 guards against a misconfigured/negative env evicting every line.
+// Runtime setting: a shrink evicts at once (linesToShed: view first, then the
+// idlest held), a grow fills free slots (applyRuntimeSettings).
+let MAX_CONCURRENT_LINES = RELAY_ENV.IB_REALTIME_MAX_LINES;
 
 function activeLineCount() {
   let n = 0;
@@ -2250,6 +2262,7 @@ async function handleClientMessage(client, data) {
       for (const c of contracts) {
         const key = optionKey(c);
         // Options stay on IB unless XENON_FUTU_OPTIONS=1.
+        optionRouteKeys.add(key);
         if (!XENON_FUTU_OPTIONS) futuRouting.pinIbOnly(key);
         subscribeClientToSymbol(client, key, c.tier);
         const ibContract = optionContract(
@@ -2809,12 +2822,10 @@ wss.on("connection", (client, req) => {
   // ?quotes=futu-first is honoured only for X-API-Key-authenticated upgrades.
   // Every other connection takes the XENON_QUOTES_DEFAULT route (ib unless
   // the env flips it) — there is no ?quotes=ib opt-out either.
-  futuRouting.setPref(
-    client,
-    clientAuth.get(client) === "api-key" && quotesParam === "futu-first"
-      ? "futu-first"
-      : XENON_QUOTES_DEFAULT,
-  );
+  const explicit =
+    clientAuth.get(client) === "api-key" && quotesParam === "futu-first";
+  if (explicit) explicitFutuFirst.add(client);
+  futuRouting.setPref(client, explicit ? "futu-first" : XENON_QUOTES_DEFAULT);
   if (subId) {
     clientId.set(client, subId);
     subscriberRegistry.onConnect(subId, Date.now());
@@ -2923,6 +2934,58 @@ if (FUTU_QUOTES_URL) {
   });
   futuClient.start();
 }
+
+/* ─── Runtime settings (DB overrides via the api) ──────────────────────────
+ * Pulled every 10 s from GET /admin/settings on the api origin of
+ * TICKET_VALIDATE_URL with X-Internal-Token (runtime_settings.js). The api
+ * unreachable → the last effective values stay (start: env). futu-quotes
+ * keys are forwarded in a `config` frame; the relay keys apply live here.
+ */
+function shedLines() {
+  for (const key of linesToShed(lineEntries(), MAX_CONCURRENT_LINES)) {
+    evictLine(key);
+  }
+}
+
+function applyRuntimeSettings(eff, prev) {
+  STALE_TICK_MS = eff.IB_REALTIME_STALE_TICK_MS;
+  if (eff.IB_REALTIME_MAX_LINES !== prev.IB_REALTIME_MAX_LINES) {
+    MAX_CONCURRENT_LINES = eff.IB_REALTIME_MAX_LINES;
+    if (MAX_CONCURRENT_LINES < prev.IB_REALTIME_MAX_LINES) shedLines();
+    else if (ibConnected) fillFreeLines();
+  }
+  let reroute = false;
+  if (eff.XENON_QUOTES_DEFAULT !== XENON_QUOTES_DEFAULT) {
+    XENON_QUOTES_DEFAULT = eff.XENON_QUOTES_DEFAULT;
+    for (const client of clients) {
+      if (!explicitFutuFirst.has(client)) {
+        futuRouting.setPref(client, XENON_QUOTES_DEFAULT);
+      }
+    }
+    reroute = true;
+  }
+  if (eff.XENON_FUTU_OPTIONS !== XENON_FUTU_OPTIONS) {
+    XENON_FUTU_OPTIONS = eff.XENON_FUTU_OPTIONS;
+    for (const key of optionRouteKeys) {
+      if (XENON_FUTU_OPTIONS) futuRouting.unpinIbOnly(key);
+      else futuRouting.pinIbOnly(key);
+    }
+    reroute = true;
+  }
+  if (reroute) reconcileFutuRoutes();
+  broadcastStatus();
+}
+
+runtimeSettings = createRuntimeSettings({
+  url: settingsUrl(ticketValidateUrl()),
+  token: process.env.XENON_INTERNAL_API_TOKEN || "",
+  env: RELAY_ENV,
+  intervalMs: Number(process.env.XENON_SETTINGS_POLL_MS) || undefined,
+  onRelayChange: applyRuntimeSettings,
+  onFutuConfig: (values) => futuClient?.setConfig(values),
+  log: (msg) => console.log(`[settings] ${msg}`),
+});
+runtimeSettings.start();
 
 /* ─── Keep-Alive Ping Interval ─────────────────────────────────────────── */
 liveness.start();
