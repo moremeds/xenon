@@ -477,6 +477,8 @@ const httpServer = http.createServer((req, res) => {
         ttl_ms: SUBSCRIBER_TTL_MS,
         subscribers: subscriberRegistry.snapshot(now),
         anonymous_count: Math.max(0, clients.size - clientId.size),
+        // Operator console: Futu quote feed link + live symbol routes.
+        futu: { ...futuRouting.status(), routes: routeTotals() },
         runtime_settings: runtimeSettings?.status() ?? null,
       }),
     );
@@ -870,6 +872,17 @@ function sendStatus(client) {
       futu: { ...futuRouting.status(), routes: routeCountsFor(client) },
     },
   });
+}
+
+// All clients' subscriptions by serving source (operator console).
+function routeTotals() {
+  const counts = { futu: 0, ib: 0 };
+  for (const client of clientRoutes.keys()) {
+    const c = routeCountsFor(client);
+    counts.futu += c.futu;
+    counts.ib += c.ib;
+  }
+  return counts;
 }
 
 // Per-client route counts for observability: how many of this client's

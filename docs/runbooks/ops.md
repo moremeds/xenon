@@ -20,16 +20,16 @@ Runtime settings are DB overrides of some env knobs (registry: `src/xenon/runtim
 
 Notes: the api refuses writes under `XENON_READ_ONLY=1`. The nightly `core_dev -> core_test` refresh copies the overrides too; safety keys can only restrict, but a copied `orders_paused=true` pauses the dev stack until it is deleted there.
 
-## Nightly Flex divergence (V.4)
+## Daily Flex divergence (V.4)
 
-Runs once per day after 18:00 ET on weekdays. Compares yesterday's PG blotter
-rows against IB Flex same-day output, writes a row to
+Runs daily at 07:30 ET from the deployed api image (launchd job
+`deploy/jobs/com.xenon.flex-divergence.plist`, cron alternative in
+`deploy/jobs/crontab.example`; install and manual-run steps are in the plist
+header and `deploy/README.md` § Jobs). It compares the previous New York day's
+PG blotter rows against IB Flex output for the api scope
+(`XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`), writes a row to
 `xenon.flex_divergence_runs`, and surfaces the result on
-`GET /health.flex_divergence`.
+`GET /health.flex_divergence` and the /admin Flex Divergence tile.
 
-```cron
-0 23 * * 1-5  cd /opt/xenon && XENON_TRADING_MODE=live XENON_BROKER_ACCOUNT=$LIVE_ACCT \
-              uv run python -m xenon.jobs.flex_divergence_check --apply
-```
-
-Skipped silently when `IB_FLEX_TOKEN` / `IB_FLEX_QUERY_ID` are unset.
+Prints `{"skipped": true}` and exits 0 (no row) when `IB_FLEX_TOKEN` /
+`IB_FLEX_QUERY_ID` are unset or Flex is unavailable.

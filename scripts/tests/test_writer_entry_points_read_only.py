@@ -15,7 +15,7 @@ def test_flex_divergence_apply_refused_under_read_only(monkeypatch, capsys):
         patch.object(divergence, "resolve_from_env") as resolve,
         patch.object(divergence, "record_run") as record,
     ):
-        rc = divergence._main(["--apply"])
+        rc = divergence.main(["--apply"])
     assert rc == 3
     assert "READ_ONLY" in capsys.readouterr().err
     resolve.assert_not_called()

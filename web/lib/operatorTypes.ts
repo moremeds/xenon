@@ -50,13 +50,61 @@ export type RealtimeSubscribersInfo = {
   subscribers: unknown[];
   anonymous_count: number;
   ttl_ms?: number | null;
+  // Futu quote feed health; absent on older backends.
+  futu_quotes?: FutuQuotesInfo | null;
 };
 
+export type FutuQuotesInfo = {
+  connected: boolean; // relay <-> futu-quotes socket
+  opend_connected: boolean;
+  quota: {
+    ceiling: number;
+    own_used: number;
+    all_used: number | null;
+    remain: number | null;
+  } | null;
+  routes: { futu: number; ib: number }; // live symbol subscriptions per source
+};
+
+export const FUTU_HELD_KINDS = [
+  "FUTU_FILL_UNPRICED",
+  "FUTU_FILL_CONFLICT",
+  "FUTU_NOT_OBSERVED",
+] as const;
+export type FutuHeldKind = (typeof FUTU_HELD_KINDS)[number];
+export type FutuHeldRows = Partial<
+  Record<FutuHeldKind, { count: number; order_ids: string[] }>
+>;
+export type FutuObservation = { as_of: string | null; complete: boolean };
+
+export type FutuScope = {
+  account_env: string; // "paper" | "live"
+  configured?: boolean;
+  last_sync_at?: string | null;
+  last_sync_age_s?: number | null;
+  observation?: FutuObservation | null;
+  scope_observation_loop?: boolean;
+  held_rows?: FutuHeldRows | null;
+};
+
+export type FutuCapabilities = Record<
+  string,
+  { tuples: string[]; modify: string[] }
+>;
+
+// Top-level fields describe the API's own scope (`scope_env`); `scopes` lists
+// every Futu env. All new fields are optional — older backends omit them.
 export type FutuInfo = {
   configured: boolean;
   connected: boolean;
   last_sync_at?: string | null;
   last_sync_age_s?: number | null;
+  observation?: FutuObservation | null;
+  held_rows?: FutuHeldRows | null;
+  scope_env?: string;
+  trading?: Record<string, boolean>;
+  capabilities?: FutuCapabilities;
+  scopes?: FutuScope[];
 };
 
 // Live UW rate-limit / quota snapshot, sourced from the x-uw-* response

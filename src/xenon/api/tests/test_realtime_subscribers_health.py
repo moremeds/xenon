@@ -17,6 +17,23 @@ def test_reachable_passthrough(monkeypatch):
     assert out["anonymous_count"] == 2
 
 
+def test_futu_quote_feed_passthrough(monkeypatch):
+    futu = {"connected": True, "opend_connected": True, "quota": {"ceiling": 800, "own_used": 24}, "routes": {"futu": 12, "ib": 5}}
+    payload = {"ib_connected": True, "subscribers": [], "anonymous_count": 0, "futu": futu}
+    monkeypatch.setattr(system_routes, "_fetch_realtime_status_json", lambda url, timeout=0.5: payload)
+    monkeypatch.setattr(system_routes, "_resolve_realtime_status_url", lambda: "http://127.0.0.1:8765/status")
+
+    assert system_routes._realtime_subscribers_health()["futu_quotes"] == futu
+
+
+def test_futu_quote_feed_absent_on_older_relay(monkeypatch):
+    payload = {"ib_connected": True, "subscribers": [], "anonymous_count": 0}
+    monkeypatch.setattr(system_routes, "_fetch_realtime_status_json", lambda url, timeout=0.5: payload)
+    monkeypatch.setattr(system_routes, "_resolve_realtime_status_url", lambda: "http://127.0.0.1:8765/status")
+
+    assert system_routes._realtime_subscribers_health()["futu_quotes"] is None
+
+
 def test_silent_degrade_when_unreachable(monkeypatch):
     def boom(url, timeout=0.5):
         raise OSError("connection refused")

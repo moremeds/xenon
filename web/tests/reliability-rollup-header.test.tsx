@@ -30,4 +30,27 @@ describe("ReliabilityRollupHeader", () => {
     );
     expect(screen.getByText(/updating/i)).toBeTruthy();
   });
+  it("names degraded IB pool roles next to the verdict as a warn signal", () => {
+    const { container } = render(
+      <ReliabilityRollupHeader
+        verdict="authenticated"
+        updatedSecsAgo={2}
+        writerSummary="3 healthy"
+        degradedRoles={["data"]}
+      />,
+    );
+    const warn = screen.getByText(/data down/i);
+    expect(warn.className).toContain("operator-rollup__degraded");
+    expect(container.textContent).toMatch(/IB authenticated.*data down/);
+  });
+  it("shows no degraded signal when every role is up", () => {
+    render(
+      <ReliabilityRollupHeader
+        verdict="authenticated"
+        updatedSecsAgo={2}
+        writerSummary="3 healthy"
+      />,
+    );
+    expect(screen.queryByText(/down/i)).toBeNull();
+  });
 });

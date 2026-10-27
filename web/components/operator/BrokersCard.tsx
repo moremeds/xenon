@@ -22,7 +22,10 @@ export function BrokersCard({ data }: { data: OperatorData }) {
           modeVerified={data.mode_verified}
           pool={data.ib_pool}
         />
-        <FutuGatewayCard futu={data.futu} />
+        <FutuGatewayCard
+          futu={data.futu}
+          quotes={data.realtime_subscribers?.futu_quotes}
+        />
       </div>
     </section>
   );

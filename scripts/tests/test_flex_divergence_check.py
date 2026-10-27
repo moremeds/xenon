@@ -8,10 +8,10 @@ from unittest.mock import patch
 
 from xenon.execution.account_scope import AccountScope
 from xenon.jobs.flex_divergence_check import (
-    _main,
     compute_divergence,
     filter_payload_by_execution_window,
     latest_run,
+    main,
     record_run,
 )
 
@@ -78,7 +78,7 @@ def test_main_skips_when_flex_unavailable(monkeypatch):
         patch("xenon.jobs.flex_divergence_check.fetch_blotter_pg", return_value=fake_pg),
         patch("xenon.jobs.flex_divergence_check.run_module", side_effect=fake_run_module),
     ):
-        rc = _main(["--apply"])
+        rc = main(["--apply"])
     assert rc == 0  # graceful no-op
 
 
@@ -110,9 +110,26 @@ def test_main_records_a_run_when_both_sides_present(monkeypatch):
         patch("xenon.jobs.flex_divergence_check.fetch_blotter_pg", return_value=fake_pg),
         patch("xenon.jobs.flex_divergence_check.run_module", side_effect=fake_run_module),
     ):
-        rc = _main(["--apply"])
+        rc = main(["--apply"])
     assert rc == 0
     latest = latest_run(scope=_SCOPE)
     assert latest is not None
     assert latest["total_compared"] == 1
     assert latest["divergence_count"] == 0
+
+
+def test_main_skips_a_weekend_window_without_a_row(monkeypatch, capsys):
+    """Sun/Mon mornings compare Sat/Sun: no session, so no 0/0 row hides Friday's run."""
+    monkeypatch.setenv("XENON_TRADING_MODE", _SCOPE.account_env)
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", _SCOPE.broker_account)
+    saturday = datetime(2026, 10, 24, 4, 0, tzinfo=timezone.utc)  # Sat 00:00 EDT
+    with (
+        patch("xenon.jobs.flex_divergence_check.yesterday_session_window", return_value=(saturday, saturday)),
+        patch("xenon.jobs.flex_divergence_check.run_module") as flex,
+        patch("xenon.jobs.flex_divergence_check.record_run") as record,
+    ):
+        rc = main(["--apply"])
+    assert rc == 0
+    assert '"no_session"' in capsys.readouterr().out
+    flex.assert_not_called()
+    record.assert_not_called()

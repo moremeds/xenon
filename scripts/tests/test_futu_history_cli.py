@@ -164,3 +164,54 @@ async def test_cli_disconnects_on_failure(aengine):
             client_factory=lambda: client,
         )
     assert client.disconnect.call_count >= 1
+
+
+# --- 2026-10-27: nightly sync never reached OpenD in Docker ------------------
+# run_history_sync built `FutuClient()` (127.0.0.1, trd_env REAL, first
+# account) instead of the scope's client, the loop passed since=None, and only
+# the default scope ran.
+
+
+def test_new_client_uses_opend_env_and_scope(monkeypatch):
+    from xenon.execution import futu_scope
+
+    monkeypatch.setenv("FUTU_OPEND_HOST", "host.docker.internal")
+    monkeypatch.setenv("FUTU_OPEND_PORT", "11112")
+    client = futu_scope.new_client(AccountScope(broker="FUTU", account_env="live", broker_account="222"))
+    assert (client.host, client.port) == ("host.docker.internal", 11112)
+    assert client.trd_env == "REAL"
+    assert client.requested_acc_id == 222
+
+
+@pytest.mark.asyncio
+async def test_default_client_is_built_from_scope(aengine, monkeypatch):
+    import xenon.cli.futu_history_sync as mod
+
+    client = _fake_client(deals=[], cashflows=[], today_nav=1000.0)
+    seen: list[AccountScope] = []
+    monkeypatch.setattr(mod.futu_scope, "new_client", lambda scope: seen.append(scope) or client)
+    await run_history_sync(aengine, SCOPE, since=SINCE, today_date=date(2024, 5, 3))
+    assert seen == [SCOPE]
+
+
+@pytest.mark.asyncio
+async def test_since_none_resolves_incremental_watermark(aengine):
+    """The nightly loop passes since=None; an empty scope backfills from inception."""
+    client = _fake_client(deals=[], cashflows=[], today_nav=1000.0)
+    result = await run_history_sync(
+        aengine, SCOPE, since=None, today_date=date(2024, 5, 3), client_factory=lambda: client
+    )
+    assert result["trades_inserted"] == 0
+    start = client.fetch_history_deals.call_args_list[0].kwargs["start"]
+    assert start.date() == date(2024, 1, 1)
+
+
+def test_resolve_scopes_syncs_live_only(monkeypatch):
+    """Futu serves history deals + cash flow to live accounts only."""
+    from xenon.cli.futu_history_sync import resolve_scopes
+
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_SIMULATE", "111")
+    monkeypatch.setenv("FUTU_TRADE_ACC_ID_REAL", "222")
+    assert [(s.account_env, s.broker_account) for s in resolve_scopes()] == [("live", "222")]
+    monkeypatch.delenv("FUTU_TRADE_ACC_ID_REAL")
+    assert resolve_scopes() == []

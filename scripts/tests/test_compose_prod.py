@@ -178,6 +178,7 @@ HKT = ZoneInfo("Asia/Hong_Kong")  # system zone of the Mac mini; launchd and cro
 JOBS = {
     "com.xenon.nav-flex-refresh.plist": (17, 30),
     "com.xenon.refresh-core-test.plist": (4, 0),
+    "com.xenon.flex-divergence.plist": (7, 30),
 }
 # One day in each DST state of New York.
 DST_DAYS = {"EDT": date(2026, 7, 15), "EST": date(2026, 1, 15)}
@@ -243,7 +244,11 @@ def test_cron_entries_have_et_hour_guard_and_candidate_hkt_times() -> None:
         if ln and not ln.startswith("#") and not ln.startswith("PATH=")
     ]
     assert len(lines) == len(JOBS)
-    expected = {"xenon-nav-flex-refresh": (17, 30), "refresh-core-test.sh": (4, 0)}
+    expected = {
+        "xenon-nav-flex-refresh": (17, 30),
+        "refresh-core-test.sh": (4, 0),
+        "xenon-flex-divergence-check": (7, 30),
+    }
     for line in lines:
         minute, hours, *_ = line.split()
         key = next(k for k in expected if k in line)
@@ -268,6 +273,17 @@ def test_nav_flex_job_runs_cli_from_deployed_image() -> None:
 def test_job_clis_exist_in_pyproject_scripts() -> None:
     pyproject = (REPO_ROOT / "pyproject.toml").read_text()
     assert re.search(r"^xenon-nav-flex-refresh\s*=", pyproject, re.MULTILINE)
+    assert re.search(r"^xenon-flex-divergence-check\s*=", pyproject, re.MULTILINE)
+
+
+def test_flex_divergence_job_applies_from_deployed_image() -> None:
+    """The Operator console Flex Divergence tile reads the row this job writes."""
+    cmd = _plist("com.xenon.flex-divergence.plist")["ProgramArguments"][2]
+    rm = "docker rm xenon-job-flex-divergence >/dev/null 2>&1;"
+    assert cmd.index("exit 0;") < cmd.index(rm) < cmd.index("exec /opt/homebrew/bin/docker-compose")
+    assert "--name xenon-job-flex-divergence" in cmd
+    assert "--label com.centurylinklabs.watchtower.enable=false" in cmd
+    assert cmd.endswith(" api xenon-flex-divergence-check --apply")
 
 
 def test_nav_flex_job_clears_a_dead_job_container_without_force() -> None:

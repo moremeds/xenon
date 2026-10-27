@@ -67,4 +67,34 @@ describe("IbGatewayCard", () => {
     // data is disconnected → down dot.
     expect(container.querySelector(".operator-role__dot--down")).toBeTruthy();
   });
+  it("warns on the verdict pill when authenticated but a pool role is down", () => {
+    const { container } = render(
+      <IbGatewayCard
+        gateway={GW}
+        verdict="authenticated"
+        account="DU***889"
+        tradingMode="paper"
+        modeVerified
+        pool={POOL}
+      />,
+    );
+    const pill = container.querySelector(".operator-pill--warn") as HTMLElement;
+    expect(pill.textContent).toBe("authenticated · data down");
+    expect(container.querySelector(".operator-pill--core")).toBeNull();
+  });
+  it("keeps the core tone when every pool role is connected", () => {
+    const { container } = render(
+      <IbGatewayCard
+        gateway={GW}
+        verdict="authenticated"
+        account="DU***889"
+        tradingMode="paper"
+        modeVerified
+        pool={{ sync: { connected: true } }}
+      />,
+    );
+    expect(container.querySelector(".operator-pill--core")?.textContent).toBe(
+      "authenticated",
+    );
+  });
 });
