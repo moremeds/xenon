@@ -8,10 +8,13 @@ import type { ToastType } from "@/lib/useToast";
 
 // Runtime settings (DB overrides of env knobs). Renders only from the API
 // metadata (GET /admin/settings via /api/admin/settings): labels, units, types,
-// bounds and narrow-only / confirm rules come from the Python registry. Rows
-// are read-only until "Edit" opens one inline editor. A change that needs a
-// typed confirm is first sent without one; the API's 428 opens the confirm
-// step for the proposal still on screen, and only that step sends `confirm`.
+// bounds and narrow-only / confirm rules come from the Python registry. Each
+// row's control applies on change (switch, segment, chip: one click; number:
+// Enter or blur). The control shows only the server value: while a request
+// runs the row is disabled, and a refused change returns to the server value.
+// A change that needs a typed confirm is first sent without one; the API's 428
+// opens the confirm step for the proposal still on screen, and only that step
+// sends `confirm`.
 
 const POLL_MS = 15_000;
 const PAUSE_KEY = "orders_paused";
@@ -30,8 +33,8 @@ const TYPED_CONFIRM_NOTE = "Some changes to this setting need a typed confirmati
 const SOURCE_CHIP: Record<string, string> = { env: "muted", override: "override", "live (relay)": "plain" };
 
 type Toast = (type: ToastType, message: string) => void;
-type PendingConfirm = { key: string; op: "put" | "delete"; value?: unknown; note: string; typed: string };
-type Draft = string | string[] | boolean;
+type PendingConfirm = { key: string; op: "put" | "delete"; value?: unknown; typed: string };
+type Write = (op: "put" | "delete", value?: unknown) => void;
 
 // ─── value wording ────────────────────────────────────────────────────────
 
@@ -89,23 +92,6 @@ function shown(s: RuntimeSetting): Shown {
     : { value: null, text: "Service default", source: null };
 }
 
-function ValueView({ s, v }: { s: RuntimeSetting; v: Shown }) {
-  if (v.text) return <span className="rs-value rs-value--muted" data-testid="effective">{v.text}</span>;
-  if (Array.isArray(v.value)) {
-    if (!v.value.length) return <span className="rs-value rs-value--muted" data-testid="effective">None allowed</span>;
-    return (
-      <span className="rs-value rs-tags" data-testid="effective">
-        {v.value.map((item) => (
-          <span key={String(item)} className="rs-tag" title={String(item)}>
-            {itemLabel(String(item))}
-          </span>
-        ))}
-      </span>
-    );
-  }
-  return <span className="rs-value" data-testid="effective">{fmt(s, v.value)}</span>;
-}
-
 function changeLine(s: RuntimeSetting): string | null {
   const c = s.last_change;
   if (!c) return null;
@@ -113,19 +99,11 @@ function changeLine(s: RuntimeSetting): string | null {
   return `Changed ${when}${c.changed_by ? ` by ${c.changed_by}` : ""}${c.note ? ` · ${c.note}` : ""}`;
 }
 
-// ─── editing ──────────────────────────────────────────────────────────────
+// ─── controls ─────────────────────────────────────────────────────────────
 
 function setOptions(s: RuntimeSetting): string[] {
   if (s.narrow_only && s.env_known) return Array.isArray(s.env_value) ? (s.env_value as string[]) : [];
   return s.choices;
-}
-
-function initialDraft(s: RuntimeSetting): Draft {
-  const v = s.env_known ? s.effective : s.db_value ?? s.live_value ?? s.default;
-  if (s.type === "set") return Array.isArray(v) ? (v as string[]) : [];
-  if (s.type === "bool") return v === true;
-  if (s.type === "object") return v == null ? "{}" : JSON.stringify(v);
-  return v == null ? "" : String(v);
 }
 
 /** Number limits from the API metadata: registry bounds, and for a `min`
@@ -135,12 +113,9 @@ function numberLimits(s: RuntimeSetting): { min?: number; max?: number; envCap: 
   return { min: s.bounds?.[0], max: envCap ? (s.env_value as number) : s.bounds?.[1], envCap };
 }
 
-/** Draft → JSON value, or an error message. */
-function parseDraft(s: RuntimeSetting, draft: Draft): { value?: unknown; error?: string } {
-  if (s.type === "set") return { value: draft as string[] };
-  if (s.type === "bool") return { value: draft === true };
-  const text = String(draft).trim();
-  if (s.type === "enum") return { value: text };
+/** Field text → JSON value (number / object keys), or an error message. */
+function parseText(s: RuntimeSetting, raw: string): { value?: unknown; error?: string } {
+  const text = raw.trim();
   if (s.type === "int" || s.type === "number") {
     const n = Number(text);
     if (text === "" || !Number.isFinite(n)) return { error: `${s.label}: enter a number` };
@@ -157,6 +132,9 @@ function parseDraft(s: RuntimeSetting, draft: Draft): { value?: unknown; error?:
   }
 }
 
+const fieldText = (s: RuntimeSetting, v: unknown) =>
+  v == null ? "" : s.type === "object" ? JSON.stringify(v) : String(v);
+
 /** `and` rule (env AND DB): with the env off, the DB may only keep it off. */
 const switchLocked = (s: RuntimeSetting) => s.rule === "and" && s.env_known && !s.env_value;
 
@@ -169,21 +147,22 @@ async function send(url: string, init: RequestInit): Promise<{ ok: boolean; stat
 export default function RuntimeSettingsPanel({ onToast }: { onToast: Toast }) {
   const [settings, setSettings] = useState<RuntimeSetting[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [editing, setEditing] = useState<string | null>(null);
-  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
-  const [notes, setNotes] = useState<Record<string, string>>({});
   const [pending, setPending] = useState<PendingConfirm | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [busy, setBusy] = useState<Record<string, boolean>>({});
+  // Per-row reset counter: a field remounts with the server value after a
+  // write settles or a confirm is abandoned (no unaccepted value stays on screen).
+  const [resets, setResets] = useState<Record<string, number>>({});
+  const bumpReset = (key: string) => setResets((r) => ({ ...r, [key]: (r[key] ?? 0) + 1 }));
   // Bumped by every load and write: a load whose response arrives after a
   // newer load or write started is obsolete and is dropped.
   const seq = useRef(0);
-  // Per-row proposal token: every value/note edit bumps it. A response for an
-  // older proposal (e.g. a 428 that arrives after the edit) never opens a confirm.
+  // Per-row proposal token: every new proposal (click, field edit, Escape)
+  // bumps it. A response for an older proposal never opens a confirm.
   const proposals = useRef<Record<string, number>>({});
-  const bumpProposal = (key: string) => {
+  const bumpProposal = useCallback((key: string) => {
     proposals.current[key] = (proposals.current[key] ?? 0) + 1;
     setPending((p) => (p?.key === key ? null : p));
-  };
+  }, []);
 
   const load = useCallback(async () => {
     const mine = ++seq.current;
@@ -207,67 +186,40 @@ export default function RuntimeSettingsPanel({ onToast }: { onToast: Toast }) {
     return () => clearInterval(t);
   }, [load]);
 
-  const closeEditor = (key: string) => {
-    bumpProposal(key);
-    setEditing((k) => (k === key ? null : k));
-    setDrafts((d) => {
-      const next = { ...d };
-      delete next[key];
-      return next;
-    });
-    setNotes((n) => {
-      const next = { ...n };
-      delete next[key];
-      return next;
-    });
-  };
-
   const write = useCallback(
-    async (key: string, op: "put" | "delete", value: unknown, note: string, confirm?: string) => {
-      setBusy(key);
+    async (key: string, op: "put" | "delete", value: unknown, confirm?: string) => {
+      setBusy((b) => ({ ...b, [key]: true }));
       seq.current += 1; // a load already in flight is now obsolete
       const proposal = proposals.current[key] ?? 0;
-      if (!confirm) setPending(null); // a fresh request replaces any pending confirm
+      let awaitingConfirm = false;
       try {
         const url = `/api/admin/settings/${key}`;
-        let r;
-        if (op === "put") {
-          const body: Record<string, unknown> = { value };
-          if (note) body.note = note;
-          if (confirm) body.confirm = confirm;
-          r = await send(url, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-        } else {
-          const qs = new URLSearchParams();
-          if (note) qs.set("note", note);
-          if (confirm) qs.set("confirm", confirm);
-          // JSON content type: web/middleware.ts refuses any other non-GET /api request.
-          r = await send(qs.toString() ? `${url}?${qs}` : url, {
-            method: "DELETE",
-            headers: { "Content-Type": "application/json" },
-          });
-        }
+        // JSON content type on every write: web/middleware.ts refuses any other non-GET /api request.
+        const headers = { "Content-Type": "application/json" };
+        const r =
+          op === "put"
+            ? await send(url, { method: "PUT", headers, body: JSON.stringify(confirm ? { value, confirm } : { value }) })
+            : await send(confirm ? `${url}?${new URLSearchParams({ confirm })}` : url, { method: "DELETE", headers });
         if (r.status === 428 && !confirm) {
-          // only for the proposal still on screen; an edited row needs a fresh Save
-          if (proposal === (proposals.current[key] ?? 0)) setPending({ key, op, value, note, typed: "" });
+          // only for the proposal still on screen
+          if (proposal === (proposals.current[key] ?? 0)) {
+            setPending({ key, op, value, typed: "" });
+            awaitingConfirm = true;
+          }
           return;
         }
         if (!r.ok) {
           onToast("error", settingsErrorMessage(r.body, `HTTP ${r.status}`));
           return;
         }
-        setPending(null);
-        setEditing((k) => (k === key ? null : k));
-        setDrafts((d) => {
-          const next = { ...d };
-          delete next[key];
-          return next;
-        });
+        setPending((p) => (p?.key === key ? null : p));
         onToast("success", op === "put" ? `${key} saved` : `${key} reverted to env`);
         await load();
       } catch (e) {
         onToast("error", e instanceof Error ? e.message : "Settings request failed");
       } finally {
-        setBusy(null);
+        setBusy((b) => ({ ...b, [key]: false }));
+        if (!awaitingConfirm) bumpReset(key);
       }
     },
     [load, onToast],
@@ -305,8 +257,8 @@ export default function RuntimeSettingsPanel({ onToast }: { onToast: Toast }) {
           <button
             type="button"
             className={`rs-btn ${paused ? "rs-btn--primary" : "rs-btn--danger"}`}
-            disabled={busy === PAUSE_KEY}
-            onClick={() => (paused ? write(PAUSE_KEY, "delete", undefined, "") : write(PAUSE_KEY, "put", true, ""))}
+            disabled={busy[PAUSE_KEY]}
+            onClick={() => (paused ? write(PAUSE_KEY, "delete", undefined) : write(PAUSE_KEY, "put", true))}
           >
             {paused ? "Resume orders" : "Pause orders"}
           </button>
@@ -324,33 +276,20 @@ export default function RuntimeSettingsPanel({ onToast }: { onToast: Toast }) {
               <SettingRow
                 key={s.key}
                 s={s}
-                open={editing === s.key}
-                draft={drafts[s.key] ?? initialDraft(s)}
-                note={notes[s.key] ?? ""}
-                busy={busy === s.key}
+                busy={busy[s.key] === true}
+                reset={resets[s.key] ?? 0}
                 pending={pending?.key === s.key ? pending : null}
-                onEdit={() => {
-                  if (editing && editing !== s.key) closeEditor(editing);
-                  setEditing(s.key);
+                onWrite={(op, value) => {
+                  bumpProposal(s.key); // a new proposal replaces any pending confirm
+                  write(s.key, op, value);
                 }}
-                onCancel={() => closeEditor(s.key)}
-                onDraft={(v) => {
-                  bumpProposal(s.key); // a pending or in-flight confirm was for the old proposal
-                  setDrafts((d) => ({ ...d, [s.key]: v }));
-                }}
-                onNote={(v) => {
-                  bumpProposal(s.key);
-                  setNotes((n) => ({ ...n, [s.key]: v }));
-                }}
-                onSave={() => {
-                  const parsed = parseDraft(s, drafts[s.key] ?? initialDraft(s));
-                  if (parsed.error) onToast("error", parsed.error);
-                  else write(s.key, "put", parsed.value, notes[s.key] ?? "");
-                }}
-                onRevert={() => write(s.key, "delete", undefined, notes[s.key] ?? "")}
+                onPropose={() => bumpProposal(s.key)}
                 onTyped={(typed) => setPending((p) => (p ? { ...p, typed } : p))}
-                onConfirm={() => pending && write(pending.key, pending.op, pending.value, pending.note, pending.key)}
-                onCancelConfirm={() => setPending(null)}
+                onConfirm={() => pending && write(pending.key, pending.op, pending.value, pending.key)}
+                onCancelConfirm={() => {
+                  bumpProposal(s.key);
+                  bumpReset(s.key);
+                }}
               />
             ))}
           </section>
@@ -362,33 +301,21 @@ export default function RuntimeSettingsPanel({ onToast }: { onToast: Toast }) {
 
 function SettingRow({
   s,
-  open,
-  draft,
-  note,
   busy,
+  reset,
   pending,
-  onEdit,
-  onCancel,
-  onDraft,
-  onNote,
-  onSave,
-  onRevert,
+  onWrite,
+  onPropose,
   onTyped,
   onConfirm,
   onCancelConfirm,
 }: {
   s: RuntimeSetting;
-  open: boolean;
-  draft: Draft;
-  note: string;
   busy: boolean;
+  reset: number;
   pending: PendingConfirm | null;
-  onEdit: () => void;
-  onCancel: () => void;
-  onDraft: (v: Draft) => void;
-  onNote: (v: string) => void;
-  onSave: () => void;
-  onRevert: () => void;
+  onWrite: Write;
+  onPropose: () => void;
   onTyped: (v: string) => void;
   onConfirm: () => void;
   onCancelConfirm: () => void;
@@ -397,7 +324,12 @@ function SettingRow({
   const overridden = s.db_value != null || s.db_value_invalid;
   const change = changeLine(s);
   return (
-    <div className={`rs-row ${overridden ? "rs-row--override" : ""}`} data-testid={`setting-${s.key}`} data-overridden={String(overridden)}>
+    <div
+      className={`rs-row ${overridden ? "rs-row--override" : ""} ${busy ? "rs-row--busy" : ""}`}
+      data-testid={`setting-${s.key}`}
+      data-overridden={String(overridden)}
+      aria-busy={busy}
+    >
       <div className="rs-row__main">
         <div className="rs-row__info">
           <span className="rs-row__label" data-testid="label">
@@ -417,7 +349,8 @@ function SettingRow({
           {s.db_value_invalid ? <span className="rs-row__invalid">Stored override is invalid and ignored.</span> : null}
         </div>
         <div className="rs-row__state">
-          <ValueView s={s} v={v} />
+          <Control key={`${reset}:${fieldText(s, v.value)}`} s={s} v={v} busy={busy} onWrite={onWrite} onPropose={onPropose} />
+          {busy ? <span className="rs-pending">Applying</span> : null}
           {v.source ? (
             <span className={`rs-chip rs-chip--${SOURCE_CHIP[v.source] ?? "plain"}`} data-testid="source">
               {v.source}
@@ -433,89 +366,123 @@ function SettingRow({
               typed confirm
             </span>
           ) : null}
-          <button type="button" className="rs-btn rs-btn--ghost" onClick={onEdit} disabled={open}>
-            Edit
-          </button>
+          {overridden ? (
+            <button
+              type="button"
+              className="rs-link"
+              disabled={busy}
+              title={s.env_known ? `Environment value: ${fmt(s, s.env_value)}` : undefined}
+              onClick={() => onWrite("delete")}
+            >
+              Revert to env
+            </button>
+          ) : null}
         </div>
       </div>
-      {open ? (
-        <div className="rs-editor" data-testid="editor">
-          <dl className="rs-editor__facts">
-            <dt>Environment</dt>
-            <dd>{s.env_known ? fmt(s, s.env_value) : `Set in the ${s.owner} service; not visible to the API`}</dd>
-            <dt>Override</dt>
-            <dd>{s.db_value != null ? fmt(s, s.db_value) : "No override — using env"}</dd>
-            <dt>Last change</dt>
-            <dd>{change ?? "Never changed"}</dd>
-          </dl>
-          <div className="rs-editor__control">
-            <Editor s={s} draft={draft} onDraft={onDraft} />
-          </div>
-          <input
-            className="rs-input"
-            aria-label="Note"
-            placeholder="Note (optional)"
-            value={note}
-            onChange={(e) => onNote(e.target.value)}
-          />
-          <div className="rs-editor__actions">
-            <button type="button" className="rs-btn rs-btn--primary" disabled={busy} onClick={onSave}>
-              Save
+      {pending ? (
+        <div className="rs-confirm" data-testid="confirm-step">
+          <span className="rs-confirm__proposal" data-testid="confirm-proposal">
+            {pending.op === "delete" ? `Revert ${s.label} to env` : `Set ${s.label} to ${fmt(s, pending.value)}`}
+          </span>
+          <span className="rs-row__key" data-testid="confirm-key">
+            {s.key}
+          </span>
+          <label className="rs-confirm__label">
+            Type {s.key} to confirm
+            <input
+              className="rs-input rs-input--mono"
+              aria-label={`Type ${s.key} to confirm`}
+              value={pending.typed}
+              onChange={(e) => onTyped(e.target.value)}
+            />
+          </label>
+          <div className="rs-confirm__actions">
+            <button
+              type="button"
+              className="rs-btn rs-btn--primary"
+              disabled={busy || pending.typed !== s.key}
+              onClick={onConfirm}
+            >
+              Confirm change
             </button>
-            <button type="button" className="rs-btn" onClick={onCancel}>
-              Cancel
+            <button type="button" className="rs-btn" onClick={onCancelConfirm}>
+              Back
             </button>
-            {overridden ? (
-              <button type="button" className="rs-btn rs-btn--quiet" disabled={busy} onClick={onRevert}>
-                Revert to env
-              </button>
-            ) : null}
           </div>
-          {pending ? (
-            <div className="rs-confirm" data-testid="confirm-step">
-              <span className="rs-confirm__proposal" data-testid="confirm-proposal">
-                {pending.op === "delete" ? `Revert ${s.label} to env` : `Set ${s.label} to ${fmt(s, pending.value)}`}
-              </span>
-              <span className="rs-row__key" data-testid="confirm-key">
-                {s.key}
-              </span>
-              <label className="rs-confirm__label">
-                Type {s.key} to confirm
-                <input
-                  className="rs-input rs-input--mono"
-                  aria-label={`Type ${s.key} to confirm`}
-                  value={pending.typed}
-                  onChange={(e) => onTyped(e.target.value)}
-                />
-              </label>
-              <div className="rs-editor__actions">
-                <button
-                  type="button"
-                  className="rs-btn rs-btn--primary"
-                  disabled={busy || pending.typed !== s.key}
-                  onClick={onConfirm}
-                >
-                  Confirm change
-                </button>
-                <button type="button" className="rs-btn" onClick={onCancelConfirm}>
-                  Back
-                </button>
-              </div>
-            </div>
-          ) : null}
         </div>
       ) : null}
     </div>
   );
 }
 
-function Editor({ s, draft, onDraft }: { s: RuntimeSetting; draft: Draft; onDraft: (v: Draft) => void }) {
-  if (s.type === "set") {
-    const chosen = new Set(draft as string[]);
-    const options = setOptions(s);
-    if (!options.length) return <span className="rs-hint">The environment allows nothing here, so there is nothing to narrow.</span>;
+/** The row's value as its control. Shows only the server value; a change goes
+ * straight to `onWrite`. */
+function Control({
+  s,
+  v,
+  busy,
+  onWrite,
+  onPropose,
+}: {
+  s: RuntimeSetting;
+  v: Shown;
+  busy: boolean;
+  onWrite: Write;
+  onPropose: () => void;
+}) {
+  if (s.type === "bool") {
+    const on = v.value === true;
+    const locked = switchLocked(s) && !on;
     return (
-      <span className="rs-chips-edit" role="group" aria-label="New value">
+      <span className="rs-switch-wrap" title={locked ? "Off in the environment; an override can only keep it off." : undefined}>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={on}
+          aria-label={s.label}
+          className="rs-switch"
+          disabled={busy || locked}
+          onClick={() => onWrite("put", !on)}
+        >
+          <span className="rs-switch__knob" />
+        </button>
+        <span className={`rs-value ${v.text ? "rs-value--muted" : ""}`} data-testid="effective">
+          {v.text ?? (on ? "On" : "Off")}
+        </span>
+      </span>
+    );
+  }
+  if (s.type === "enum") {
+    return (
+      <span className="rs-seg-wrap">
+        <span className="rs-seg" role="group" aria-label={s.label}>
+          {s.choices.map((o) => (
+            <button
+              key={o}
+              type="button"
+              className="rs-seg__btn"
+              aria-pressed={v.value === o}
+              disabled={busy}
+              onClick={() => v.value !== o && onWrite("put", o)}
+            >
+              {o}
+            </button>
+          ))}
+        </span>
+        {v.text ? (
+          <span className="rs-value rs-value--muted" data-testid="effective">
+            {v.text}
+          </span>
+        ) : null}
+      </span>
+    );
+  }
+  if (s.type === "set") {
+    const options = setOptions(s);
+    if (!options.length) return <span className="rs-hint">The environment allows nothing here.</span>;
+    const chosen = new Set(Array.isArray(v.value) ? (v.value as string[]) : []);
+    return (
+      <span className="rs-chips-edit" role="group" aria-label={s.label}>
         {options.map((opt) => (
           <button
             key={opt}
@@ -523,12 +490,8 @@ function Editor({ s, draft, onDraft }: { s: RuntimeSetting; draft: Draft; onDraf
             className="rs-toggle"
             aria-pressed={chosen.has(opt)}
             title={opt}
-            onClick={() => {
-              const next = new Set(chosen);
-              if (next.has(opt)) next.delete(opt);
-              else next.add(opt);
-              onDraft(options.filter((o) => next.has(o)));
-            }}
+            disabled={busy}
+            onClick={() => onWrite("put", options.filter((o) => (o === opt ? !chosen.has(o) : chosen.has(o))))}
           >
             {itemLabel(opt)}
           </button>
@@ -536,67 +499,80 @@ function Editor({ s, draft, onDraft }: { s: RuntimeSetting; draft: Draft; onDraf
       </span>
     );
   }
-  if (s.type === "bool") {
-    const on = draft === true;
-    const locked = switchLocked(s) && !on;
-    return (
-      <span className="rs-switch-wrap">
-        <button
-          type="button"
-          role="switch"
-          aria-checked={on}
-          aria-label="New value"
-          className="rs-switch"
-          disabled={locked}
-          onClick={() => onDraft(!on)}
-        >
-          <span className="rs-switch__knob" />
-        </button>
-        <span className="rs-value">{on ? "On" : "Off"}</span>
-        {locked ? <span className="rs-hint">Off in the environment; an override can only keep it off.</span> : null}
-      </span>
-    );
-  }
-  if (s.type === "enum") {
-    return (
-      <select className="rs-input rs-input--mono" aria-label="New value" value={String(draft)} onChange={(e) => onDraft(e.target.value)}>
-        {s.choices.map((o) => (
-          <option key={o} value={o}>
-            {o}
-          </option>
-        ))}
-      </select>
-    );
-  }
-  if (s.type === "object") {
-    return (
-      <textarea
-        className="rs-input rs-input--mono"
-        aria-label="New value"
-        rows={2}
-        value={String(draft)}
-        onChange={(e) => onDraft(e.target.value)}
-      />
-    );
-  }
+  return <FieldControl s={s} v={v} busy={busy} onWrite={onWrite} onPropose={onPropose} />;
+}
+
+/** Number / object field: applies on Enter or blur when the value changed and
+ * is valid; Escape restores the server value. Remounted (parent key) whenever
+ * the server value changes or a write settles. */
+function FieldControl({
+  s,
+  v,
+  busy,
+  onWrite,
+  onPropose,
+}: {
+  s: RuntimeSetting;
+  v: Shown;
+  busy: boolean;
+  onWrite: Write;
+  onPropose: () => void;
+}) {
+  const server = fieldText(s, v.value);
+  const [text, setText] = useState(server);
+  const [error, setError] = useState<string | null>(null);
+  const sent = useRef<string | null>(null); // the text already sent for this mount
+
+  const apply = () => {
+    if (busy || text.trim() === server || text === sent.current) return;
+    const parsed = parseText(s, text);
+    if (parsed.error) {
+      setError(parsed.error);
+      return;
+    }
+    setError(null);
+    sent.current = text;
+    onWrite("put", parsed.value);
+  };
   const { min, max, envCap } = numberLimits(s);
+  const isNumber = s.type !== "object";
   return (
     <span className="rs-number">
       <input
-        className="rs-input rs-input--mono"
-        aria-label="New value"
-        type="number"
-        min={min}
-        max={max}
-        step={s.type === "int" ? 1 : "any"}
-        value={String(draft)}
-        onChange={(e) => onDraft(e.target.value)}
+        className={`rs-input rs-input--mono ${isNumber ? "rs-input--number" : "rs-input--json"} ${v.text ? "rs-input--unset" : ""}`}
+        type="text"
+        inputMode={isNumber ? "decimal" : undefined}
+        aria-label={s.label}
+        aria-invalid={error ? true : undefined}
+        placeholder={v.text ?? undefined}
+        value={text}
+        disabled={busy}
+        onChange={(e) => {
+          setText(e.target.value);
+          setError(null);
+          sent.current = null;
+          onPropose(); // a pending confirm was for the old text
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") apply();
+          if (e.key === "Escape") {
+            setText(server);
+            setError(null);
+            onPropose();
+          }
+        }}
+        onBlur={apply}
       />
       {s.unit ? <span className="rs-number__unit">{s.unit}</span> : null}
       {envCap && max != null ? <span className="rs-hint">Env cap {fmtNumber(max, s.unit)}</span> : null}
-      {!envCap && min != null && max != null ? (
+      {!envCap && isNumber && min != null && max != null ? (
         <span className="rs-hint">
           Range {fmtNumber(min, null)}–{fmtNumber(max, s.unit)}
+        </span>
+      ) : null}
+      {error ? (
+        <span className="rs-field-error" role="alert">
+          {error}
         </span>
       ) : null}
     </span>

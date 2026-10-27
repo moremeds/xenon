@@ -90,43 +90,50 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/api/prices**", (r) => r.abort());
 });
 
-test("admin runtime settings: labels, sources, read/edit, pause, typed confirm", async ({ page }) => {
+test("admin runtime settings: in-row controls, pause, typed confirm, inline number check", async ({ page }) => {
   await page.goto("/admin");
   await hideDevBadge(page);
   const panel = page.getByTestId("runtime-settings");
   await expect(panel.getByTestId("settings-group-safety")).toBeVisible();
   await expect(panel.getByTestId("settings-group-toggle")).toContainText("Quote routing");
   await expect(panel.getByTestId("settings-group-tuning")).toBeVisible();
+  await expect(panel.getByRole("button", { name: "Edit" })).toHaveCount(0);
   const quotes = page.getByTestId("setting-XENON_QUOTES_DEFAULT");
-  await expect(quotes.getByTestId("effective")).toHaveText("ib");
+  await expect(quotes.getByRole("button", { name: "ib" })).toHaveAttribute("aria-pressed", "true");
   await expect(quotes.getByTestId("source")).toHaveText("live (relay)");
   const cap = page.getByTestId("setting-XENON_FUTU_MKT_NOTIONAL_CAP");
   await expect(cap.getByTestId("label")).toHaveText("Futu market-order cap");
-  await expect(cap.getByTestId("effective")).toHaveText("10,000 USD");
+  await expect(cap.getByLabel("Futu market-order cap")).toHaveValue("10000");
   await expect(cap.getByTestId("source")).toHaveText("override");
+  await expect(cap.getByRole("button", { name: "Revert to env" })).toBeVisible();
   await expect(panel).not.toContainText("---");
-  await panel.screenshot({ path: "../output/playwright/admin-settings-ux-2026-10-27-read.png" });
+  await panel.screenshot({ path: "../output/playwright/admin-settings-toggles-2026-10-27-read.png" });
+
+  const puts = (page as unknown as { puts: { key: string; value: unknown; confirm?: string }[] }).puts;
 
   const banner = page.getByTestId("orders-paused-banner");
   await expect(banner).toContainText("Orders active");
   await banner.getByRole("button", { name: "Pause orders" }).click();
   await expect(banner).toContainText("Orders paused");
 
+  // One click on a segment applies it.
+  await quotes.getByRole("button", { name: "futu-first" }).click();
+  await expect.poll(() => puts.filter((p) => p.key === "XENON_QUOTES_DEFAULT").map((p) => p.value)).toEqual(["futu-first"]);
+
+  // Keyboard: Space on a focused switch applies it; the 428 opens the typed confirm.
   const audit = page.getByTestId("setting-XENON_AUDIT_CANCEL");
-  await audit.getByRole("button", { name: "Edit" }).click();
-  await audit.getByRole("switch", { name: "New value" }).click();
-  await audit.getByRole("button", { name: "Save" }).click();
+  await audit.getByRole("switch", { name: "Naked-short audit: cancel violations" }).focus();
+  await page.keyboard.press("Space");
   const step = audit.getByTestId("confirm-step");
   await expect(step).toBeVisible();
   await expect(step.getByTestId("confirm-proposal")).toHaveText("Set Naked-short audit: cancel violations to On");
+  await expect(audit.getByRole("switch")).toHaveAttribute("aria-checked", "false");
   await expect(step.getByRole("button", { name: "Confirm change" })).toBeDisabled();
   await step.getByLabel("Type XENON_AUDIT_CANCEL to confirm").fill("XENON_AUDIT_CANCEL");
   await expect(step.getByRole("button", { name: "Confirm change" })).toBeEnabled();
-  await panel.screenshot({ path: "../output/playwright/admin-settings-ux-2026-10-27-edit.png" });
+  await panel.screenshot({ path: "../output/playwright/admin-settings-toggles-2026-10-27-confirm.png" });
   await step.getByRole("button", { name: "Confirm change" }).click();
-  await expect(audit.getByTestId("editor")).toBeHidden();
-
-  const puts = (page as unknown as { puts: { key: string; confirm?: string }[] }).puts;
+  await expect(step).toBeHidden();
   const auditPuts = puts.filter((p) => p.key === "XENON_AUDIT_CANCEL");
   expect(auditPuts.map((p) => p.confirm ?? null)).toEqual([null, "XENON_AUDIT_CANCEL"]);
 
@@ -134,25 +141,31 @@ test("admin runtime settings: labels, sources, read/edit, pause, typed confirm",
   await banner.getByRole("button", { name: "Resume orders" }).click();
   await expect(banner).toContainText("Orders active");
 
-  // A cap above the env value is refused in the browser; nothing is sent.
+  // A cap above the env value is refused inline; nothing is sent; Escape restores.
   const before = puts.length;
-  await cap.getByRole("button", { name: "Edit" }).click();
-  await expect(cap.getByTestId("editor")).toContainText("Env cap 25,000 USD");
-  await cap.getByLabel("New value").fill("25001");
-  await cap.getByRole("button", { name: "Save" }).click();
-  await expect(page.getByText("Futu market-order cap: 25001 is above the env cap 25,000 USD")).toBeVisible();
+  const field = cap.getByLabel("Futu market-order cap");
+  await expect(cap).toContainText("Env cap 25,000 USD");
+  await field.fill("25001");
+  await field.press("Enter");
+  await expect(cap.getByRole("alert")).toHaveText("Futu market-order cap: 25001 is above the env cap 25,000 USD");
+  await field.press("Escape");
+  await expect(field).toHaveValue("10000");
+  await expect(cap.getByRole("alert")).toHaveCount(0);
   expect(puts.length).toBe(before);
+  await field.fill("20000");
+  await field.press("Enter");
+  await expect.poll(() => puts.slice(before)).toEqual([{ key: "XENON_FUTU_MKT_NOTIONAL_CAP", value: 20000 }]);
 });
 
 test.describe("narrow screen", () => {
   test.use({ viewport: { width: 390, height: 2400 } });
   test("admin runtime settings render at 390 wide", async ({ page }) => {
     await page.goto("/admin");
-  await hideDevBadge(page);
+    await hideDevBadge(page);
     const panel = page.getByTestId("runtime-settings");
     await expect(page.getByTestId("setting-XENON_FUTU_TUPLES_LIVE")).toContainText("Stock · Limit · Day · RTH");
     const overflow = await panel.evaluate((el) => el.scrollWidth - el.clientWidth);
     expect(overflow).toBeLessThanOrEqual(1);
-    await panel.screenshot({ path: "../output/playwright/admin-settings-ux-2026-10-27-mobile.png" });
+    await panel.screenshot({ path: "../output/playwright/admin-settings-toggles-2026-10-27-mobile.png" });
   });
 });

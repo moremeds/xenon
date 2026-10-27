@@ -7,18 +7,22 @@ import RuntimeSettingsPanel from "@/components/operator/RuntimeSettingsPanel";
 import { settingsErrorMessage } from "@/lib/settingsReasonCodes";
 import { settingsFixture } from "./fixtures/runtimeSettings";
 
-type Call = { url: string; method: string; body: unknown };
+type Call = { url: string; method: string; body: unknown; contentType: string | null };
 
-function mockFetch(responder: (call: Call) => { status: number; body: unknown } | undefined) {
+function mockFetch(
+  responder: (call: Call) => { status: number; body: unknown } | Promise<Response> | undefined,
+) {
   const calls: Call[] = [];
   const fn = vi.fn(async (url: string, init?: RequestInit) => {
     const call = {
       url: String(url),
       method: init?.method ?? "GET",
       body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      contentType: new Headers(init?.headers).get("content-type"),
     };
     calls.push(call);
     const custom = responder(call);
+    if (custom instanceof Promise) return custom;
     if (custom) return new Response(JSON.stringify(custom.body), { status: custom.status });
     if (call.method === "GET") return new Response(JSON.stringify({ settings: settingsFixture() }), { status: 200 });
     return new Response(JSON.stringify({ changed: true }), { status: 200 });
@@ -27,7 +31,14 @@ function mockFetch(responder: (call: Call) => { status: number; body: unknown } 
   return calls;
 }
 
+const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+const pausedRows = (paused: boolean) =>
+  settingsFixture().map((s) => (s.key === "orders_paused" ? { ...s, effective: paused, db_value: paused ? true : null } : s));
+
 const row = (key: string) => screen.getByTestId(`setting-${key}`);
+const writes = (calls: Call[]) => calls.filter((c) => c.method !== "GET");
+const need428 = { status: 428, body: { reason_code: "SETTING_CONFIRM_REQUIRED", detail: "needs confirm" } };
+const field = (key: string, label: string) => within(row(key)).getByLabelText(label) as HTMLInputElement;
 
 beforeEach(() => {
   vi.useRealTimers();
@@ -37,13 +48,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
-
-/** Read mode is the default: open one row's editor. */
-function edit(key: string) {
-  const r = row(key);
-  fireEvent.click(within(r).getByRole("button", { name: "Edit" }));
-  return within(r).getByTestId("editor");
-}
 
 describe("RuntimeSettingsPanel", () => {
   it("groups as sections with human labels, the key as secondary text, and source chips", async () => {
@@ -56,19 +60,34 @@ describe("RuntimeSettingsPanel", () => {
     const cap = row("XENON_FUTU_MKT_NOTIONAL_CAP");
     expect(within(cap).getByTestId("label").textContent).toBe("Futu market-order cap");
     expect(within(cap).getByTestId("key").textContent).toBe("XENON_FUTU_MKT_NOTIONAL_CAP");
-    expect(within(cap).getByTestId("effective").textContent).toBe("10,000 USD");
+    expect(field("XENON_FUTU_MKT_NOTIONAL_CAP", "Futu market-order cap").value).toBe("10000");
+    expect(cap.textContent).toContain("USD");
+    expect(cap.textContent).toContain("Env cap 25,000 USD");
     expect(within(cap).getByTestId("source").textContent).toBe("override");
     expect(cap.dataset.overridden).toBe("true");
     expect(within(cap).getByTestId("last-change").textContent).toContain("internal-ui");
     expect(within(cap).getByTestId("last-change").textContent).toContain("tighten before first live order");
     const audit = row("XENON_AUDIT_CANCEL");
+    const sw = within(audit).getByRole("switch", { name: "Naked-short audit: cancel violations" });
+    expect(sw.getAttribute("aria-checked")).toBe("false");
     expect(within(audit).getByTestId("effective").textContent).toBe("Off");
     expect(within(audit).getByTestId("source").textContent).toBe("env");
     expect(audit.dataset.overridden).toBe("false");
     expect(within(audit).queryByTestId("last-change")).toBeNull(); // only when present
+    expect(within(audit).queryByRole("button", { name: "Revert to env" })).toBeNull();
     const typed = within(audit).getByText("typed confirm");
     expect(typed.getAttribute("title")).toMatch(/type the key/i);
     expect(within(row("XENON_GATE4_NETTING")).queryByText("typed confirm")).toBeNull();
+  });
+
+  it("has no Edit step: no Edit, Save, Cancel or note field anywhere", async () => {
+    mockFetch(() => undefined);
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    const panel = await screen.findByTestId("runtime-settings");
+    await screen.findByTestId("setting-XENON_AUDIT_CANCEL");
+    for (const name of ["Edit", "Save", "Cancel"]) expect(within(panel).queryAllByRole("button", { name })).toHaveLength(0);
+    expect(within(panel).queryAllByLabelText(/note/i)).toHaveLength(0);
+    expect(screen.queryAllByTestId("editor")).toHaveLength(0);
   });
 
   it("marks narrow-only per row (not as a blanket group rule), never uses --- placeholders", async () => {
@@ -76,19 +95,16 @@ describe("RuntimeSettingsPanel", () => {
     render(<RuntimeSettingsPanel onToast={vi.fn()} />);
     await screen.findByTestId("setting-XENON_FUTU_MKT_NOTIONAL_CAP");
     const panel = screen.getByTestId("runtime-settings");
-    // no blanket claim: audit-cancel is a free override in the same group
     expect(panel.textContent).not.toMatch(/Overrides here can only tighten/);
     for (const key of ["XENON_FUTU_TRADING", "XENON_FUTU_MKT_NOTIONAL_CAP", "XENON_GATE4_NETTING"]) {
       const chip = within(row(key)).getByText("narrow-only");
       expect(chip.getAttribute("title")).toMatch(/can only tighten/);
     }
     expect(within(row("XENON_AUDIT_CANCEL")).queryByText("narrow-only")).toBeNull();
+    // `and` rule with the env off: the switch can only stay off
+    expect((within(row("XENON_GATE4_NETTING")).getByRole("switch") as HTMLButtonElement).disabled).toBe(true);
     expect(panel.textContent).not.toContain("---");
     expect(panel.textContent).not.toContain("applies live");
-    edit("XENON_AUDIT_CANCEL");
-    const ed = within(row("XENON_AUDIT_CANCEL")).getByTestId("editor");
-    expect(ed.textContent).toContain("No override — using env");
-    expect(ed.textContent).toContain("Never changed");
   });
 
   it("a nonzero value never displays as 0", async () => {
@@ -105,9 +121,9 @@ describe("RuntimeSettingsPanel", () => {
         : undefined,
     );
     render(<RuntimeSettingsPanel onToast={vi.fn()} />);
-    const book = await screen.findByTestId("setting-FUTU_BOOK_STALE_S");
-    expect(within(book).getByTestId("effective").textContent).toBe("1e-7 s");
-    expect(within(row("IB_REALTIME_STALE_TICK_MS")).getByTestId("effective").textContent).toBe("60,000 ms");
+    await screen.findByTestId("setting-FUTU_BOOK_STALE_S");
+    expect(field("FUTU_BOOK_STALE_S", "Order-book staleness cutoff").value).toBe("1e-7");
+    expect(field("IB_REALTIME_STALE_TICK_MS", "Stale tick threshold").value).toBe("60000");
   });
 
   it("relay keys show the relay's live value; futu-quotes keys without override show service default", async () => {
@@ -125,16 +141,16 @@ describe("RuntimeSettingsPanel", () => {
     );
     render(<RuntimeSettingsPanel onToast={vi.fn()} />);
     const quotes = await screen.findByTestId("setting-XENON_QUOTES_DEFAULT");
-    expect(within(quotes).getByTestId("effective").textContent).toBe("ib");
+    const seg = within(quotes).getByRole("group", { name: "Default quote source" });
+    expect(within(seg).getByRole("button", { name: "ib" }).getAttribute("aria-pressed")).toBe("true");
+    expect(within(seg).getByRole("button", { name: "futu-first" }).getAttribute("aria-pressed")).toBe("false");
     expect(within(quotes).getByTestId("source").textContent).toBe("live (relay)");
-    const lines = row("IB_REALTIME_MAX_LINES");
-    expect(within(lines).getByTestId("effective").textContent).toBe("Not reported by relay");
-    const book = row("FUTU_BOOK_STALE_S");
-    expect(within(book).getByTestId("effective").textContent).toBe("Service default");
-    expect(within(row("IB_REALTIME_STALE_TICK_MS")).getByTestId("effective").textContent).toBe("60,000 ms");
-    const quota = row("FUTU_QUOTE_QUOTA");
-    expect(within(quota).getByTestId("effective").textContent).toBe("Service default");
-    expect(within(quota).queryByTestId("source")).toBeNull();
+    const lines = field("IB_REALTIME_MAX_LINES", "IB line budget");
+    expect(lines.value).toBe("");
+    expect(lines.placeholder).toBe("Not reported by relay");
+    expect(field("FUTU_BOOK_STALE_S", "Order-book staleness cutoff").placeholder).toBe("Service default");
+    expect(field("IB_REALTIME_STALE_TICK_MS", "Stale tick threshold").value).toBe("60000");
+    expect(within(row("FUTU_QUOTE_QUOTA")).queryByTestId("source")).toBeNull();
     expect(screen.getByTestId("runtime-settings").textContent).not.toContain("env: set in");
   });
 
@@ -142,23 +158,10 @@ describe("RuntimeSettingsPanel", () => {
     mockFetch(() => undefined);
     render(<RuntimeSettingsPanel onToast={vi.fn()} />);
     const tuples = await screen.findByTestId("setting-XENON_FUTU_TUPLES_LIVE");
-    const stock = within(tuples).getByText("Stock · Limit · Day · RTH");
+    const stock = within(tuples).getByRole("button", { name: "Stock · Limit · Day · RTH" });
     expect(stock.getAttribute("title")).toBe("STK:LMT:DAY:RTH");
-    expect(within(tuples).getByText("Option · Limit · GTC · RTH")).toBeTruthy();
-  });
-
-  it("read mode by default; Edit opens one row's editor; Cancel closes it", async () => {
-    mockFetch(() => undefined);
-    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
-    await screen.findByTestId("setting-XENON_AUDIT_CANCEL");
-    expect(screen.queryAllByLabelText("New value")).toHaveLength(0);
-    edit("XENON_AUDIT_CANCEL");
-    expect(screen.getAllByTestId("editor")).toHaveLength(1);
-    edit("XENON_FUTU_MKT_NOTIONAL_CAP"); // opening another row closes the first
-    expect(screen.getAllByTestId("editor")).toHaveLength(1);
-    expect(within(row("XENON_FUTU_MKT_NOTIONAL_CAP")).getByTestId("editor").textContent).toContain("Env cap 25,000 USD");
-    fireEvent.click(within(row("XENON_FUTU_MKT_NOTIONAL_CAP")).getByRole("button", { name: "Cancel" }));
-    expect(screen.queryAllByTestId("editor")).toHaveLength(0);
+    expect(stock.getAttribute("aria-pressed")).toBe("true");
+    expect(within(tuples).getByRole("button", { name: "Option · Limit · GTC · RTH" })).toBeTruthy();
   });
 
   it("orders status strip: pause = PUT true, resume = DELETE", async () => {
@@ -188,24 +191,38 @@ describe("RuntimeSettingsPanel", () => {
     expect(screen.queryByTestId("setting-orders_paused")).toBeNull(); // only in the strip
   });
 
-  it("booleans edit as a switch; confirm is sent only after the typed confirm step", async () => {
-    const calls = mockFetch((c) => {
-      if (c.method === "PUT" && !(c.body as { confirm?: string }).confirm) {
-        return { status: 428, body: { reason_code: "SETTING_CONFIRM_REQUIRED", detail: "needs confirm" } };
-      }
-      return undefined;
-    });
+  it("a switch click sends one PUT with the new boolean", async () => {
+    const calls = mockFetch(() => undefined);
+    const toast = vi.fn();
+    render(<RuntimeSettingsPanel onToast={toast} />);
+    await screen.findByTestId("setting-XENON_FUTU_OPTIONS");
+    fireEvent.click(within(row("XENON_FUTU_OPTIONS")).getByRole("switch", { name: "Futu option quotes" }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith("success", "XENON_FUTU_OPTIONS saved"));
+    expect(writes(calls)).toEqual([
+      expect.objectContaining({ method: "PUT", url: "/api/admin/settings/XENON_FUTU_OPTIONS", body: { value: true } }),
+    ]);
+  });
+
+  it("a switch works from the keyboard (Space and Enter reach the native button)", async () => {
+    mockFetch(() => undefined);
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    await screen.findByTestId("setting-XENON_FUTU_OPTIONS");
+    const sw = within(row("XENON_FUTU_OPTIONS")).getByRole("switch", { name: "Futu option quotes" });
+    expect(sw.tagName).toBe("BUTTON");
+    expect(sw.getAttribute("type")).toBe("button");
+  });
+
+  it("a typed-confirm switch: first PUT without confirm, the 428 step sends confirm", async () => {
+    const calls = mockFetch((c) => (c.method === "PUT" && !(c.body as { confirm?: string }).confirm ? need428 : undefined));
     render(<RuntimeSettingsPanel onToast={vi.fn()} />);
     await screen.findByTestId("setting-XENON_AUDIT_CANCEL");
-    const ed = edit("XENON_AUDIT_CANCEL");
-    const sw = within(ed).getByRole("switch", { name: "New value" });
-    expect(sw.getAttribute("aria-checked")).toBe("false");
-    fireEvent.click(sw);
-    expect(sw.getAttribute("aria-checked")).toBe("true");
-    fireEvent.click(within(ed).getByRole("button", { name: "Save" }));
     const audit = row("XENON_AUDIT_CANCEL");
+    fireEvent.click(within(audit).getByRole("switch", { name: "Naked-short audit: cancel violations" }));
     const step = await within(audit).findByTestId("confirm-step");
+    // the control never shows the unconfirmed value
+    expect(within(audit).getByRole("switch").getAttribute("aria-checked")).toBe("false");
     expect(within(step).getByTestId("confirm-proposal").textContent).toBe("Set Naked-short audit: cancel violations to On");
+    expect(within(step).getByTestId("confirm-key").textContent).toBe("XENON_AUDIT_CANCEL");
     const go = within(step).getByRole("button", { name: "Confirm change" });
     expect((go as HTMLButtonElement).disabled).toBe(true);
     fireEvent.change(within(step).getByLabelText("Type XENON_AUDIT_CANCEL to confirm"), {
@@ -216,38 +233,74 @@ describe("RuntimeSettingsPanel", () => {
     const [first, second] = calls.filter((c) => c.method === "PUT");
     expect(first.body).toEqual({ value: true });
     expect(second.body).toEqual({ value: true, confirm: "XENON_AUDIT_CANCEL" });
+    await waitFor(() => expect(within(audit).queryByTestId("confirm-step")).toBeNull());
   });
 
-  it("narrow-only sets edit as toggle chips limited to the env values", async () => {
+  it("a chip click sends the set with that item toggled; chips stay limited to the env values", async () => {
     const calls = mockFetch(() => undefined);
     render(<RuntimeSettingsPanel onToast={vi.fn()} />);
-    await screen.findByTestId("setting-XENON_FUTU_TRADING");
-    const ed = edit("XENON_FUTU_TRADING");
-    const chip = within(ed).getByRole("button", { name: "Paper (simulate)" });
-    expect(chip.getAttribute("aria-pressed")).toBe("true");
-    expect(within(ed).queryByRole("button", { name: "Live (real)" })).toBeNull();
-    fireEvent.click(chip);
-    expect(chip.getAttribute("aria-pressed")).toBe("false");
-    fireEvent.click(within(ed).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
-    expect(calls.find((c) => c.method === "PUT")!.body).toEqual({ value: [] });
+    await screen.findByTestId("setting-XENON_FUTU_TUPLES_PAPER");
+    fireEvent.click(within(row("XENON_FUTU_TUPLES_PAPER")).getByRole("button", { name: "Stock · Market · Day · RTH" }));
+    await waitFor(() => expect(writes(calls)).toHaveLength(1));
+    expect(writes(calls)[0].body).toEqual({ value: ["OPT:LMT:DAY:RTH", "STK:LMT:DAY:RTH"] });
+    const trading = row("XENON_FUTU_TRADING");
+    expect(within(trading).getByRole("button", { name: "Paper (simulate)" }).getAttribute("aria-pressed")).toBe("true");
+    expect(within(trading).queryByRole("button", { name: "Live (real)" })).toBeNull();
   });
 
-  it("revert to env sends DELETE; errors surface their reason_code copy", async () => {
-    const calls = mockFetch((c) =>
-      c.method === "DELETE" ? { status: 403, body: { reason_code: "READ_ONLY_MODE", detail: "x" } } : undefined,
-    );
+  it("a segment click sends the enum; the current segment sends nothing", async () => {
+    const calls = mockFetch(() => undefined);
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    await screen.findByTestId("setting-XENON_QUOTES_DEFAULT");
+    const seg = within(row("XENON_QUOTES_DEFAULT")).getByRole("group", { name: "Default quote source" });
+    fireEvent.click(within(seg).getByRole("button", { name: "ib" }));
+    expect(writes(calls)).toHaveLength(0);
+    fireEvent.click(within(seg).getByRole("button", { name: "futu-first" }));
+    await waitFor(() => expect(writes(calls)).toHaveLength(1));
+    expect(writes(calls)[0]).toEqual(expect.objectContaining({ method: "PUT", body: { value: "futu-first" } }));
+  });
+
+  it("a number applies on Enter; an invalid value shows inline and sends nothing; Escape restores", async () => {
+    const calls = mockFetch(() => undefined);
     const toast = vi.fn();
     render(<RuntimeSettingsPanel onToast={toast} />);
     await screen.findByTestId("setting-XENON_FUTU_MKT_NOTIONAL_CAP");
-    const ed = edit("XENON_FUTU_MKT_NOTIONAL_CAP");
-    fireEvent.click(within(ed).getByRole("button", { name: "Revert to env" }));
-    await waitFor(() => expect(toast).toHaveBeenCalled());
-    expect(calls.find((c) => c.method === "DELETE")!.url).toBe("/api/admin/settings/XENON_FUTU_MKT_NOTIONAL_CAP");
-    expect(toast).toHaveBeenCalledWith("error", settingsErrorMessage({ reason_code: "READ_ONLY_MODE" }, ""));
+    const label = "Futu market-order cap";
+    // above the env cap: refused in the browser, inline
+    fireEvent.change(field("XENON_FUTU_MKT_NOTIONAL_CAP", label), { target: { value: "25001" } });
+    fireEvent.keyDown(field("XENON_FUTU_MKT_NOTIONAL_CAP", label), { key: "Enter" });
+    expect(within(row("XENON_FUTU_MKT_NOTIONAL_CAP")).getByRole("alert").textContent).toBe(
+      "Futu market-order cap: 25001 is above the env cap 25,000 USD",
+    );
+    fireEvent.change(field("XENON_FUTU_MKT_NOTIONAL_CAP", label), { target: { value: "abc" } });
+    fireEvent.blur(field("XENON_FUTU_MKT_NOTIONAL_CAP", label));
+    expect(within(row("XENON_FUTU_MKT_NOTIONAL_CAP")).getByRole("alert").textContent).toMatch(/enter a number/);
+    // Escape restores the server value and clears the error
+    fireEvent.keyDown(field("XENON_FUTU_MKT_NOTIONAL_CAP", label), { key: "Escape" });
+    expect(field("XENON_FUTU_MKT_NOTIONAL_CAP", label).value).toBe("10000");
+    expect(within(row("XENON_FUTU_MKT_NOTIONAL_CAP")).queryByRole("alert")).toBeNull();
+    // unchanged: blur sends nothing
+    fireEvent.blur(field("XENON_FUTU_MKT_NOTIONAL_CAP", label));
+    expect(writes(calls)).toHaveLength(0);
+    fireEvent.change(field("XENON_FUTU_MKT_NOTIONAL_CAP", label), { target: { value: "25000" } });
+    fireEvent.keyDown(field("XENON_FUTU_MKT_NOTIONAL_CAP", label), { key: "Enter" });
+    await waitFor(() => expect(writes(calls)).toHaveLength(1));
+    expect(writes(calls)[0].body).toEqual({ value: 25000 });
+    expect(toast).not.toHaveBeenCalledWith("error", expect.anything());
   });
 
-  it("an invalid number is a 400 INVALID_VALUE toast", async () => {
+  it("a number applies on blur when it changed", async () => {
+    const calls = mockFetch(() => undefined);
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    await screen.findByTestId("setting-IB_REALTIME_STALE_TICK_MS");
+    const f = field("IB_REALTIME_STALE_TICK_MS", "Stale tick threshold");
+    fireEvent.change(f, { target: { value: "45000" } });
+    fireEvent.blur(f);
+    await waitFor(() => expect(writes(calls)).toHaveLength(1));
+    expect(writes(calls)[0].body).toEqual({ value: 45000 });
+  });
+
+  it("an integer the API rejects is a 400 INVALID_VALUE toast", async () => {
     mockFetch((c) =>
       c.method === "PUT"
         ? { status: 400, body: { reason_code: "SETTING_INVALID_VALUE", detail: "FUTU_QUOTE_QUOTA: must be an integer in [1, 100000]" } }
@@ -256,12 +309,105 @@ describe("RuntimeSettingsPanel", () => {
     const toast = vi.fn();
     render(<RuntimeSettingsPanel onToast={toast} />);
     await screen.findByTestId("setting-FUTU_QUOTE_QUOTA");
-    const ed = edit("FUTU_QUOTE_QUOTA");
-    // in bounds but not an integer: only the API rejects it
-    fireEvent.change(within(ed).getByLabelText("New value"), { target: { value: "1.5" } });
-    fireEvent.click(within(ed).getByRole("button", { name: "Save" }));
+    const f = field("FUTU_QUOTE_QUOTA", "Futu quote quota");
+    fireEvent.change(f, { target: { value: "1.5" } }); // in bounds, not an integer: only the API rejects it
+    fireEvent.keyDown(f, { key: "Enter" });
     await waitFor(() => expect(toast).toHaveBeenCalled());
     expect(toast.mock.calls[0][1]).toContain("must be an integer in [1, 100000]");
+    await waitFor(() => expect(field("FUTU_QUOTE_QUOTA", "Futu quote quota").value).toBe(""));
+  });
+
+  it("a failed PUT rolls the control back to the server value", async () => {
+    mockFetch((c) => (c.method === "PUT" ? { status: 403, body: { reason_code: "READ_ONLY_MODE", detail: "x" } } : undefined));
+    const toast = vi.fn();
+    render(<RuntimeSettingsPanel onToast={toast} />);
+    await screen.findByTestId("setting-XENON_FUTU_MKT_NOTIONAL_CAP");
+    const label = "Futu market-order cap";
+    fireEvent.change(field("XENON_FUTU_MKT_NOTIONAL_CAP", label), { target: { value: "12000" } });
+    fireEvent.keyDown(field("XENON_FUTU_MKT_NOTIONAL_CAP", label), { key: "Enter" });
+    await waitFor(() => expect(toast).toHaveBeenCalledWith("error", settingsErrorMessage({ reason_code: "READ_ONLY_MODE" }, "")));
+    await waitFor(() => expect(field("XENON_FUTU_MKT_NOTIONAL_CAP", label).value).toBe("10000"));
+    fireEvent.click(within(row("XENON_FUTU_OPTIONS")).getByRole("switch"));
+    await waitFor(() => expect(toast).toHaveBeenCalledTimes(2));
+    expect(within(row("XENON_FUTU_OPTIONS")).getByRole("switch").getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("controls are disabled with a pending state while a request runs; no optimistic value", async () => {
+    let release!: () => void;
+    mockFetch((c) =>
+      c.method === "PUT" ? new Promise<Response>((resolve) => (release = () => resolve(reply({ changed: true })))) : undefined,
+    );
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    await screen.findByTestId("setting-XENON_FUTU_OPTIONS");
+    const r = row("XENON_FUTU_OPTIONS");
+    const sw = within(r).getByRole("switch") as HTMLButtonElement;
+    fireEvent.click(sw);
+    await waitFor(() => expect(sw.disabled).toBe(true));
+    expect(r.getAttribute("aria-busy")).toBe("true");
+    expect(r.textContent).toContain("Applying");
+    expect(sw.getAttribute("aria-checked")).toBe("false");
+    // other rows stay usable
+    expect((within(row("XENON_AUDIT_CANCEL")).getByRole("switch") as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => release());
+    await waitFor(() => expect((within(row("XENON_FUTU_OPTIONS")).getByRole("switch") as HTMLButtonElement).disabled).toBe(false));
+    expect(row("XENON_FUTU_OPTIONS").getAttribute("aria-busy")).toBe("false");
+  });
+
+  it("two quick clicks: only the last proposal can confirm", async () => {
+    let hold!: () => void;
+    let n = 0;
+    const calls = mockFetch((c) => {
+      if (c.method !== "PUT") return undefined;
+      if ((c.body as { confirm?: string }).confirm) return undefined;
+      n += 1;
+      if (n === 1) return new Promise<Response>((resolve) => (hold = () => resolve(reply(need428.body, 428))));
+      return need428;
+    });
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    await screen.findByTestId("setting-XENON_FUTU_TUPLES_LIVE");
+    const r = row("XENON_FUTU_TUPLES_LIVE");
+    const a = "Stock · Limit · GTC · RTH";
+    const b = "Option · Limit · GTC · RTH";
+    fireEvent.click(within(r).getByRole("button", { name: a }));
+    fireEvent.click(within(r).getByRole("button", { name: b })); // row busy: ignored
+    await act(async () => hold());
+    expect(writes(calls)).toHaveLength(1);
+    let step = await within(r).findByTestId("confirm-step");
+    expect(within(step).getByTestId("confirm-proposal").textContent).toBe(
+      "Set Futu live order types to Option · Limit · Day · RTH, Option · Limit · GTC · RTH, Stock · Limit · Day · RTH",
+    );
+    // a later click replaces the pending proposal
+    fireEvent.click(within(r).getByRole("button", { name: b }));
+    expect(within(r).queryByTestId("confirm-step")).toBeNull();
+    step = await within(r).findByTestId("confirm-step");
+    expect(within(step).getByTestId("confirm-proposal").textContent).toBe(
+      "Set Futu live order types to Option · Limit · Day · RTH, Stock · Limit · Day · RTH, Stock · Limit · GTC · RTH",
+    );
+    fireEvent.change(within(step).getByLabelText("Type XENON_FUTU_TUPLES_LIVE to confirm"), {
+      target: { value: "XENON_FUTU_TUPLES_LIVE" },
+    });
+    fireEvent.click(within(step).getByRole("button", { name: "Confirm change" }));
+    await waitFor(() => expect(writes(calls)).toHaveLength(3));
+    expect(writes(calls).map((c) => c.body)).toEqual([
+      { value: ["OPT:LMT:DAY:RTH", "OPT:LMT:GTC:RTH", "STK:LMT:DAY:RTH"] },
+      { value: ["OPT:LMT:DAY:RTH", "STK:LMT:DAY:RTH", "STK:LMT:GTC:RTH"] },
+      { value: ["OPT:LMT:DAY:RTH", "STK:LMT:DAY:RTH", "STK:LMT:GTC:RTH"], confirm: "XENON_FUTU_TUPLES_LIVE" },
+    ]);
+  });
+
+  it("revert to env sends DELETE with a JSON content type and no note; errors toast", async () => {
+    const calls = mockFetch((c) =>
+      c.method === "DELETE" ? { status: 403, body: { reason_code: "READ_ONLY_MODE", detail: "x" } } : undefined,
+    );
+    const toast = vi.fn();
+    render(<RuntimeSettingsPanel onToast={toast} />);
+    await screen.findByTestId("setting-XENON_FUTU_MKT_NOTIONAL_CAP");
+    fireEvent.click(within(row("XENON_FUTU_MKT_NOTIONAL_CAP")).getByRole("button", { name: "Revert to env" }));
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    const del = calls.find((c) => c.method === "DELETE")!;
+    expect(del.url).toBe("/api/admin/settings/XENON_FUTU_MKT_NOTIONAL_CAP");
+    expect(del.contentType).toBe("application/json");
+    expect(toast).toHaveBeenCalledWith("error", settingsErrorMessage({ reason_code: "READ_ONLY_MODE" }, ""));
   });
 });
 
@@ -283,10 +429,6 @@ describe("ORDERS_PAUSED order toast", () => {
 });
 
 // ─── R2 review regressions ────────────────────────────────────────────────
-
-const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
-const pausedRows = (paused: boolean) =>
-  settingsFixture().map((s) => (s.key === "orders_paused" ? { ...s, effective: paused, db_value: paused ? true : null } : s));
 
 describe("RuntimeSettingsPanel (R2 regressions)", () => {
   it("Resume and a confirmed Revert pass the real /api middleware", async () => {
@@ -322,9 +464,9 @@ describe("RuntimeSettingsPanel (R2 regressions)", () => {
     await waitFor(() => expect(toast).toHaveBeenCalledWith("success", "orders_paused reverted to env"));
 
     const cap = row("XENON_FUTU_MKT_NOTIONAL_CAP");
-    fireEvent.click(within(cap).getByRole("button", { name: "Edit" }));
     fireEvent.click(within(cap).getByRole("button", { name: "Revert to env" }));
     const step = await within(cap).findByTestId("confirm-step");
+    expect(within(step).getByTestId("confirm-proposal").textContent).toBe("Revert Futu market-order cap to env");
     fireEvent.change(within(step).getByLabelText("Type XENON_FUTU_MKT_NOTIONAL_CAP to confirm"), {
       target: { value: "XENON_FUTU_MKT_NOTIONAL_CAP" },
     });
@@ -332,11 +474,12 @@ describe("RuntimeSettingsPanel (R2 regressions)", () => {
     await waitFor(() => expect(deletes).toBe(3));
     expect(blocked).toEqual([]);
     expect(passed.map((p) => p.method)).toEqual(["DELETE", "DELETE", "DELETE"]);
-    expect(passed[2].url).toContain("confirm=XENON_FUTU_MKT_NOTIONAL_CAP");
+    expect(passed[1].url).toBe("/api/admin/settings/XENON_FUTU_MKT_NOTIONAL_CAP");
+    expect(passed[2].url).toBe("/api/admin/settings/XENON_FUTU_MKT_NOTIONAL_CAP?confirm=XENON_FUTU_MKT_NOTIONAL_CAP");
   });
 
-  it("editing the value after a 428 drops the pending confirm; a fresh unconfirmed request follows", async () => {
-    const sent: { value: boolean; confirm?: string }[] = [];
+  it("editing the value after a 428 drops the pending confirm; Back restores the server value", async () => {
+    const sent: { value: unknown; confirm?: string }[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_url: string, init?: RequestInit) => {
@@ -347,21 +490,19 @@ describe("RuntimeSettingsPanel (R2 regressions)", () => {
       }),
     );
     render(<RuntimeSettingsPanel onToast={vi.fn()} />);
-    const r = await screen.findByTestId("setting-XENON_AUDIT_CANCEL");
-    fireEvent.click(within(r).getByRole("button", { name: "Edit" }));
-    const editor = within(r).getByRole("switch", { name: "New value" });
-    fireEvent.click(editor); // off -> on
-    fireEvent.click(within(r).getByRole("button", { name: "Save" }));
-    await within(r).findByTestId("confirm-step");
-    fireEvent.click(editor); // on -> off
+    const r = await screen.findByTestId("setting-XENON_FUTU_MKT_NOTIONAL_CAP");
+    const label = "Futu market-order cap";
+    fireEvent.change(field("XENON_FUTU_MKT_NOTIONAL_CAP", label), { target: { value: "12000" } });
+    fireEvent.keyDown(field("XENON_FUTU_MKT_NOTIONAL_CAP", label), { key: "Enter" });
+    const step = await within(r).findByTestId("confirm-step");
+    expect(within(step).getByTestId("confirm-proposal").textContent).toBe("Set Futu market-order cap to 12,000 USD");
+    fireEvent.change(field("XENON_FUTU_MKT_NOTIONAL_CAP", label), { target: { value: "12001" } });
     expect(within(r).queryByTestId("confirm-step")).toBeNull();
-    // a note change also drops it
-    fireEvent.click(editor); // off -> on
-    fireEvent.click(within(r).getByRole("button", { name: "Save" }));
-    await within(r).findByTestId("confirm-step");
-    fireEvent.change(within(r).getByLabelText("Note"), { target: { value: "why" } });
+    fireEvent.keyDown(field("XENON_FUTU_MKT_NOTIONAL_CAP", label), { key: "Enter" });
+    fireEvent.click(within(await within(r).findByTestId("confirm-step")).getByRole("button", { name: "Back" }));
     expect(within(r).queryByTestId("confirm-step")).toBeNull();
-    expect(sent).toEqual([{ value: true }, { value: true }]);
+    expect(field("XENON_FUTU_MKT_NOTIONAL_CAP", label).value).toBe("10000");
+    expect(sent).toEqual([{ value: 12000 }, { value: 12001 }]);
   });
 
   it("a delayed pre-write poll cannot overwrite the post-write state", async () => {
@@ -400,34 +541,11 @@ describe("RuntimeSettingsPanel (R2 regressions)", () => {
     expect(screen.getByTestId("orders-paused-banner").textContent).toContain("Orders paused");
     expect(screen.getByRole("button", { name: "Resume orders" })).toBeTruthy();
   });
-
-  it("a value above the env cap is refused before sending", async () => {
-    const sent: unknown[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (_url: string, init?: RequestInit) => {
-        if (!init || !init.method || init.method === "GET") return reply({ settings: pausedRows(false) });
-        sent.push(JSON.parse(String(init.body)));
-        return reply({ changed: true });
-      }),
-    );
-    const toast = vi.fn();
-    render(<RuntimeSettingsPanel onToast={toast} />);
-    const r = await screen.findByTestId("setting-XENON_FUTU_MKT_NOTIONAL_CAP");
-    fireEvent.click(within(r).getByRole("button", { name: "Edit" }));
-    fireEvent.change(within(r).getByLabelText("New value"), { target: { value: "25001" } });
-    fireEvent.click(within(r).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(toast).toHaveBeenCalledWith("error", expect.stringContaining("above the env cap 25,000 USD")));
-    expect(sent).toEqual([]);
-    fireEvent.change(within(r).getByLabelText("New value"), { target: { value: "25000" } });
-    fireEvent.click(within(r).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(sent).toEqual([{ value: 25000 }]));
-  });
 });
 
 describe("RuntimeSettingsPanel (R3 regression)", () => {
-  it("a 428 that returns after the draft changed opens no confirm for the old value", async () => {
-    const sent: { value: boolean; confirm?: string }[] = [];
+  it("a 428 that returns after the proposal changed opens no confirm for the old value", async () => {
+    const sent: { value: unknown; confirm?: string }[] = [];
     let release428!: () => void;
     vi.stubGlobal(
       "fetch",
@@ -442,37 +560,19 @@ describe("RuntimeSettingsPanel (R3 regression)", () => {
       }),
     );
     render(<RuntimeSettingsPanel onToast={vi.fn()} />);
-    const r = await screen.findByTestId("setting-XENON_AUDIT_CANCEL");
-    fireEvent.click(within(r).getByRole("button", { name: "Edit" }));
-    const editor = within(r).getByRole("switch", { name: "New value" });
-    fireEvent.click(editor); // off -> on
-    fireEvent.click(within(r).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(sent).toHaveLength(1)); // PUT true in flight
-    fireEvent.click(editor); // on -> off
+    const r = await screen.findByTestId("setting-XENON_FUTU_MKT_NOTIONAL_CAP");
+    const f = field("XENON_FUTU_MKT_NOTIONAL_CAP", "Futu market-order cap");
+    fireEvent.change(f, { target: { value: "12000" } });
+    fireEvent.keyDown(f, { key: "Enter" });
+    await waitFor(() => expect(sent).toHaveLength(1)); // PUT 12000 in flight
+    // defense in depth: the field is disabled while the request runs, but a
+    // proposal change by any path (here Escape) still voids the old 428
+    fireEvent.keyDown(f, { key: "Escape" });
     await act(async () => {
       release428();
     });
-    await waitFor(() => expect(within(r).getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(false));
+    await waitFor(() => expect(row("XENON_FUTU_MKT_NOTIONAL_CAP").getAttribute("aria-busy")).toBe("false"));
     expect(within(r).queryByTestId("confirm-step")).toBeNull();
-    expect(sent).toEqual([{ value: true }]);
-  });
-
-  it("the confirm prompt shows the exact proposal", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (_url: string, init?: RequestInit) => {
-        if (!init || !init.method || init.method === "GET") return reply({ settings: pausedRows(false) });
-        return reply({ reason_code: "SETTING_CONFIRM_REQUIRED" }, 428);
-      }),
-    );
-    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
-    const r = await screen.findByTestId("setting-XENON_AUDIT_CANCEL");
-    fireEvent.click(within(r).getByRole("button", { name: "Edit" }));
-    fireEvent.click(within(r).getByRole("switch", { name: "New value" }));
-    fireEvent.click(within(r).getByRole("button", { name: "Save" }));
-    const step = await within(r).findByTestId("confirm-step");
-    expect(within(step).getByTestId("confirm-proposal").textContent).toBe("Set Naked-short audit: cancel violations to On");
-    expect(within(step).getByTestId("confirm-key").textContent).toBe("XENON_AUDIT_CANCEL");
-    expect(within(step).getByLabelText("Type XENON_AUDIT_CANCEL to confirm")).toBeTruthy();
+    expect(sent).toEqual([{ value: 12000 }]);
   });
 });
