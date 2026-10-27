@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -92,6 +93,7 @@ async def run_entry_point(
     args: Optional[List[str]] = None,
     timeout: float = 30.0,
     cwd: Optional[str] = None,
+    env: Optional[dict[str, str]] = None,
 ) -> ScriptResult:
     """Run a xenon-* console entry-point binary from .venv/bin/ as an async subprocess.
 
@@ -103,6 +105,7 @@ async def run_entry_point(
         args: CLI arguments
         timeout: Seconds before SIGKILL
         cwd: Working directory (defaults to PROJECT_ROOT)
+        env: Extra variables for the child, on top of this process's env
 
     Returns:
         ScriptResult with parsed JSON data or error string.
@@ -120,6 +123,7 @@ async def run_entry_point(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=work_dir,
+            env={**os.environ, **env} if env else None,
         )
     except OSError as e:
         # The process never started (exec failure): nothing reached IB.

@@ -77,6 +77,8 @@ class ReasonCode(StrEnum):
     # amend could overwrite its max(old,new) reservation, so it is refused.
     MODIFY_PENDING = "MODIFY_PENDING"
     READ_ONLY_BROKER = "READ_ONLY_BROKER"
+    # Runtime setting orders_paused (guards.ensure_order_allowed): place / modify refused.
+    ORDERS_PAUSED = "ORDERS_PAUSED"
     # F7 — pending timeout (PR-D)
     PENDING_TIMEOUT = "PENDING_TIMEOUT"
     # B5 — hard subprocess failure on /orders/place (non-2xx from runner).

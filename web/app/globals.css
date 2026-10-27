@@ -7420,6 +7420,218 @@ tr {
   gap: 12px;
 }
 
+/* Runtime settings (operator console) — DB overrides of env knobs. */
+.runtime-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  padding: 12px 16px;
+  background: var(--bg-panel);
+}
+.runtime-settings--loading {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.runtime-settings__head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.runtime-settings__title {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.runtime-settings__hint,
+.runtime-settings__desc {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.runtime-settings__error {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fault);
+}
+.runtime-settings__pause {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  border: 1px solid var(--signal-core);
+  border-radius: 4px;
+  padding: 10px 14px;
+}
+.runtime-settings__pause--on {
+  border-color: var(--fault);
+}
+.runtime-settings__pause-state {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--signal-core);
+}
+.runtime-settings__pause--on .runtime-settings__pause-state {
+  color: var(--fault);
+}
+.runtime-settings__pause-sub {
+  flex: 1;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.runtime-settings__group-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.runtime-settings__table {
+  display: flex;
+  flex-direction: column;
+}
+.runtime-settings__row {
+  display: grid;
+  grid-template-columns: minmax(0, 2.2fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 2fr);
+  gap: 12px;
+  align-items: start;
+  padding: 8px 0;
+  border-top: 1px solid var(--border-dim);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.runtime-settings__row--head {
+  border-top: none;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.runtime-settings__key {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.runtime-settings__mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.runtime-settings__value--effective {
+  color: var(--signal-core);
+}
+.runtime-settings__change {
+  color: var(--text-secondary);
+}
+.runtime-settings__invalid {
+  color: var(--warning);
+}
+.runtime-settings__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.runtime-settings__badge {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid var(--border-dim);
+  border-radius: 999px;
+  padding: 1px 6px;
+  color: var(--text-secondary);
+}
+.runtime-settings__badge--safety {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+.runtime-settings__edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.runtime-settings__set {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.runtime-settings__check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+}
+.runtime-settings__input {
+  background: var(--bg-base);
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 11px;
+  padding: 3px 6px;
+  min-width: 0;
+}
+.runtime-settings__input:focus {
+  outline: none;
+  border-color: var(--border-focus);
+}
+.runtime-settings__actions {
+  display: flex;
+  gap: 6px;
+}
+.runtime-settings__btn {
+  background: none;
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.runtime-settings__btn:hover:not(:disabled) {
+  border-color: var(--border-focus);
+  color: var(--text-primary);
+}
+.runtime-settings__btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.runtime-settings__btn--strong {
+  border-color: var(--signal-core);
+  color: var(--signal-core);
+}
+.runtime-settings__pause--on .runtime-settings__btn--strong {
+  border-color: var(--fault);
+  color: var(--fault);
+}
+.runtime-settings__confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--warning);
+  border-radius: 4px;
+  padding: 6px;
+}
+.runtime-settings__confirm-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--warning);
+}
+
 .operator-tile {
   display: flex;
   flex-direction: column;

@@ -50,6 +50,13 @@ X7-0 calibration, PR #249 — not merged yet). Missing keys or non-finite
 values leave that field `null`; `undPrice` needs no factor — it is the
 held underlying's latest Futu `last`.
 
+`FUTU_QUOTE_QUOTA`, `FUTU_UNITS_PER_SYMBOL`, `FUTU_BOOK_STALE_S` and
+`FUTU_GREEK_FACTORS` can also be changed without a restart: set a runtime
+setting (`PUT /admin/settings/<key>`, runbook `docs/runbooks/ops.md`
+§ Change a runtime setting). The relay pulls it from the api within about
+10 s and forwards it in a `config` frame; the env value above stays the
+fallback. The service logs `runtime config applied: {...}` on each change.
+
 ## Wire protocol
 
 Inbound: `{"action": "want", "gen": N, "symbols": [...],
@@ -57,6 +64,8 @@ Inbound: `{"action": "want", "gen": N, "symbols": [...],
 per-connection monotonic counter starting at 1. `tiers` is optional; a
 symbol missing from it (or the whole key absent/malformed) means `held`.
 `symbols` may carry option relay keys `SYM_YYYYMMDD_STRIKE_RIGHT`.
+Inbound `{"action": "config", "values": {...}}` carries the runtime-settings
+overrides (null = env value); contract `docs/architecture/futu-quotes.md`.
 
 Outbound:
 

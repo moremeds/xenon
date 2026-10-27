@@ -40,7 +40,7 @@ class _RunnerProbe:
         self.results = results
         self.calls: list[str] = []
 
-    async def __call__(self, entry, args, timeout=30):
+    async def __call__(self, entry, args, timeout=30, env=None):
         self.calls.append(entry)
         return self.results[entry]
 
@@ -100,7 +100,7 @@ async def test_data_entry_retries_after_gateway_restart(monkeypatch):
 
     calls: list[str] = []
 
-    async def _run(entry, args, timeout=30):
+    async def _run(entry, args, timeout=30, env=None):
         calls.append(entry)
         if len(calls) == 1:
             return ScriptResult(ok=False, error="Connect call failed")

@@ -17,8 +17,11 @@ options from OpenD, and the relay serves them to clients that opt in.
 ## Who gets Futu
 
 - A relay connection opts in with `?quotes=futu-first` on the upgrade URL. The relay honours it
-  only on connections that authenticated with `X-API-Key` (service clients). Browser/ticket
-  clients and API-key clients without the flag stay on IB.
+  only on connections that authenticated with `X-API-Key` (service clients). Every other
+  connection takes the relay default `XENON_QUOTES_DEFAULT` (`ib` unless set). The default and
+  `XENON_FUTU_OPTIONS` follow the runtime settings live (relay pull every 10 s): a default flip
+  re-routes every connected client that did not opt in itself, an options flip re-pins or
+  unpins every subscribed option key.
 - Futu serves US stocks and ETFs in two sessions, and US options in `rth` only. The service polls
   `get_global_state().market_us` every 30 s and reads its wall clock (UTC, converted to
   America/New_York) at each poll (`admission.us_session`):
@@ -69,6 +72,31 @@ sends option keys only when its option routing is on (`XENON_FUTU_OPTIONS`, rela
 
 `tiers` is optional. It marks each wanted symbol `held` or `view` for admission priority;
 a symbol missing from the map — or the whole `tiers` key absent or malformed — means `held`.
+
+`config`: runtime-settings overrides (DB, `xenon.runtime_settings`) that the relay pulls from the
+api and forwards; the service never reads the DB and holds no secret. Every forwarded key is
+present; `null` means "use the service's own env value".
+
+```json
+{
+  "action": "config",
+  "values": {
+    "FUTU_QUOTE_QUOTA": 600,
+    "FUTU_UNITS_PER_SYMBOL": null,
+    "FUTU_BOOK_STALE_S": null,
+    "FUTU_GREEK_FACTORS": { "iv": 0.01, "delta": 1, "gamma": 1, "theta": 1, "vega": 1 }
+  }
+}
+```
+
+The relay sends it on every socket open, before the first `want`, once it has one successful
+settings pull (none before that: the service keeps its current values), and again whenever the
+override set changes. The service validates each value with the registry rules; a `null`,
+missing or invalid value falls back to its env value (a warning is logged). Quota and units
+apply at the next admission evaluation, which the frame triggers; `FUTU_BOOK_STALE_S` and
+`FUTU_GREEK_FACTORS` apply to the next emitted row. A frame from a replaced connection, or with
+`values` that is not an object, is ignored. The values survive a relay reconnect until the next
+`config` frame. There is no reply frame.
 
 ## Frames: futu-quotes → relay
 

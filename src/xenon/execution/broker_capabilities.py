@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 
+from xenon import runtime_settings
 from xenon.execution import futu_scope
 from xenon.execution.preflight import ReasonCode
 
@@ -44,19 +45,26 @@ _FLAG_TO_ENV = {"simulate": "paper", "real": "live"}
 _bad_flags_logged: set[str] = set()
 
 
-def futu_trading_envs() -> frozenset[str]:
-    """Account envs with Futu trading on: `simulate` → paper, `real` → live.
-    Unset or empty → none. Any other token (including the old `1`) → none,
-    with one ERROR log per value."""
+def env_trading_flags() -> list[str]:
+    """`XENON_FUTU_TRADING` tokens from the env (sorted). Unset or empty →
+    none. Any other token (including the old `1`) → none, with one ERROR
+    log per value."""
     raw = os.environ.get(TRADING_FLAG, "")
     if not raw.strip():
-        return frozenset()
+        return []
     tokens = [t.strip().lower() for t in raw.split(",")]
     if any(t not in _FLAG_TO_ENV for t in tokens):
         if raw not in _bad_flags_logged:
             _bad_flags_logged.add(raw)
             log.error("%s=%r is not a set over {simulate, real}: Futu trading is off", TRADING_FLAG, raw)
-        return frozenset()
+        return []
+    return sorted(set(tokens))
+
+
+def futu_trading_envs() -> frozenset[str]:
+    """Account envs with Futu trading on: `simulate` → paper, `real` → live.
+    The env tokens, narrowed by a `runtime_settings` DB override (subset only)."""
+    tokens = runtime_settings.apply(TRADING_FLAG, env_trading_flags())
     return frozenset(_FLAG_TO_ENV[t] for t in tokens)
 
 

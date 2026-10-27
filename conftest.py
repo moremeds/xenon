@@ -234,3 +234,15 @@ def _deny_broker_connections(request, monkeypatch):
         monkeypatch.setenv("IB_GATEWAY_HOST", "127.0.0.255")
         monkeypatch.setenv("IB_GATEWAY_PORT", "1")
     yield
+
+
+@pytest.fixture(autouse=True)
+def _runtime_settings_cache_reset():
+    """Each test starts with no cached runtime-settings overrides: a row read
+    inside a rolled-back test transaction must not leak into the next test
+    through the 5 s process cache."""
+    from xenon import runtime_settings
+
+    runtime_settings.reset()
+    yield
+    runtime_settings.reset()

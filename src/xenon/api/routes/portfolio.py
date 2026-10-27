@@ -190,10 +190,18 @@ async def _sync_via_subprocess() -> ScriptResult:
 async def _run_sync_pass() -> ScriptResult:
     """Run ib_sync.py as a subprocess with auto-recovery. Never raises."""
     from xenon.api import server
+    from xenon.execution import gate4
 
     try:
+        # D5: the child never reads runtime_settings; it gets the effective
+        # (env AND DB) netting flag for its naked-short audit in its env,
+        # resolved at each actual spawn (after gateway waits, also a retry).
+        # Cached read (TTL 5 s), same as the order guard's orders_paused().
         result = await server._run_ib_script_with_recovery(
-            "xenon-ib-sync", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
+            "xenon-ib-sync",
+            ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)],
+            timeout=30,
+            env=lambda: {"XENON_GATE4_NETTING": "1" if gate4.netting_enabled() else "0"},
         )
     except Exception as exc:  # noqa: BLE001 — a detached task must log, not raise into the void
         logger.exception("Portfolio sync failed")
