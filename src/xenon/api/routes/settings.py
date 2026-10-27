@@ -35,6 +35,21 @@ def _refuse(status: int, reason_code: str, detail: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"detail": detail, "reason_code": reason_code})
 
 
+def is_settings_path(path: str) -> bool:
+    return path == "/admin/settings" or path.startswith("/admin/settings/")
+
+
+def auth_refusal(request: Request, identity: dict | None) -> JSONResponse | None:
+    """Settings-specific refusal at the auth middleware (before the generic
+    401): any X-API-Key header → 403 API_KEY_FORBIDDEN (D7), else anything
+    but the internal token → 401 INTERNAL_TOKEN_REQUIRED. Grants nothing."""
+    if request.headers.get("X-API-Key"):
+        return _refuse(403, API_KEY_FORBIDDEN, "X-API-Key is not accepted on /admin/settings")
+    if not (identity or {}).get("internal"):
+        return _refuse(401, INTERNAL_TOKEN_REQUIRED, "/admin/settings needs X-Internal-Token")
+    return None
+
+
 def _internal_actor(request: Request) -> tuple[str | None, JSONResponse | None]:
     if request.headers.get("X-API-Key"):
         return None, _refuse(403, API_KEY_FORBIDDEN, "X-API-Key is not accepted on /admin/settings")

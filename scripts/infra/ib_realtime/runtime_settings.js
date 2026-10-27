@@ -42,7 +42,8 @@ const VALID = {
     typeof v === "object" &&
     !Array.isArray(v) &&
     Object.entries(v).every(
-      ([k, f]) => GREEKS.has(k) && typeof f === "number" && Number.isFinite(f),
+      ([k, f]) =>
+        GREEKS.has(k) && typeof f === "number" && Number.isFinite(f) && Math.abs(f) <= 1e6,
     ),
 };
 

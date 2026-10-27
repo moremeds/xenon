@@ -22,9 +22,12 @@ Owners: `api` keys are resolved here. `relay` / `futu-quotes` keys run in a
 process whose env the api cannot see: the api stores and serves the DB
 override only, and that process combines it with its own env (T2).
 
-Reads: one SELECT per `CACHE_TTL_S` per process, invalidated by this
-process's own writes. A DB read error keeps the last loaded overrides (none
-at process start = env values).
+Reads: one SELECT per `CACHE_TTL_S` per process. A committed write of this
+process publishes its value into the cache at once (it is the fallback if
+the next read fails) and makes any load started before it obsolete (a
+generation counter). A DB read error keeps the last known overrides (none at
+process start = env values). Writes of one key are serialized with a
+transaction-scoped advisory lock, also when no row exists yet.
 """
 
 from __future__ import annotations
@@ -91,7 +94,7 @@ def _int_range(lo: int, hi: int) -> Callable[[str, Any], int]:
 
 def _number_range(lo: float, hi: float, *, lo_open: bool = False) -> Callable[[str, Any], float | int]:
     def check(key: str, value: Any) -> float | int:
-        ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        ok = _finite_number(value)
         if ok:
             ok = (value > lo if lo_open else value >= lo) and value <= hi
         if not ok:
@@ -99,6 +102,18 @@ def _number_range(lo: float, hi: float, *, lo_open: bool = False) -> Callable[[s
         return value
 
     return check
+
+
+def _finite_number(value: Any) -> bool:
+    """A JSON number that compares safely: ints compare exactly with any
+    bound (no float conversion, so a huge int never overflows), floats
+    must be finite."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return isinstance(value, int) or math.isfinite(value)
+
+
+_GREEK_FACTOR_MAX = 1e6
 
 
 def _enum(choices: tuple[str, ...]) -> Callable[[str, Any], str]:
@@ -133,8 +148,10 @@ def _greek_factors(key: str, value: Any) -> dict[str, float]:
     for name, factor in value.items():
         if name not in _GREEK_KEYS:
             raise _invalid(key, f"{name!r} is not one of {list(_GREEK_KEYS)}")
-        if isinstance(factor, bool) or not isinstance(factor, (int, float)) or not math.isfinite(factor):
-            raise _invalid(key, f"factor for {name!r} must be a finite number")
+        if not _finite_number(factor) or abs(factor) > _GREEK_FACTOR_MAX:
+            raise _invalid(
+                key, f"factor for {name!r} must be a number in [-{_GREEK_FACTOR_MAX:g}, {_GREEK_FACTOR_MAX:g}]"
+            )
         out[name] = factor
     return out
 
@@ -436,6 +453,9 @@ def validate(key: str, value: Any) -> tuple[Setting, Any]:
 class _Cache:
     loaded_at: float = -math.inf
     overrides: dict[str, Any] = field(default_factory=dict)
+    # Bumped by every committed write in this process. A load that started
+    # under an older generation is obsolete and is never published.
+    gen: int = 0
 
 
 _cache = _Cache()
@@ -448,11 +468,25 @@ def invalidate() -> None:
         _cache.loaded_at = -math.inf
 
 
+def _publish_write(key: str, value: Any) -> None:
+    """After a committed write: the new value (None = row deleted) becomes the
+    known state at once — it is the fallback if the next DB read fails — and
+    any load started before the write is made obsolete."""
+    with _lock:
+        _cache.gen += 1
+        if value is None:
+            _cache.overrides.pop(key, None)
+        else:
+            _cache.overrides[key] = value
+        _cache.loaded_at = -math.inf
+
+
 def reset() -> None:
     """Tests: forget loaded overrides too (next read = DB or env)."""
     with _lock:
         _cache.loaded_at = -math.inf
         _cache.overrides = {}
+        _cache.gen += 1
 
 
 def _load_rows() -> list[dict[str, Any]]:
@@ -471,22 +505,27 @@ def overrides() -> dict[str, Any]:
     with _lock:
         if time.monotonic() - _cache.loaded_at < CACHE_TTL_S:
             return dict(_cache.overrides)
+        gen = _cache.gen
     try:
         rows = _load_rows()
     except Exception as exc:  # noqa: BLE001 — any DB failure keeps the last values
         log.warning("runtime_settings: DB read failed, keeping last values: %s", exc)
         with _lock:
-            _cache.loaded_at = time.monotonic()
+            if _cache.gen == gen:
+                _cache.loaded_at = time.monotonic()
             return dict(_cache.overrides)
     loaded: dict[str, Any] = {}
     for row in rows:
         try:
             _, value = validate(row["key"], row["value"])
-        except SettingError as exc:
-            log.error("runtime_settings: ignoring DB row %r: %s", row["key"], exc.detail)
+        except Exception as exc:  # noqa: BLE001 — a bad row never breaks the read
+            log.error("runtime_settings: ignoring DB row %r: %s", row["key"], getattr(exc, "detail", exc))
             continue
         loaded[row["key"]] = value
     with _lock:
+        if _cache.gen != gen:
+            # A write committed while this load ran: its snapshot is obsolete.
+            return dict(_cache.overrides)
         _cache.overrides = loaded
         _cache.loaded_at = time.monotonic()
     return dict(loaded)
@@ -517,6 +556,18 @@ def _jsonable(value: Any) -> Any:
     return json.loads(json.dumps(value))
 
 
+# Advisory-lock namespace for runtime settings writes ("RST1").
+_LOCK_NAMESPACE = 0x52535431
+
+
+def _lock_key(conn: Any, key: str) -> None:
+    """Serialize writers of one key for the rest of the transaction, also
+    when no row exists yet (FOR UPDATE locks nothing on a missing row)."""
+    from sqlalchemy import text
+
+    conn.execute(text("SELECT pg_advisory_xact_lock(:ns, hashtext(:k))"), {"ns": _LOCK_NAMESPACE, "k": key})
+
+
 def _check_confirm(setting: Setting, old_eff: Any, new_eff: Any, confirm: str | None) -> None:
     if setting.confirm is not None and setting.confirm(old_eff, new_eff) and confirm != setting.key:
         raise SettingError(CONFIRM_REQUIRED, f"{setting.key}: this change needs confirm={setting.key!r}")
@@ -534,6 +585,7 @@ def put(key: str, value: Any, *, actor: str | None, note: str | None, confirm: s
     env = env_value(setting)
     check_narrow(setting, env, value)
     with get_sync_engine().begin() as conn:
+        _lock_key(conn, key)
         old = conn.execute(
             select(runtime_settings.c.value).where(runtime_settings.c.key == key).with_for_update()
         ).scalar_one_or_none()
@@ -552,7 +604,7 @@ def put(key: str, value: Any, *, actor: str | None, note: str | None, confirm: s
                 key=key, old_value=old, new_value=stored, changed_by=actor, note=note
             )
         )
-    invalidate()
+    _publish_write(key, value)
     return {"key": key, "changed": True}
 
 
@@ -568,6 +620,7 @@ def delete(key: str, *, actor: str | None, note: str | None, confirm: str | None
         raise SettingError(UNKNOWN_KEY, f"unknown setting {key!r}")
     env = env_value(setting)
     with get_sync_engine().begin() as conn:
+        _lock_key(conn, key)
         old = conn.execute(
             select(runtime_settings.c.value).where(runtime_settings.c.key == key).with_for_update()
         ).scalar_one_or_none()
@@ -578,7 +631,7 @@ def delete(key: str, *, actor: str | None, note: str | None, confirm: str | None
         conn.execute(
             runtime_settings_audit.insert().values(key=key, old_value=old, new_value=None, changed_by=actor, note=note)
         )
-    invalidate()
+    _publish_write(key, None)
     return {"key": key, "changed": True}
 
 
@@ -587,7 +640,7 @@ def _valid_or_none(key: str, raw: Any) -> Any:
         return None
     try:
         return validate(key, raw)[1]
-    except SettingError:
+    except Exception:  # noqa: BLE001 — invalid stored value = no override
         return None
 
 

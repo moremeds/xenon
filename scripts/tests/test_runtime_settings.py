@@ -336,7 +336,14 @@ def test_api_key_forbidden_even_with_internal_token(client):
 def test_query_api_key_alone_is_refused(client, monkeypatch):
     monkeypatch.delenv("XENON_AUTH_ALLOW_DEV_OPEN", raising=False)
     monkeypatch.setenv("XENON_QUERY_API_KEY", "qk")
-    assert client.get("/admin/settings", headers={"X-API-Key": "qk"}).status_code == 401
+    for resp in (
+        client.get("/admin/settings", headers={"X-API-Key": "qk"}),
+        client.put("/admin/settings/orders_paused", json={"value": True}, headers={"X-API-Key": "qk"}),
+        client.delete("/admin/settings/orders_paused", headers={"X-API-Key": "qk"}),
+        client.get("/admin/settings", headers={"X-API-Key": "wrong"}),
+    ):
+        assert resp.status_code == 403
+        assert resp.json()["reason_code"] == "API_KEY_FORBIDDEN"
     monkeypatch.setenv("XENON_AUTH_ALLOW_DEV_OPEN", "1")
     resp = client.get("/admin/settings", headers={"X-API-Key": "qk"})
     assert resp.status_code == 403 and resp.json()["reason_code"] == "API_KEY_FORBIDDEN"
@@ -344,8 +351,14 @@ def test_query_api_key_alone_is_refused(client, monkeypatch):
 
 def test_no_credential_401(client, monkeypatch):
     monkeypatch.delenv("XENON_AUTH_ALLOW_DEV_OPEN", raising=False)
-    assert client.get("/admin/settings").status_code == 401
-    assert client.put("/admin/settings/orders_paused", json={"value": True}).status_code == 401
+    for resp in (
+        client.get("/admin/settings"),
+        client.put("/admin/settings/orders_paused", json={"value": True}),
+        client.delete("/admin/settings/orders_paused"),
+        client.get("/admin/settings", headers={"X-Internal-Token": "wrong"}),
+    ):
+        assert resp.status_code == 401
+        assert resp.json()["reason_code"] == "INTERNAL_TOKEN_REQUIRED"
 
 
 def test_dev_open_is_not_internal(client):
@@ -483,3 +496,145 @@ def test_read_only_precedes_pause(paused, monkeypatch):
     import json
 
     assert json.loads(resp.body)["reason_code"] == "READ_ONLY_MODE"
+
+
+# ---------- task 1b: review findings ----------
+
+HUGE = 10**1000
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        pytest.param("FUTU_BOOK_STALE_S", HUGE, id="book-stale-huge"),
+        pytest.param("XENON_FUTU_MKT_NOTIONAL_CAP", HUGE, id="cap-huge"),
+        pytest.param("FUTU_GREEK_FACTORS", {"iv": HUGE}, id="greek-huge-int"),
+        pytest.param("FUTU_GREEK_FACTORS", {"iv": 1e300}, id="greek-huge-float"),
+        pytest.param("IB_REALTIME_MAX_LINES", HUGE, id="lines-huge"),
+    ],
+)
+def test_huge_numbers_are_invalid_not_errors(key, value):
+    with pytest.raises(rs.SettingError) as exc:
+        _put(key, value)
+    assert exc.value.reason_code == rs.INVALID_VALUE
+
+
+def test_huge_number_put_is_400(client):
+    resp = client.put(
+        "/admin/settings/FUTU_BOOK_STALE_S",
+        content=b'{"value": 1' + b"0" * 400 + b"}",
+        headers={**HDR, "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["reason_code"] == "SETTING_INVALID_VALUE"
+
+
+def test_huge_number_db_row_is_ignored():
+    _raw_row("FUTU_BOOK_STALE_S", "1" + "0" * 400)
+    _put("orders_paused", True)
+    assert rs.orders_paused() is True
+    assert "FUTU_BOOK_STALE_S" not in rs.overrides()
+    rows = {r["key"]: r for r in rs.describe()}
+    assert rows["FUTU_BOOK_STALE_S"]["db_value_invalid"] is True
+
+
+def _failing_load():
+    raise RuntimeError("settings read failed")
+
+
+@pytest.mark.parametrize("prime", [True, False])
+def test_committed_write_survives_a_read_failure(monkeypatch, prime):
+    from types import SimpleNamespace
+
+    if prime:
+        assert rs.orders_paused() is False  # cache primed with the empty set
+    _put("orders_paused", True)
+    real = rs._load_rows
+    monkeypatch.setattr(rs, "_load_rows", _failing_load)
+    assert rs.orders_paused() is True
+    state = SimpleNamespace(broker="IB", mode_verified=True)
+    assert _is_paused(guards.ensure_order_allowed("order placement", state))
+    # never monkeypatch.undo(): it would also undo the Phase-2 engine binding
+    monkeypatch.setattr(rs, "_load_rows", real)
+    rs.delete("orders_paused", actor="t", note=None, confirm=None)
+    monkeypatch.setattr(rs, "_load_rows", _failing_load)
+    assert rs.orders_paused() is False
+
+
+def test_load_started_before_a_write_cannot_overwrite_it(monkeypatch):
+    real = rs._load_rows
+    calls = []
+
+    def racing_load():
+        rows = real()  # snapshot taken before the write commits
+        if not calls:
+            calls.append(1)
+            _put("orders_paused", True)
+        return rows
+
+    monkeypatch.setattr(rs, "_load_rows", racing_load)
+    assert rs.orders_paused() is True
+    assert rs.orders_paused() is True  # within the TTL too
+
+
+def _hold_key_lock(key, value):
+    """Second real transaction: take the key lock, write a row, wait for commit."""
+    import json as _json
+
+    conn = get_sync_engine().connect()
+    tx = conn.begin()
+    rs._lock_key(conn, key)
+    conn.execute(
+        text("INSERT INTO xenon.runtime_settings(key, value) VALUES (:k, CAST(:v AS jsonb))"),
+        {"k": key, "v": _json.dumps(value)},
+    )
+    return conn, tx
+
+
+def _run_in_thread(fn):
+    import threading
+
+    box = {}
+
+    def run():
+        try:
+            box["result"] = fn()
+        except Exception as exc:  # noqa: BLE001 — surfaced to the test
+            box["error"] = exc
+
+    t = threading.Thread(target=run)
+    t.start()
+    return t, box
+
+
+@pytest.mark.committed_db
+def test_concurrent_first_write_rechecks_confirm(monkeypatch):
+    import time
+
+    monkeypatch.setenv("XENON_AUDIT_CANCEL", "1")
+    conn, tx = _hold_key_lock("XENON_AUDIT_CANCEL", False)
+    t, box = _run_in_thread(lambda: _put("XENON_AUDIT_CANCEL", True))
+    time.sleep(0.5)
+    assert t.is_alive()  # waits on the key lock
+    tx.commit()
+    conn.close()
+    t.join(10)
+    assert isinstance(box.get("error"), rs.SettingError)
+    assert box["error"].reason_code == rs.CONFIRM_REQUIRED
+    rs.invalidate()
+    assert audit_enforce.enabled() is False
+
+
+@pytest.mark.committed_db
+def test_concurrent_first_write_audits_true_predecessor():
+    import time
+
+    conn, tx = _hold_key_lock("IB_REALTIME_MAX_LINES", 50)
+    t, box = _run_in_thread(lambda: _put("IB_REALTIME_MAX_LINES", 60))
+    time.sleep(0.5)
+    tx.commit()
+    conn.close()
+    t.join(10)
+    assert "error" not in box
+    rows = _audit_rows("IB_REALTIME_MAX_LINES")
+    assert [(r["old_value"], r["new_value"]) for r in rows] == [(50, 60)]

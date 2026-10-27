@@ -53,6 +53,7 @@ from xenon.api.routes.wizard import router as wizard_router
 from xenon.api.subprocess import ScriptResult, run_entry_point
 from xenon.api.routes.market import router as market_router
 from xenon.api.routes.ratings import router as ratings_router
+from xenon.api.routes import settings as settings_routes
 from xenon.api.routes.settings import router as settings_router
 from xenon.api.routes.order_entry import router as order_entry_router
 from xenon.api.routes import futu as futu_routes
@@ -828,6 +829,11 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     decision = classify_auth(request)
+
+    if settings_routes.is_settings_path(request.url.path):
+        refusal = settings_routes.auth_refusal(request, decision.identity)
+        if refusal is not None:
+            return refusal
 
     if decision.action == "pass":
         request.state.user = decision.identity
