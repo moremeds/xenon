@@ -591,7 +591,7 @@ def _hold_key_lock(key, value):
     return conn, tx
 
 
-def _run_in_thread(fn):
+def _run_in_thread(fn, name=None):
     import threading
 
     box = {}
@@ -602,7 +602,7 @@ def _run_in_thread(fn):
         except Exception as exc:  # noqa: BLE001 — surfaced to the test
             box["error"] = exc
 
-    t = threading.Thread(target=run)
+    t = threading.Thread(target=run, name=name)
     t.start()
     return t, box
 
@@ -638,3 +638,104 @@ def test_concurrent_first_write_audits_true_predecessor():
     assert "error" not in box
     rows = _audit_rows("IB_REALTIME_MAX_LINES")
     assert [(r["old_value"], r["new_value"]) for r in rows] == [(50, 60)]
+
+
+@pytest.mark.committed_db
+@pytest.mark.parametrize("older", ["put_false", "delete"])
+def test_older_write_cannot_publish_over_a_newer_commit(monkeypatch, older):
+    """Writer A commits first but is slow to publish; writer B commits after A.
+    B's acknowledged pause must survive a later settings-read failure."""
+    import threading
+    from types import SimpleNamespace
+
+    if older == "delete":
+        _put("orders_paused", True)
+    committed, release = threading.Event(), threading.Event()
+    real_publish = rs._publish_write
+
+    def slow_publish(key, value):
+        if threading.current_thread().name == "older-writer":
+            committed.set()
+            assert release.wait(10)
+        return real_publish(key, value)
+
+    monkeypatch.setattr(rs, "_publish_write", slow_publish)
+
+    def write_a():
+        if older == "delete":
+            return rs.delete("orders_paused", actor="a", note=None, confirm=None)
+        return _put("orders_paused", False)
+
+    a, a_box = _run_in_thread(write_a, name="older-writer")
+    assert committed.wait(10)
+    b, b_box = _run_in_thread(lambda: _put("orders_paused", True))
+    b.join(1)  # either B returns (no ordering) or it waits for A's publish
+    release.set()
+    a.join(10)
+    b.join(10)
+    assert "error" not in a_box and "error" not in b_box
+    with get_sync_engine().connect() as conn:
+        stored = conn.execute(
+            select(settings_table.c.value).where(settings_table.c.key == "orders_paused")
+        ).scalar_one()
+    assert stored is True
+    monkeypatch.setattr(rs, "_load_rows", _failing_load)
+    assert rs.orders_paused() is True
+    state = SimpleNamespace(broker="IB", mode_verified=True)
+    assert _is_paused(guards.ensure_order_allowed("order placement", state))
+
+
+# ─── D5: the api is the only settings DB reader (ib_sync child = env only) ──
+
+
+@pytest.mark.parametrize(("db", "child"), [(None, "1"), (False, "0")])
+def test_sync_spawn_passes_effective_netting_in_child_env(monkeypatch, db, child):
+    from xenon.api import server as server_mod
+    from xenon.api.routes import portfolio
+    from xenon.api.subprocess import ScriptResult
+
+    monkeypatch.setenv("XENON_GATE4_NETTING", "1")
+    if db is not None:
+        _put("XENON_GATE4_NETTING", db)
+    seen = {}
+
+    async def fake(entry, args, timeout=30, env=None):
+        seen.update(entry=entry, env=env)
+        return ScriptResult(ok=True, data={})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake)
+    assert asyncio.run(portfolio._run_sync_pass()).ok
+    assert seen["entry"] == "xenon-ib-sync"
+    assert seen["env"] == {"XENON_GATE4_NETTING": child}
+
+
+def test_run_entry_point_merges_child_env(monkeypatch, tmp_path):
+    from xenon.api import subprocess as sp
+
+    (tmp_path / "xenon-x").write_text("")
+    monkeypatch.setattr(sp, "VENV_BIN", tmp_path)
+    monkeypatch.setenv("XENON_PARENT_ONLY", "kept")
+    seen = {}
+
+    async def fake_exec(*cmd, **kw):
+        seen.update(kw)
+        raise OSError("not started")
+
+    monkeypatch.setattr(sp.asyncio, "create_subprocess_exec", fake_exec)
+    asyncio.run(sp.run_entry_point("xenon-x", [], env={"XENON_GATE4_NETTING": "0"}))
+    assert seen["env"]["XENON_GATE4_NETTING"] == "0"
+    assert seen["env"]["XENON_PARENT_ONLY"] == "kept"
+
+
+def test_ib_sync_child_reads_no_settings_from_the_db(monkeypatch):
+    from xenon.execution import ib_sync
+
+    monkeypatch.setenv("XENON_GATE4_NETTING", "1")
+    _put("XENON_GATE4_NETTING", False)  # a DB value the child must not see
+    calls = []
+    monkeypatch.setattr(rs, "_load_rows", lambda: calls.append(1) or [])
+    with pytest.raises(SystemExit):
+        ib_sync.main(["--help"])  # env-only mode is set before argument parsing
+    rs.invalidate()
+    assert gate4.netting_enabled() is True  # env only
+    assert calls == []

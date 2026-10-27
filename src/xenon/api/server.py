@@ -921,7 +921,9 @@ def _pool_has_any_connection() -> bool:
     return False
 
 
-async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 30) -> ScriptResult:
+async def _run_ib_script_with_recovery(
+    entry: str, args: list, timeout: float = 30, env: dict[str, str] | None = None
+) -> ScriptResult:
     """Run an IB-dependent xenon-* DATA entry point with pre-flight health
     check and cooldown. Order writes never come here (order owner).
 
@@ -968,7 +970,7 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
                 spawned=False,
             )
 
-    result = await run_entry_point(entry, args, timeout=timeout)
+    result = await run_entry_point(entry, args, timeout=timeout, env=env)
 
     # Clear cooldown on success
     if result.ok:
@@ -1026,7 +1028,7 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
                     await ib_pool.disconnect_all(roles=("sync", "data"))
                     await ib_pool.connect_all(roles=("sync", "data"))
                 logger.info("IB Gateway restarted, retrying %s", entry)
-                result = await run_entry_point(entry, args, timeout=timeout)
+                result = await run_entry_point(entry, args, timeout=timeout, env=env)
             else:
                 logger.error("IB Gateway restart failed: %s", gw_result)
                 result = ScriptResult(

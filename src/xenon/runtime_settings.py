@@ -460,6 +460,12 @@ class _Cache:
 
 _cache = _Cache()
 _lock = threading.Lock()
+# Held by put/delete from before the transaction until after _publish_write, so
+# this process publishes its writes in commit order (the advisory lock is gone
+# at commit, before publication). An older write can then never replace a newer
+# acknowledged one in the read-failure fallback.
+# ponytail: one lock for all keys; settings writes are rare operator actions.
+_write_lock = threading.Lock()
 
 
 def invalidate() -> None:
@@ -481,12 +487,25 @@ def _publish_write(key: str, value: Any) -> None:
         _cache.loaded_at = -math.inf
 
 
+_env_only = False
+
+
+def env_only() -> None:
+    """This process never reads settings from the DB: every effective value is
+    its env value (D5: the api is the only reader). For subprocesses such as
+    `xenon-ib-sync`; the api passes them the effective values in their env."""
+    global _env_only
+    _env_only = True
+
+
 def reset() -> None:
     """Tests: forget loaded overrides too (next read = DB or env)."""
+    global _env_only
     with _lock:
         _cache.loaded_at = -math.inf
         _cache.overrides = {}
         _cache.gen += 1
+        _env_only = False
 
 
 def _load_rows() -> list[dict[str, Any]]:
@@ -502,6 +521,8 @@ def _load_rows() -> list[dict[str, Any]]:
 def overrides() -> dict[str, Any]:
     """Valid DB overrides by key (cached). Invalid or unknown rows are ignored
     (ERROR log): a bad row never changes behavior."""
+    if _env_only:
+        return {}
     with _lock:
         if time.monotonic() - _cache.loaded_at < CACHE_TTL_S:
             return dict(_cache.overrides)
@@ -584,27 +605,28 @@ def put(key: str, value: Any, *, actor: str | None, note: str | None, confirm: s
     setting, value = validate(key, value)
     env = env_value(setting)
     check_narrow(setting, env, value)
-    with get_sync_engine().begin() as conn:
-        _lock_key(conn, key)
-        old = conn.execute(
-            select(runtime_settings.c.value).where(runtime_settings.c.key == key).with_for_update()
-        ).scalar_one_or_none()
-        old_db = _valid_or_none(key, old)
-        _check_confirm(setting, combine(setting, env, old_db), combine(setting, env, value), confirm)
-        stored = _jsonable(value)
-        stmt = pg_insert(runtime_settings).values(key=key, value=stored, updated_by=actor, note=note)
-        conn.execute(
-            stmt.on_conflict_do_update(
-                index_elements=["key"],
-                set_={"value": stmt.excluded.value, "updated_by": actor, "note": note, "updated_at": _now()},
+    with _write_lock:  # until published: see _write_lock
+        with get_sync_engine().begin() as conn:
+            _lock_key(conn, key)
+            old = conn.execute(
+                select(runtime_settings.c.value).where(runtime_settings.c.key == key).with_for_update()
+            ).scalar_one_or_none()
+            old_db = _valid_or_none(key, old)
+            _check_confirm(setting, combine(setting, env, old_db), combine(setting, env, value), confirm)
+            stored = _jsonable(value)
+            stmt = pg_insert(runtime_settings).values(key=key, value=stored, updated_by=actor, note=note)
+            conn.execute(
+                stmt.on_conflict_do_update(
+                    index_elements=["key"],
+                    set_={"value": stmt.excluded.value, "updated_by": actor, "note": note, "updated_at": _now()},
+                )
             )
-        )
-        conn.execute(
-            runtime_settings_audit.insert().values(
-                key=key, old_value=old, new_value=stored, changed_by=actor, note=note
+            conn.execute(
+                runtime_settings_audit.insert().values(
+                    key=key, old_value=old, new_value=stored, changed_by=actor, note=note
+                )
             )
-        )
-    _publish_write(key, value)
+        _publish_write(key, value)  # after commit, still under _write_lock
     return {"key": key, "changed": True}
 
 
@@ -619,19 +641,22 @@ def delete(key: str, *, actor: str | None, note: str | None, confirm: str | None
     if setting is None:
         raise SettingError(UNKNOWN_KEY, f"unknown setting {key!r}")
     env = env_value(setting)
-    with get_sync_engine().begin() as conn:
-        _lock_key(conn, key)
-        old = conn.execute(
-            select(runtime_settings.c.value).where(runtime_settings.c.key == key).with_for_update()
-        ).scalar_one_or_none()
-        if old is None:
-            return {"key": key, "changed": False}
-        _check_confirm(setting, combine(setting, env, _valid_or_none(key, old)), env, confirm)
-        conn.execute(runtime_settings.delete().where(runtime_settings.c.key == key))
-        conn.execute(
-            runtime_settings_audit.insert().values(key=key, old_value=old, new_value=None, changed_by=actor, note=note)
-        )
-    _publish_write(key, None)
+    with _write_lock:  # until published: see _write_lock
+        with get_sync_engine().begin() as conn:
+            _lock_key(conn, key)
+            old = conn.execute(
+                select(runtime_settings.c.value).where(runtime_settings.c.key == key).with_for_update()
+            ).scalar_one_or_none()
+            if old is None:
+                return {"key": key, "changed": False}
+            _check_confirm(setting, combine(setting, env, _valid_or_none(key, old)), env, confirm)
+            conn.execute(runtime_settings.delete().where(runtime_settings.c.key == key))
+            conn.execute(
+                runtime_settings_audit.insert().values(
+                    key=key, old_value=old, new_value=None, changed_by=actor, note=note
+                )
+            )
+        _publish_write(key, None)  # after commit, still under _write_lock
     return {"key": key, "changed": True}
 
 

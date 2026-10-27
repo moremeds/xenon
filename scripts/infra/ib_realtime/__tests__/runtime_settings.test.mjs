@@ -150,7 +150,7 @@ test("poller: override → change callback; failure keeps last values", async ()
   fetchImpl.status = 500;
   assert.equal(await rs.pollOnce(), false);
   assert.equal(rs.effective().IB_REALTIME_MAX_LINES, 40); // last values kept
-  assert.match(rs.status().last_error, /HTTP 500/);
+  assert.equal(rs.status().last_error, "http_500");
 
   fetchImpl.status = 200;
   fetchImpl.rows = []; // override removed → back to env
@@ -169,6 +169,21 @@ test("poller without an internal token never calls the api", async () => {
   assert.equal(await rs.pollOnce(), false);
   assert.equal(fetchImpl.calls.length, 0);
   assert.equal(rs.status().last_error, "no_internal_token");
+});
+
+test("poller failure text never carries the token (native fetch)", async () => {
+  // Native fetch echoes an invalid header value in its error message.
+  const secret = "SYNTHETIC-TOKEN\nLEAK";
+  const logs = [];
+  const rs = createRuntimeSettings({
+    url: "http://127.0.0.1:9/admin/settings",
+    token: secret,
+    log: (m) => logs.push(m),
+  });
+  assert.equal(await rs.pollOnce(), false);
+  const seen = logs.join("\n") + JSON.stringify(rs.status());
+  for (const part of ["SYNTHETIC-TOKEN", "LEAK"]) assert.ok(!seen.includes(part), seen);
+  assert.equal(rs.status().last_error, "request_failed");
 });
 
 // ─── relay subprocess (futu_stack harness) ────────────────────────────────
@@ -230,7 +245,7 @@ test("relay: XENON_QUOTES_DEFAULT override re-routes connected tickets live", as
     failing.runtime_settings.effective.XENON_QUOTES_DEFAULT,
     "futu-first",
   );
-  assert.match(failing.runtime_settings.last_error, /HTTP 500/);
+  assert.equal(failing.runtime_settings.last_error, "http_500");
 
   // override removed → back to the env default: AAPL leaves `want`
   stack.settings.status = 200;
@@ -265,11 +280,13 @@ test("relay: line budget and stale threshold follow the override", async (t) => 
     row("IB_REALTIME_MAX_LINES", 20),
     row("IB_REALTIME_STALE_TICK_MS", 5000),
   ];
+  // Awaited polling: no status fetch is left in flight when the test ends.
   let st;
-  await stack.waitFor(() => {
-    stack.status().then((s) => (st = s));
-    return st?.runtime_settings?.effective?.IB_REALTIME_MAX_LINES === 20;
-  });
+  for (const deadline = Date.now() + 4000; ; await sleep(25)) {
+    st = await stack.status();
+    if (st?.runtime_settings?.effective?.IB_REALTIME_MAX_LINES === 20) break;
+    assert.ok(Date.now() < deadline, "line budget override not applied");
+  }
   assert.equal(st.runtime_settings.effective.IB_REALTIME_STALE_TICK_MS, 5000);
   assert.deepEqual(st.runtime_settings.overrides, {
     IB_REALTIME_MAX_LINES: 20,

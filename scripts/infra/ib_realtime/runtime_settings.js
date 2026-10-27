@@ -139,25 +139,40 @@ export function createRuntimeSettings({
       lastError = "no_internal_token";
       return false;
     }
+    // Fixed codes only: exception text can echo the token (native fetch
+    // puts an invalid header value in its message), so it is never logged
+    // or exposed in /status.
+    const fail = (code) => {
+      if (code !== lastError)
+        log(`runtime settings pull failed (keeping last values): ${code}`);
+      lastError = code;
+      return false;
+    };
+    let res;
     try {
-      const res = await fetchImpl(url, {
+      res = await fetchImpl(url, {
         headers: { "X-Internal-Token": token },
         signal: AbortSignal.timeout(timeoutMs),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const parsed = parseOverrides(await res.json());
-      if (parsed == null) throw new Error("unexpected body");
-      lastOkAt = Date.now();
-      lastError = null;
-      apply(parsed);
-      return true;
-    } catch (err) {
-      const msg = String(err?.message ?? err);
-      if (msg !== lastError)
-        log(`runtime settings pull failed (keeping last values): ${msg}`);
-      lastError = msg;
-      return false;
+    } catch {
+      return fail("request_failed");
     }
+    if (!res.ok) return fail(`http_${Number(res.status) || 0}`);
+    let parsed;
+    try {
+      parsed = parseOverrides(await res.json());
+    } catch {
+      parsed = null;
+    }
+    if (parsed == null) return fail("bad_body");
+    try {
+      apply(parsed);
+    } catch {
+      return fail("apply_failed");
+    }
+    lastOkAt = Date.now();
+    lastError = null;
+    return true;
   }
 
   return {

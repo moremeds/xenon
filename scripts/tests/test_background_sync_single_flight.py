@@ -31,7 +31,7 @@ def runner(monkeypatch):
     """Stand-in for `_run_ib_script_with_recovery` that blocks until released."""
     state = {"calls": [], "release": asyncio.Event(), "result": ScriptResult(ok=True, data={})}
 
-    async def _fake(entry, args, timeout=30):
+    async def _fake(entry, args, timeout=30, env=None):
         state["calls"].append((entry, tuple(args)))
         await state["release"].wait()
         return state["result"]
