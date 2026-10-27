@@ -497,6 +497,7 @@ export default function WorkspaceShell({
         activeSection={activeSection}
         actionTone={actionTone}
         ibConnected={ibConnected}
+        ibUpstream={subscriberHealth.ibUpstream}
         lastSync={lastSync}
         subscribers={subscriberHealth.subscribers}
         subscribersReachable={subscriberHealth.reachable}

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from xenon.api.guards import is_read_only, read_only_403
 from xenon.api.services import order_entry
@@ -35,7 +36,14 @@ async def orders_quote(ticker: str, con_id: int):
     secret = os.environ.get("XENON_QUOTE_TOKEN_SECRET")
     if not secret:
         raise HTTPException(status_code=500, detail="quote secret not configured")
-    snap = await order_entry._fetch_quote_snapshot(ticker, con_id)
+    try:
+        snap = await order_entry._fetch_quote_snapshot(ticker, con_id)
+    except HTTPException as exc:
+        reason = getattr(exc, "reason_code", None)
+        if reason is None:
+            raise
+        # Top-level reason_code (the toast reads body.reason_code).
+        return JSONResponse(status_code=exc.status_code, content={"reason_code": reason.value, "detail": exc.detail})
     import time as _time
 
     payload = QuotePayload(

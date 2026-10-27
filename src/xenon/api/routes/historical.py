@@ -17,6 +17,8 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from xenon.api.ib_pool import call_data_bounded, data_session
+
 logger = logging.getLogger("xenon.historical")
 
 router = APIRouter()
@@ -168,6 +170,11 @@ def _head_timestamp_to_iso(ts) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _qualify(client, *contracts):
+    return client.qualify_contracts(*contracts)
+
+
+
 @router.post("/contract/qualify")
 async def qualify_contracts(req: QualifyRequest, request: Request):
     """Qualify one or more contracts against IB."""
@@ -175,8 +182,7 @@ async def qualify_contracts(req: QualifyRequest, request: Request):
     contracts = [make_ib_contract(spec) for spec in req.contracts]
 
     try:
-        async with pool.acquire("data") as client:
-            await pool.run_sync("data", client.qualify_contracts, *contracts)
+        await call_data_bounded(pool, _qualify, *contracts)
     except ConnectionError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -191,8 +197,9 @@ async def head_timestamp(req: HeadTimestampRequest, request: Request):
     contract = make_ib_contract(req.contract)
 
     try:
-        async with pool.acquire("data") as client:
-            await pool.run_sync("data", client.qualify_contracts, contract)
+        # Lock wait + reconnect + qualify run under one deadline with fencing
+        # (fails fast on a lost upstream); the download keeps its own timeout.
+        async with data_session(pool, _qualify, contract) as client:
             ts = await pool.run_sync(
                 "data",
                 client.get_head_timestamp,
@@ -221,8 +228,9 @@ async def historical_bars(req: HistoricalBarsRequest, request: Request):
         )
 
     try:
-        async with pool.acquire("data") as client:
-            await pool.run_sync("data", client.qualify_contracts, contract)
+        # Lock wait + reconnect + qualify run under one deadline with fencing
+        # (fails fast on a lost upstream); the download keeps its own timeout.
+        async with data_session(pool, _qualify, contract) as client:
             _require_qualified([req.contract], [contract])
             started = time.monotonic()
             bars = await pool.run_sync(

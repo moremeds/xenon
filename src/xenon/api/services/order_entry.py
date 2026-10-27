@@ -550,72 +550,53 @@ def _qualify_order_con_id_with_client(client: Any, body: dict) -> int:
     return con_id
 
 
-async def _fetch_quote_snapshot(ticker: str, con_id: int) -> dict:
-    """Fetch a bid/ask snapshot from the serialized ib_pool 'data' role."""
+def _ib_data_error(exc: ConnectionError) -> HTTPException:
+    """503 for a failed data-role call. ``reason_code`` (read by
+    `_quote_payload_for` and the /orders/quote route) is IB_BROKER_DISCONNECTED
+    when the gateway lost IB servers, else QUOTE_UNAVAILABLE (deadline,
+    fenced role, role down)."""
+    from xenon.api.ib_pool import IBUpstreamLost
+
+    err = HTTPException(status_code=503, detail=str(exc))
+    err.reason_code = (  # type: ignore[attr-defined]
+        ReasonCode.IB_BROKER_DISCONNECTED if isinstance(exc, IBUpstreamLost) else ReasonCode.QUOTE_UNAVAILABLE
+    )
+    return err
+
+
+async def _data_call(fn: Any, *args: Any) -> Any:
+    """`fn(client, *args)` on the ib_pool 'data' role within
+    `XENON_IB_QUOTE_TIMEOUT_S` (`ib_pool.call_data_bounded`); 503 on failure."""
     from xenon.api import server
+    from xenon.api.ib_pool import call_data_bounded
 
     pool = server.ib_pool
     if pool is None:
-        raise HTTPException(status_code=503, detail="IB data role unavailable")
-
+        raise _ib_data_error(ConnectionError("IB data role unavailable"))
     try:
-        async with pool.acquire("data") as client:
-            return await pool.run_sync(
-                "data",
-                _fetch_quote_snapshot_with_client,
-                client,
-                ticker,
-                con_id,
-            )
+        return await call_data_bounded(pool, fn, *args)
     except ConnectionError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise _ib_data_error(exc) from exc
+
+
+async def _fetch_quote_snapshot(ticker: str, con_id: int) -> dict:
+    """Fetch a bid/ask snapshot from the serialized ib_pool 'data' role."""
+    return await _data_call(_fetch_quote_snapshot_with_client, ticker, con_id)
 
 
 async def _fetch_order_quote_snapshot(body: dict) -> tuple[int, dict]:
-    from xenon.api import server
-
     ticker = str(body.get("symbol", "")).upper()
     con_id = int(body.get("con_id") or 0)
     if con_id > 0:
         return con_id, await _fetch_quote_snapshot(ticker, con_id)
-
-    pool = server.ib_pool
-    if pool is None:
-        raise HTTPException(status_code=503, detail="IB data role unavailable")
-
-    try:
-        async with pool.acquire("data") as client:
-            return await pool.run_sync(
-                "data",
-                _fetch_order_quote_snapshot_with_client,
-                client,
-                dict(body),
-            )
-    except ConnectionError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return await _data_call(_fetch_order_quote_snapshot_with_client, dict(body))
 
 
 async def _qualify_order_con_id(body: dict) -> int:
-    from xenon.api import server
-
     con_id = int(body.get("con_id") or 0)
     if con_id > 0:
         return con_id
-
-    pool = server.ib_pool
-    if pool is None:
-        raise HTTPException(status_code=503, detail="IB data role unavailable")
-
-    try:
-        async with pool.acquire("data") as client:
-            return await pool.run_sync(
-                "data",
-                _qualify_order_con_id_with_client,
-                client,
-                dict(body),
-            )
-    except ConnectionError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return await _data_call(_qualify_order_con_id_with_client, dict(body))
 
 
 def _quote_payload_from_snapshot(ticker: str, con_id: int, snap: dict) -> QuotePayload:
@@ -675,7 +656,7 @@ async def _quote_payload_for(
             0,
             quote_guard.QuoteVerdict(
                 accept=False,
-                reason_code=ReasonCode.QUOTE_UNAVAILABLE,
+                reason_code=getattr(exc, "reason_code", ReasonCode.QUOTE_UNAVAILABLE),
                 reason_detail=str(exc.detail),
             ),
             exc.status_code if exc.status_code >= 500 else 400,
@@ -794,9 +775,10 @@ async def _resolve_gate4_leg_meta(body: dict) -> list[dict | None]:
     pool = server.ib_pool
     if pool is None or not specs:
         return [None] * len(specs)
+    from xenon.api.ib_pool import call_data_bounded
+
     try:
-        async with pool.acquire("data") as client:
-            return await pool.run_sync("data", _resolve_leg_meta_with_client, client, specs)
+        return await call_data_bounded(pool, _resolve_leg_meta_with_client, specs)
     except Exception as exc:  # noqa: BLE001 — fail closed, never guess metadata
         logger.warning("gate4 contract qualification failed: %s", exc)
         return [None] * len(specs)

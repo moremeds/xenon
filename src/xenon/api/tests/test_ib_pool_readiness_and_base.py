@@ -29,9 +29,9 @@ def test_status_reports_readiness_separately_from_connected(monkeypatch):
 
     status = pool.status()
 
-    assert status["orders"] == {"connected": True, "broker_readiness": READINESS_LOST, "client_id": 104}
-    assert status["sync"] == {"connected": True, "broker_readiness": READINESS_READY, "client_id": 103}
-    assert status["data"] == {"connected": False, "broker_readiness": READINESS_UNKNOWN, "client_id": 105}
+    assert status["orders"] == {"connected": True, "broker_readiness": READINESS_LOST, "client_id": 104, "fenced": False}
+    assert status["sync"] == {"connected": True, "broker_readiness": READINESS_READY, "client_id": 103, "fenced": False}
+    assert status["data"] == {"connected": False, "broker_readiness": READINESS_UNKNOWN, "client_id": 105, "fenced": False}
 
 
 @pytest.mark.asyncio

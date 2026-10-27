@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import http from "node:http";
 import { once } from "node:events";
 import { spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,8 +19,12 @@ const serverScript = resolve(
 );
 
 const occupiedServers: http.Server[] = [];
+const runtimeDirs: string[] = [];
 
 afterEach(async () => {
+  for (const dir of runtimeDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
   while (occupiedServers.length > 0) {
     const server = occupiedServers.pop();
     if (!server) continue;
@@ -58,15 +62,19 @@ describe("ib realtime server startup", () => {
     async () => {
       const port = await occupyPort();
       const runtimeDir = mkdtempSync(join(tmpdir(), "xenon-ib-realtime-"));
+      runtimeDirs.push(runtimeDir);
       const runtimeFile = join(runtimeDir, "runtime.json");
 
       const child = spawn(
         process.execPath,
-        [serverScript, "--port", String(port)],
+        [serverScript, "--port", String(port), "--ib-port", "1"],
         {
           cwd: projectRoot,
+          // Hermetic: no parent env, no repo .env (IB_REALTIME_NO_DOTENV).
           env: {
-            ...process.env,
+            PATH: process.env.PATH ?? "",
+            IB_REALTIME_NO_DOTENV: "1",
+            IB_GATEWAY_HOST: "127.0.0.1",
             IB_REALTIME_RUNTIME_FILE: runtimeFile,
           },
           stdio: ["ignore", "pipe", "pipe"],

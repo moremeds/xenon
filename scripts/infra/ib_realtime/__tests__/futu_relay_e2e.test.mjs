@@ -2,10 +2,10 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import http from "node:http";
-import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
+import { makeRuntimeFile, relayEnv } from "./futu_stack.mjs";
 
 // End-to-end: the real relay subprocess against a fake futu-quotes service
 // (ws WebSocketServer) and a fake ticket validator. IB is deliberately
@@ -19,7 +19,7 @@ import { WebSocketServer, WebSocket } from "ws";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SERVER = path.join(HERE, "..", "ib_realtime_server.js");
-const RUNTIME_FILE = path.join(HERE, "e2e-runtime.json");
+const { file: RUNTIME_FILE, cleanup: cleanupRuntime } = makeRuntimeFile();
 const API_KEY = "e2e-api-key";
 const HD = 400; // FUTU_HOLD_DOWN_MS
 const DEADLINE = 700; // FUTU_HEALTH_DEADLINE_MS
@@ -216,15 +216,14 @@ before(async () => {
     process.execPath,
     [SERVER, "--port", String(relayPort), "--ib-port", "1"],
     {
-      env: {
-        ...process.env,
+      env: relayEnv({
         TICKET_VALIDATE_URL: `http://127.0.0.1:${validatorPort}/ws-ticket/validate`,
         XENON_QUERY_API_KEY: API_KEY,
         IB_REALTIME_STATUS_TOKEN: "status-tok",
         FUTU_QUOTES_URL: `ws://127.0.0.1:${futuPort}/`,
         IB_REALTIME_RUNTIME_FILE: RUNTIME_FILE,
         ...ENV,
-      },
+      }),
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -239,11 +238,7 @@ after(() => {
   relay?.kill("SIGINT");
   validator?.close();
   futuWss?.close();
-  try {
-    fs.unlinkSync(RUNTIME_FILE);
-  } catch {
-    /* ignore */
-  }
+  cleanupRuntime();
 });
 
 // ─── Tests ───────────────────────────────────────────────────────────────

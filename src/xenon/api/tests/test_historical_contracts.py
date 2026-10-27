@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
+from xenon.api.ib_pool import bounded_data_job
 from xenon.api.routes.historical import (
     ContractSpec,
     HistoricalBarsRequest,
@@ -15,6 +16,7 @@ from xenon.api.routes.historical import (
     make_ib_contract,
     qualify_contracts,
 )
+
 
 
 class FakePool:
@@ -30,7 +32,10 @@ class FakePool:
         yield SimpleNamespace(qualify_contracts="qualify", get_historical_data="hist")
 
     async def run_sync(self, role, fn, *args, **kwargs):
-        self.calls.append((fn, args, kwargs))
+        if fn is bounded_data_job:  # the bounded qualify step (XENON_IB_QUOTE_TIMEOUT_S)
+            _deadline, _inner, _client, *args = args
+            fn = "qualify"
+        self.calls.append((fn, tuple(args), kwargs))
         if fn == "qualify":
             if not self.known:
                 return [None for _ in args]
