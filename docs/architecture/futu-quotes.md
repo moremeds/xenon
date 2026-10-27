@@ -22,20 +22,23 @@ options from OpenD, and the relay serves them to clients that opt in.
   `XENON_FUTU_OPTIONS` follow the runtime settings live (relay pull every 10 s): a default flip
   re-routes every connected client that did not opt in itself, an options flip re-pins or
   unpins every subscribed option key.
-- Futu serves US stocks and ETFs in two sessions, and US options in `rth` only. The service polls
+- Futu serves US stocks and ETFs in four sessions, and US options in `rth` only. The service polls
   `get_global_state().market_us` every 30 s and reads its wall clock (UTC, converted to
   America/New_York) at each poll (`admission.us_session`):
   - `rth`: `market_us` is `MORNING` or `AFTERNOON`, at any clock. Futu's own state covers holidays
     and early closes.
+  - `pre`: `market_us` is `PRE_MARKET_BEGIN`. `after`: `market_us` is `AFTER_HOURS_BEGIN`.
+    `pre`, `after` and `overnight` are the extended sessions; they share every extended rule below
+    and differ only in the QUOTE fields they read and in `close`.
   - `overnight` (Blue Ocean): `market_us` is `OVERNIGHT`, or `AFTER_HOURS_END` while the ET clock is
     inside Sun–Thu 20:00 → next day 03:50. Live OpenD (SDK 10.03.6308) reports `AFTER_HOURS_END`
     in this window, not `OVERNIGHT`.
-  - Every other state (pre-market, after-hours, weekend, failed or unknown) counts as closed:
+  - Every other state (`PRE_MARKET_END`, weekend, failed or unknown) counts as closed:
     symbols go `pending` with reason `session` and stay on IB. A clock edge (20:00, 03:50) takes
     effect at the next poll, so up to 30 s late.
 - Indexes, non-US symbols and anything Futu rejects stay on IB in every session. Options are never
-  served overnight: an option row in the overnight session is not a quote source and the symbol
-  sits `pending` with reason `session`.
+  served in an extended session: an option row there is not a quote source and the symbol sits
+  `pending` with reason `session`.
 
 ## Transport
 
@@ -117,13 +120,14 @@ the session changes.
 - For the latest `want`, `ok`, `pending` and `rejected` are disjoint and together list every wanted
   symbol. `pending` and `rejected` items are `{symbol, reason}`.
 - `ok`: the paired QUOTE + ORDER_BOOK subscription is held on OpenD while the session is `rth` or
-  `overnight` (options: `rth` only). The relay serves a symbol from Futu only when
+  an extended session (options: `rth` only). The relay serves a symbol from Futu only when
   it is in `ok` of the latest `gen` of the active connection.
-- Overnight readiness: in the `overnight` session a subscribed symbol is `ok` only after the
-  service has seen at least one row for it with a valid `overnight_price` and an `overnight_volume`
-  above 0 since the last baseline reset (see the replay guard below). Until then it stays `pending`
-  with reason `session`, so the relay keeps it on IB. A symbol with no overnight trading never
-  leaves IB. The row that makes it ready is the baseline and is not published.
+- Extended readiness: in an extended session a subscribed symbol is `ok` only after the service has
+  seen at least one row for it with a valid session price and a session volume above 0
+  (`pre_*` / `after_*` / `overnight_*`) since the last baseline reset (see the replay guard
+  below). Until then it stays `pending` with reason `session`, so the relay keeps it on IB. A
+  symbol with no trading in the session never leaves IB. The row that makes it ready is the
+  baseline and is not published.
 - Assignment transitions are serialized. A late completion of an older subscribe never changes the
   assignment for a newer `gen`.
 - `pending.reason`: `subscribing` | `session` | `opend_down` | `backoff`.
@@ -165,13 +169,15 @@ the session changes.
   reconnect time — except that a book-driven re-emit stamps `max(quote ts, book receipt time)`.
   The per-symbol high-water mark and the coalescer order still use the QUOTE timestamp only, so
   a book receipt never advances the mark or drops a newer quote.
-- Overnight rows add `session: "overnight"`. `last` / `high` / `low` / `volume` are
-  `overnight_price` / `overnight_high_price` / `overnight_low_price` / `overnight_volume`; `close`
-  is the RTH `last_price` (the most recent regular close); `open` is `null`. During overnight the
-  QUOTE push keeps `last_price` and `data_date`/`data_time` at the last RTH quote, and Futu has no
-  overnight time field, so `timestamp` is the service's receipt time (UTC). A row with a missing,
-  non-finite or ≤ 0 `overnight_price` or `overnight_volume` is dropped (for example a holiday night
-  or a rolled row): it is not published and does not count for readiness.
+- Extended rows add `session: "pre" | "after" | "overnight"`. `last` / `high` / `low` / `volume`
+  are the session's `<p>_price` / `<p>_high_price` / `<p>_low_price` / `<p>_volume` with `<p>` =
+  `pre`, `after` or `overnight`; `open` is `null`. `close` is the previous session day's close: the
+  RTH `last_price` pre-market and overnight, `prev_close_price` after-hours (there `last_price` is
+  already today's close). Outside RTH the QUOTE push keeps `last_price` and
+  `data_date`/`data_time` at the last RTH quote, and Futu has no extended-session time field, so
+  `timestamp` is the service's receipt time (UTC). Extended rows carry no book (`bid` / `ask`
+  `null`). A row with a missing, non-finite or ≤ 0 session price or volume is dropped (for example
+  a holiday or a rolled row): it is not published and does not count for readiness.
 - Option rows (RTH only, keyed by the relay option key from `want.symbols`) fill the option
   fields: `impliedVol`, `delta`, `gamma`, `theta`, `vega` = the QUOTE push's
   `implied_volatility` / `delta` / `gamma` / `theta` / `vega` each × its factor from
@@ -179,13 +185,13 @@ the session changes.
   `iv` 0.01 converts Futu's percent IV into the fraction PriceData expects). Unset or invalid
   `FUTU_GREEK_FACTORS`, or a missing/non-finite push value or factor, leaves that field `null`.
   `undPrice` is the latest Futu `last` of the held underlying, refreshed on every emit including
-  book-driven rebuilds, else `null`. Options never carry `session: "overnight"`.
+  book-driven rebuilds, else `null`. Options never carry a `session` field.
 - A missing `session` field means `rth`. Consumers must not require the field.
-- Overnight replay guard: the service publishes an overnight row only when `overnight_volume` or
-  `overnight_price` differs from the last value seen for that symbol. The first row after a
-  subscribe, an OpenD reconnect, a relay-owner change or a session change is a baseline and is not
-  published. Each of those resets also clears overnight readiness. A ready but quiet symbol sends
-  nothing until its next overnight trade.
+- Extended replay guard: the service publishes an extended row only when the session volume or
+  price differs from the last value seen for that symbol. The first row after a subscribe, an
+  OpenD reconnect, a relay-owner change or a session change (for example `after` → `overnight` at
+  20:00) is a baseline and is not published. Each of those resets also clears extended readiness.
+  A ready but quiet symbol sends nothing until its next trade in the session.
 - Overnight latency: after 20:00 ET, a symbol's first Futu tick reaches a futu-first client after
   the session poll (≤ 30 s), its first trade row (readiness, not published), the relay hold-down
   (≥ 60 s after `ok`) and then its next changed trade row. Until it is routed to Futu the client

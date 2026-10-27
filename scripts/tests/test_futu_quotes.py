@@ -388,13 +388,13 @@ def test_admission_is_ok_fencing():
 
 
 def test_admission_session_is_open_states():
-    # RTH states are open at any clock; overnight rules live in
+    # RTH states are open at any clock; extended-session rules live in
     # test_futu_quotes_overnight.py.
     noon = datetime(2026, 10, 21, 16, 0, tzinfo=timezone.utc)
     assert us_session("MORNING", noon) == "rth"
     assert us_session("AFTERNOON", noon) == "rth"
     assert us_session("CLOSED", noon) is None
-    assert us_session("PRE_MARKET_BEGIN", noon) is None
+    assert us_session("PRE_MARKET_END", noon) is None
     assert us_session(None, noon) is None
     assert us_session("", noon) is None
 

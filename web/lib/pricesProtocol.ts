@@ -27,8 +27,9 @@ export type PriceData = {
   stale?: boolean;
   /** Quote provider — present only on Futu-routed rows. */
   source?: "futu";
-  /** Futu overnight-session marker for US stock rows (Sun–Thu ET session). */
-  session?: "overnight";
+  /** Futu extended-session marker for US stock rows: pre-market, after-hours,
+   *  or overnight (Sun–Thu ET). Absent on RTH rows. */
+  session?: "pre" | "after" | "overnight";
 };
 
 export type FundamentalsData = {

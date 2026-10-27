@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from xenon.futu_quotes.admission import (
+    EXTENDED_SESSIONS,
     Admission,
     option_underlying,
     ticker_of,
@@ -46,11 +47,11 @@ from xenon.futu_quotes.opend import (
     classify_unsubscribe_error,
 )
 from xenon.futu_quotes.quote_map import (
+    ExtendedBaseline,
     HighWaterMark,
-    OvernightBaseline,
+    extended_row_to_pricedata,
     option_quote_fields,
     order_book_top,
-    overnight_row_to_pricedata,
     row_to_pricedata,
 )
 
@@ -162,7 +163,7 @@ class FutuQuotesService:
         )
         self.batcher = Batcher(batch_window_s, clock)
         self.highwater = HighWaterMark()
-        # Wall clock (aware UTC): session rule + overnight receipt stamps.
+        # Wall clock (aware UTC): session rule + extended-session receipt stamps.
         self.wall = wall
         # ORDER_BOOK age cutoff (Amendment A1): 0 = off — a held pair keeps
         # its book top until a push, disconnect or unsubscribe replaces it;
@@ -181,9 +182,9 @@ class FutuQuotesService:
             "FUTU_BOOK_STALE_S": book_stale_s,
             "FUTU_GREEK_FACTORS": greek_factors,
         }
-        # US session from the last poll: "rth" | "overnight" | None (closed).
+        # US session from the last poll: "rth" | "pre" | "after" | "overnight" | None (closed).
         self.session: Optional[str] = None
-        self.baseline = OvernightBaseline()
+        self.baseline = ExtendedBaseline()
 
         self.conn: Any = None
         self._tasks: set[asyncio.Task] = set()
@@ -334,8 +335,8 @@ class FutuQuotesService:
         logger.warning("OpenD connection lost")
         self.admission.mark_disconnected()
         self.batcher.clear()  # dead-session ticks must not carry over
-        self.session = None  # mark_disconnected also drops overnight readiness
-        self.baseline.reset_all()  # overnight baseline is per OpenD session
+        self.session = None  # mark_disconnected also drops extended readiness
+        self.baseline.reset_all()  # extended baseline is per OpenD session
         self._book.clear()  # book receipt belongs to the dead session
         self._last_quote.clear()
         self._opend_down.set()
@@ -577,11 +578,11 @@ class FutuQuotesService:
         if self._stale(op):
             return  # stale-session poll result
         if session is None or session != self.session:
-            # Closed (nothing is ok any more) or rth<->overnight: buffered
+            # Closed (nothing is ok any more) or a session change: buffered
             # rows were mapped for the old session.
             self.batcher.clear()
         if session != self.session:
-            self.baseline.reset_all()  # first overnight row is a baseline
+            self.baseline.reset_all()  # first row of a new session is a baseline
             # A1: the stored book top and the RTH quote template are
             # session-bound — a quiet book must not ride into the next
             # session (book age rule off by default means nothing else
@@ -590,8 +591,8 @@ class FutuQuotesService:
             self._last_quote.clear()
         self.session = session
         self.admission.set_session_open(session is not None)
-        self.admission.overnight_trade_seen = (
-            self.baseline.seen if session == "overnight" else None
+        self.admission.extended_trade_seen = (
+            self.baseline.seen if session in EXTENDED_SESSIONS else None
         )
         self._kick()
 
@@ -624,7 +625,7 @@ class FutuQuotesService:
         await asyncio.shield(op.done)
 
     async def poll_session_once(self) -> None:
-        """``us_session(market_us, wall)`` is rth or overnight ⇒ open."""
+        """``us_session(market_us, wall)`` is rth or an extended session ⇒ open."""
         await self._poll("session")
 
     async def refresh_quota_once(self) -> None:
@@ -655,23 +656,23 @@ class FutuQuotesService:
 
     def _on_quote_rows(self, rows: list[dict]) -> None:
         """QUOTE push rows (already on the loop thread)."""
-        received_at = self.wall() if self.session == "overnight" else None
+        received_at = self.wall() if self.session in EXTENDED_SESSIONS else None
         for row in rows:
             sym = ticker_of(row.get("code"))
             if sym is None:
                 continue
             if received_at is not None:
                 if "_" in sym:
-                    continue  # option relay keys are RTH only, never overnight
-                out = overnight_row_to_pricedata(sym, row, received_at)
+                    continue  # option relay keys are RTH only
+                out = extended_row_to_pricedata(sym, row, received_at, self.session)
                 if out is None:
-                    continue  # no overnight trade: not ready, not published
+                    continue  # no trade in this session: not ready, not published
                 if not self.baseline.seen(sym):
                     self._kick()  # first trade row: symbol may become ok
-                # Receipt-time stamps: publish only a changed overnight
+                # Receipt-time stamps: publish only a changed session
                 # volume/price; the first row after (re)subscribe or a reset
-                # is the baseline (see OvernightBaseline ponytail ceiling).
-                if not self.baseline.changed(sym, row):
+                # is the baseline (see ExtendedBaseline ponytail ceiling).
+                if not self.baseline.changed(sym, row, self.session):
                     continue
             else:
                 out = row_to_pricedata(sym, row)
@@ -756,7 +757,7 @@ class FutuQuotesService:
             pd, quote_ts = base
             if self.highwater.seen(sym, quote_ts):
                 # The template slipped behind the flushed mark (e.g. the
-                # mark advanced on an overnight receipt): re-emitting it
+                # mark advanced on an extended-session receipt): re-emitting it
                 # would publish an older `last` stamped fresh. Skip the
                 # rebuild; the stored top rides the next real quote.
                 continue
