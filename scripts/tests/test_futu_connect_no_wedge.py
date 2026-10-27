@@ -72,7 +72,7 @@ async def test_hanging_scope_factory_does_not_block_event_loop(monkeypatch):
     task = asyncio.create_task(
         sched_mod.futu_history_loop(
             engine_factory=_engine_factory,
-            scope_factory=_hanging_scope_factory,
+            scopes_factory=_hanging_scope_factory,
             runner=runner,
         )
     )

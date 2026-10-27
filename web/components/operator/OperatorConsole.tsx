@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { downPoolRoles, snapshotterTone } from "@/lib/operatorHealth";
 import { isWriterStale, NON_WRITER_SERVICES } from "@/lib/serviceHealthWindows";
 import type { FlexTokenInfo, OperatorData } from "@/lib/operatorTypes";
 import { useMarketHours } from "@/lib/useMarketHours";
@@ -94,11 +95,7 @@ export default function OperatorConsole() {
   ).length;
   const writerSummary = `${freshCount}/${writers.length} healthy`;
 
-  const snapTone =
-    data.snapshotter.stale_seconds != null &&
-    data.snapshotter.stale_seconds > 1800
-      ? "fault"
-      : "core";
+  const snapTone = snapshotterTone(data.snapshotter.stale_seconds, market);
   const orderTone = data.order_submissions.alarm ? "fault" : "neutral";
   const flexToken = flexTokenTile(data.flex_token);
   const flexTone =
@@ -110,6 +107,7 @@ export default function OperatorConsole() {
         verdict={data.ib_auth}
         updatedSecsAgo={updatedSecsAgo}
         writerSummary={writerSummary}
+        degradedRoles={downPoolRoles(data.ib_auth, data.ib_pool)}
       />
       <BrokersCard data={data} />
       <div className="operator-surface__grid">

@@ -5,8 +5,17 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 
 import OperatorConsole from "@/components/operator/OperatorConsole";
 import type { OperatorData } from "@/lib/operatorTypes";
+import { MarketState } from "@/lib/useMarketHours";
+
+// Pin the market state so tone assertions never depend on wall-clock time.
+const market = vi.hoisted(() => ({ state: "open" }));
+vi.mock("@/lib/useMarketHours", async (orig) => ({
+  ...(await orig<typeof import("@/lib/useMarketHours")>()),
+  useMarketHours: () => market.state,
+}));
 
 afterEach(() => {
+  market.state = MarketState.OPEN;
   cleanup();
   vi.restoreAllMocks();
 });
@@ -211,5 +220,59 @@ describe("OperatorConsole", () => {
     );
     render(<OperatorConsole />);
     await waitFor(() => expect(screen.getByText(/HTTP 502/)).toBeTruthy());
+  });
+
+  function stubOperator(payload: OperatorData) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) =>
+        Promise.resolve({
+          ok: true,
+          json: async () =>
+            String(url).includes("/uw-quota") ? { configured: false } : payload,
+        }),
+      ),
+    );
+  }
+  async function snapshotterValue() {
+    const label = await screen.findByText("Snapshotter");
+    const tile = label.closest(".operator-tile") as HTMLElement;
+    return tile.querySelector(".operator-tile__value") as HTMLElement;
+  }
+
+  it("faults a stale snapshotter while the market is open", async () => {
+    stubOperator({
+      ...DATA,
+      snapshotter: { last_write_at: null, stale_seconds: 6510 },
+    });
+    render(<OperatorConsole />);
+    expect((await snapshotterValue()).className).toContain(
+      "operator-tile__value--fault",
+    );
+  });
+  it("does not fault a stale snapshotter while the market is closed", async () => {
+    market.state = MarketState.CLOSED;
+    stubOperator({
+      ...DATA,
+      snapshotter: { last_write_at: null, stale_seconds: 6510 },
+    });
+    render(<OperatorConsole />);
+    const value = await snapshotterValue();
+    expect(value.className).toContain("operator-tile__value--neutral");
+    expect(value.className).not.toContain("--fault");
+  });
+  it("flags an authenticated gateway with a down pool role in the rollup", async () => {
+    stubOperator({
+      ...DATA,
+      ib_pool: {
+        sync: { connected: true, client_id: 3 },
+        orders: { connected: true, client_id: 4 },
+        data: { connected: false, client_id: 5 },
+      },
+    });
+    const { container } = render(<OperatorConsole />);
+    await screen.findByText("Snapshotter");
+    const rollup = container.querySelector(".operator-rollup") as HTMLElement;
+    expect(rollup.textContent).toMatch(/IB authenticated.*data down/);
   });
 });

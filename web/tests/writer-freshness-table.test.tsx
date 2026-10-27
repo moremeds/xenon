@@ -51,6 +51,36 @@ describe("WriterFreshnessTable", () => {
     expect(screen.getByText("STALE")).toBeTruthy();
     expect(screen.getByText("never")).toBeTruthy();
   });
+  it("shows the parsed last_error for error rows, full text in title", () => {
+    render(
+      <WriterFreshnessTable
+        writers={[
+          row({
+            service: "futu_history",
+            state: "error",
+            age_secs: 39175,
+            last_error:
+              '{"msg": "OpenD unreachable at 127.0.0.1:11111: [Errno 111] Connection refused"}',
+          }),
+          row({
+            service: "ib_fills_replay",
+            state: "error",
+            last_error: "x".repeat(200),
+          }),
+          row({ service: "healthy", state: "ok", last_error: "old failure" }),
+        ]}
+        market={MarketState.OPEN}
+      />,
+    );
+    const parsed = screen.getByText(/OpenD unreachable at 127\.0\.0\.1:11111/);
+    expect(parsed.textContent).not.toContain("{");
+    expect(parsed.getAttribute("title")).toContain("Connection refused");
+    const long = screen.getByText(/^x+…$/);
+    expect(long.textContent!.length).toBeLessThan(120);
+    expect(long.getAttribute("title")).toBe("x".repeat(200));
+    // Only error rows surface last_error.
+    expect(screen.queryByText("old failure")).toBeNull();
+  });
   it("shows empty state", () => {
     render(<WriterFreshnessTable writers={[]} market={MarketState.OPEN} />);
     expect(screen.getByText(/no writers reported/i)).toBeTruthy();

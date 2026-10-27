@@ -3,6 +3,7 @@ import type {
   IbGatewayInfo,
   IbPoolRole,
 } from "@/lib/operatorTypes";
+import { downPoolRoles } from "@/lib/operatorHealth";
 
 const VERDICT_TONE: Record<IbAuthVerdict, string> = {
   authenticated: "core",
@@ -27,15 +28,17 @@ export function IbGatewayCard({
   pool: Record<string, IbPoolRole>;
 }) {
   const roles = Object.entries(pool);
+  const down = downPoolRoles(verdict, pool);
+  const pillTone = down.length > 0 ? "warn" : VERDICT_TONE[verdict];
+  const pillLabel =
+    down.length > 0 ? `${verdict} · ${down.join(", ")} down` : verdict;
   return (
     <div className="operator-broker">
       <header className="snapshot-card__header">
         <p className="panel-eyebrow">IB Gateway</p>
         <h3 className="panel-title">Gateway</h3>
-        <span
-          className={`operator-pill operator-pill--${VERDICT_TONE[verdict]}`}
-        >
-          {verdict}
+        <span className={`operator-pill operator-pill--${pillTone}`}>
+          {pillLabel}
         </span>
       </header>
       <dl className="operator-kv">

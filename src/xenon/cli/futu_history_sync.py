@@ -6,8 +6,8 @@ Usage
 
 Flow
 ----
-1. Resolve scope from env (XENON_TRADING_MODE + XENON_BROKER_ACCOUNT,
-   broker pinned to 'FUTU').
+1. Resolve scopes: every configured Futu account (FUTU_TRADE_ACC_ID_SIMULATE
+   / _REAL), else the account OpenD matches. Steps 2-5 run per scope.
 2. Connect to Futu OpenD, fetch_account() for today's net_liquidation.
 3. backfill_history_sync() — pulls deals + cashflows, UPSERTs into
    xenon.futu_trades + xenon.futu_cash_flow.
@@ -36,7 +36,7 @@ from xenon.api.services.futu_history_sync import (
     resolve_incremental_since,
 )
 from xenon.api.services.futu_nav_backfill import backfill_futu_nav
-from xenon.clients.futu_client import FutuClient
+from xenon.execution import futu_scope
 from xenon.execution.account_scope import AccountScope
 
 logger = logging.getLogger(__name__)
@@ -46,14 +46,30 @@ logger = logging.getLogger(__name__)
 _DEFAULT_INCEPTION = date(2024, 1, 1)
 
 
-def _default_client_factory() -> FutuClient:
-    return FutuClient()
+def resolve_scopes() -> list[AccountScope]:
+    """Every configured Futu scope (paper first); else the legacy OpenD match.
+
+    Spec §10: without a configured account the scope is not resolvable from
+    env — connect once to discover the matched account, then disconnect.
+    """
+    configured = list(futu_scope.configured_scopes().values())
+    if configured:
+        return configured
+    probe = futu_scope.new_client(None)
+    probe.connect()
+    try:
+        matched_env = (probe._matched_trd_env or probe.trd_env or "REAL").upper()
+        acc_id = str(probe._acc_id)
+    finally:
+        probe.disconnect()
+    account_env = {"REAL": "live", "SIMULATE": "paper"}.get(matched_env, "paper")
+    return [AccountScope(broker="FUTU", account_env=account_env, broker_account=acc_id)]
 
 
 async def run_history_sync(
     engine: AsyncEngine,
     scope: AccountScope,
-    since: date,
+    since: Optional[date],
     today_date: Optional[date] = None,
     client_factory: Optional[Callable[[], Any]] = None,
 ) -> dict:
@@ -61,12 +77,16 @@ async def run_history_sync(
 
     Returns a merged counts dict for the caller to print.
     Holds one Futu client across the whole sequence — connect once, do all
-    three fetches, disconnect on the way out (even on exception).
+    three fetches, disconnect on the way out (even on exception). The default
+    client is the scope's own (OpenD address from env, exact account + TrdEnv).
+    `since=None` (the nightly loop) resolves the incremental watermark.
     """
     if today_date is None:
         today_date = datetime.now(timezone.utc).date()
-    factory = client_factory or _default_client_factory
-    client = factory()
+    if since is None:
+        since = await resolve_incremental_since(engine, scope, inception=_DEFAULT_INCEPTION)
+        logger.info("futu history %s: incremental since=%s", scope.account_env, since)
+    client = client_factory() if client_factory else futu_scope.new_client(scope)
     client.connect()
     try:
         # Today's NAV anchor from accinfo_query.
@@ -145,42 +165,24 @@ def main() -> int:
         )
         return 2
 
-    # Spec §10: FUTU scope is NOT resolvable from env vars. Connect once to
-    # discover the matched OpenD account, build scope from it, then disconnect
-    # before the main pipeline reconnects.
-    probe = FutuClient()
-    probe.connect()
-    try:
-        matched_env = (probe._matched_trd_env or probe.trd_env or "REAL").upper()
-        acc_id = str(probe._acc_id)
-    finally:
-        probe.disconnect()
-    account_env = {"REAL": "live", "SIMULATE": "paper"}.get(matched_env, "paper")
-    scope = AccountScope(broker="FUTU", account_env=account_env, broker_account=acc_id)
-
-    async def _run():
+    async def _run(scope: AccountScope):
         engine = create_async_engine(db_url, pool_pre_ping=True)
         try:
-            if args.since is None:
-                resolved = await resolve_incremental_since(engine, scope, inception=_DEFAULT_INCEPTION)
-                logger.info("incremental --since resolved to %s", resolved)
-            else:
-                resolved = args.since
-            return await run_history_sync(engine, scope, since=resolved)
+            return await run_history_sync(engine, scope, since=args.since)
         finally:
             await engine.dispose()
 
-    result = asyncio.run(_run())
-
-    print()
-    print(f"xenon-futu-history-sync — scope={scope}")
-    print(f"  today's net_liquidation:  ${result['today_nav']:,.2f}")
-    print(f"  trades fetched:           {result['trades_fetched']:>6}")
-    print(f"  trades inserted (UPSERT): {result['trades_inserted']:>6}")
-    print(f"  non-US deals filtered:    {result['deals_filtered_non_us']:>6}")
-    print(f"  cashflows fetched:        {result['cashflows_fetched']:>6}")
-    print(f"  cashflows inserted:       {result['cashflows_inserted']:>6}")
-    print(f"  nav_history rows written: {result['nav_rows_written']:>6}")
+    for scope in resolve_scopes():
+        result = asyncio.run(_run(scope))
+        print()
+        print(f"xenon-futu-history-sync — scope={scope}")
+        print(f"  today's net_liquidation:  ${result['today_nav']:,.2f}")
+        print(f"  trades fetched:           {result['trades_fetched']:>6}")
+        print(f"  trades inserted (UPSERT): {result['trades_inserted']:>6}")
+        print(f"  non-US deals filtered:    {result['deals_filtered_non_us']:>6}")
+        print(f"  cashflows fetched:        {result['cashflows_fetched']:>6}")
+        print(f"  cashflows inserted:       {result['cashflows_inserted']:>6}")
+        print(f"  nav_history rows written: {result['nav_rows_written']:>6}")
     return 0
 
 

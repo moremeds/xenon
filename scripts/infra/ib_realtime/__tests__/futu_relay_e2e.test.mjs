@@ -503,3 +503,24 @@ test("browser client cannot opt in even when the service claims ok", async () =>
   );
   browser.close();
 });
+
+test("HTTP /status reports the futu quote feed for the operator console", async () => {
+  const body = await new Promise((resolve, reject) => {
+    http
+      .get(
+        { host: "127.0.0.1", port: relayPort, path: "/status", headers: { "x-status-token": "status-tok" } },
+        (res) => {
+          let raw = "";
+          res.on("data", (c) => (raw += c));
+          res.on("end", () => resolve(JSON.parse(raw)));
+        },
+      )
+      .on("error", reject);
+  });
+  assert.equal(typeof body.futu, "object");
+  assert.equal(typeof body.futu.connected, "boolean");
+  assert.equal(typeof body.futu.opend_connected, "boolean");
+  assert.ok("quota" in body.futu);
+  assert.equal(typeof body.futu.routes.futu, "number");
+  assert.equal(typeof body.futu.routes.ib, "number");
+});

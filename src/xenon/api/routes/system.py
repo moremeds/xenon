@@ -297,6 +297,9 @@ def _realtime_subscribers_health() -> dict:
         "subscribers": payload.get("subscribers", []),
         "anonymous_count": payload.get("anonymous_count", 0),
         "ttl_ms": payload.get("ttl_ms"),
+        # Futu quote feed (relay link, OpenD, quota, live routes); None on an
+        # older relay.
+        "futu_quotes": payload.get("futu"),
     }
 
 

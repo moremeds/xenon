@@ -383,28 +383,15 @@ def _maybe_start_futu_history_loop() -> None:
     from sqlalchemy.ext.asyncio import create_async_engine as _create_engine
 
     from xenon.api.services.futu_history_scheduler import futu_history_loop
-    from xenon.cli.futu_history_sync import run_history_sync
-    from xenon.execution.account_scope import AccountScope
+    from xenon.cli.futu_history_sync import resolve_scopes, run_history_sync
 
     def _engine_factory():
         return _create_engine(db_url, pool_pre_ping=True)
 
-    def _scope_factory():
-        client = futu_routes._get_futu_client()
-        if not client.is_connected():
-            client.connect()
-        matched_env = (client._matched_trd_env or client.trd_env or "REAL").upper()
-        account_env = {"REAL": "live", "SIMULATE": "paper"}.get(matched_env, "paper")
-        return AccountScope(
-            broker="FUTU",
-            account_env=account_env,
-            broker_account=str(client._acc_id),
-        )
-
     task = _asyncio.create_task(
         futu_history_loop(
             engine_factory=_engine_factory,
-            scope_factory=_scope_factory,
+            scopes_factory=resolve_scopes,
             runner=run_history_sync,
         )
     )

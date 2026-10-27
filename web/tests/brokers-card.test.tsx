@@ -43,7 +43,35 @@ describe("BrokersCard", () => {
     expect(screen.getByText("Gateway")).toBeTruthy();
     expect(screen.getByText("Futu")).toBeTruthy();
     expect(screen.getByText("OpenD")).toBeTruthy();
-    // 3 IB role dots + 2 Futu role dots = 5.
-    expect(container.querySelectorAll(".operator-role__dot").length).toBe(5);
+    // 3 IB role dots + 1 Futu sync dot = 4.
+    expect(container.querySelectorAll(".operator-role__dot").length).toBe(4);
+  });
+  it("passes realtime futu_quotes down to the Futu section", () => {
+    render(
+      <BrokersCard
+        data={
+          {
+            ...DATA,
+            realtime_subscribers: {
+              reachable: true,
+              subscribers: [],
+              anonymous_count: 0,
+              futu_quotes: {
+                connected: true,
+                opend_connected: true,
+                quota: {
+                  ceiling: 800,
+                  own_used: 24,
+                  all_used: null,
+                  remain: null,
+                },
+                routes: { futu: 12, ib: 3 },
+              },
+            },
+          } as unknown as OperatorData
+        }
+      />,
+    );
+    expect(screen.getByText(/OpenD up/).textContent).toContain("futu 12");
   });
 });
