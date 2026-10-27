@@ -12,7 +12,11 @@ import { dirname, resolve } from "node:path";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-dotenv.config({ path: resolve(__dirname, "../../../.env") });
+// IB_REALTIME_NO_DOTENV=1 skips the repo .env so test harnesses stay hermetic.
+// Unset (prod, dev) keeps the .env load.
+if (process.env.IB_REALTIME_NO_DOTENV !== "1") {
+  dotenv.config({ path: resolve(__dirname, "../../../.env") });
+}
 
 import process from "node:process";
 import fs from "node:fs";

@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   API_KEY,
   HD,
@@ -116,6 +119,101 @@ test("unrecognized XENON_QUOTES_DEFAULT falls back to ib", async (t) => {
   browser.close();
 });
 
+// ─── hermetic spawn ──────────────────────────────────────────────────────
+
+test("parent-exported routing flags do not leak into the spawned relay", async (t) => {
+  // Without a hermetic spawn env the relay inherits futu-first + futu options
+  // from the parent and routes tickets and option keys to Futu.
+  const saved = {
+    XENON_QUOTES_DEFAULT: process.env.XENON_QUOTES_DEFAULT,
+    XENON_FUTU_OPTIONS: process.env.XENON_FUTU_OPTIONS,
+    IB_GATEWAY_HOST: process.env.IB_GATEWAY_HOST,
+  };
+  process.env.XENON_QUOTES_DEFAULT = "futu-first";
+  process.env.XENON_FUTU_OPTIONS = "1";
+  process.env.IB_GATEWAY_HOST = "203.0.113.9"; // TEST-NET-3, never dialed
+  let stack;
+  try {
+    stack = await startStack();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+  t.after(stack.close);
+
+  const browser = await stack.connect({
+    ticket: "t-hermetic",
+    origin: "http://localhost:3200",
+  });
+  const opted = await stack.connect({ apiKey: API_KEY, quotes: "futu-first" });
+  browser.send(JSON.stringify({ action: "subscribe", symbols: ["LEAK"] }));
+  opted.send(
+    JSON.stringify({
+      action: "subscribe",
+      symbols: ["SPY"],
+      contracts: [OPTION],
+    }),
+  );
+
+  // Default ib: the ticket symbol and the option key stay out of want.
+  await stack.admitOnFutu(["SPY"]);
+  await sleep(300);
+  for (const w of stack.wants) {
+    assert.ok(!w.symbols.includes("LEAK"), "ticket symbol routed to futu");
+    assert.ok(!w.symbols.includes(OPTION_KEY), "option key routed to futu");
+  }
+  browser.close();
+  opted.close();
+});
+
+test("startStack cleans up its own tmp dir when the relay fails to start", async () => {
+  // An invalid client-id base makes the relay exit(2) before it listens.
+  const err = await startStack({ XENON_IB_CLIENT_ID_BASE: "invalid" }).then(
+    () => assert.fail("startStack should reject"),
+    (e) => e,
+  );
+  assert.match(err.message, /relay exited before listening/);
+  assert.ok(err.runtimeDir, "rejection must name the dir the stack owned");
+  assert.equal(
+    fs.existsSync(err.runtimeDir),
+    false,
+    "failed startStack leaked its runtime dir",
+  );
+});
+
+test("startStack retries when the child prints the banner, then fails to bind", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xenon-fake-relay-"));
+  const counter = path.join(dir, "starts");
+  const fake = path.join(dir, "fake_relay.mjs");
+  // Mimics the real relay losing the port race: banner first, bind error after.
+  fs.writeFileSync(
+    fake,
+    `import fs from "node:fs";
+fs.appendFileSync(process.env.FAKE_COUNTER, "x");
+console.log("IB realtime server listening on ws://127.0.0.1:1");
+setTimeout(() => {
+  console.error("Error: listen EADDRINUSE: address already in use 127.0.0.1:1");
+  process.exit(1);
+}, 100);
+`,
+  );
+  try {
+    const err = await startStack(
+      { FAKE_COUNTER: counter },
+      { server: fake },
+    ).then(
+      () => assert.fail("startStack should reject"),
+      (e) => e,
+    );
+    assert.equal(err.portInUse, true, err.message);
+    assert.equal(fs.readFileSync(counter, "utf8"), "xxx", "3 bounded tries");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ─── XENON_FUTU_OPTIONS ──────────────────────────────────────────────────
 
 test("XENON_FUTU_OPTIONS=0 keeps option keys pinned to IB", async (t) => {
@@ -186,9 +284,7 @@ test("XENON_FUTU_OPTIONS=1 sends option keys in want and routes their ticks", as
   browser.send(JSON.stringify({ action: "subscribe", contracts: [OPTION] }));
 
   // The option key enters want like a stock symbol; every other pin holds.
-  await stack.waitFor(() =>
-    stack.wants.at(-1)?.symbols?.includes(OPTION_KEY),
-  );
+  await stack.waitFor(() => stack.wants.at(-1)?.symbols?.includes(OPTION_KEY));
   for (const w of stack.wants) {
     assert.ok(!w.symbols.includes("VIX"), "index leaked into want");
     assert.ok(!w.symbols.includes("USD.JPY"), "forex leaked into want");
