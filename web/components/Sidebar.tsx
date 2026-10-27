@@ -9,11 +9,14 @@ import {
   DOT_CLASS,
   type SubscriberHealth,
 } from "@/lib/subscriberHealth";
+import type { IbUpstream } from "@/lib/ibUpstream";
 
 type SidebarProps = {
   activeSection: WorkspaceSection;
   actionTone: string;
   ibConnected?: boolean;
+  /** Gateway ↔ IB servers (`/health` ib_gateway.upstream). */
+  ibUpstream?: IbUpstream;
   lastSync?: string | null;
   subscribers?: SubscriberHealth[];
   subscribersReachable?: boolean;
@@ -24,6 +27,7 @@ export default function Sidebar({
   activeSection,
   actionTone,
   ibConnected = true,
+  ibUpstream,
   lastSync,
   subscribers = [],
   subscribersReachable = false,
@@ -31,6 +35,7 @@ export default function Sidebar({
 }: SidebarProps) {
   const syncTime = lastSync ? new Date(lastSync).toLocaleTimeString() : "—";
   const appVersion = process.env.NEXT_PUBLIC_APP_VERSION;
+  const upstreamLost = ibUpstream?.state === "lost";
 
   return (
     <aside className="sidebar">
@@ -53,7 +58,11 @@ export default function Sidebar({
                 }
               >
                 <span className="nav-icon">
-                  <Icon size={14} style={{ color: actionTone }} strokeWidth={2} />
+                  <Icon
+                    size={14}
+                    style={{ color: actionTone }}
+                    strokeWidth={2}
+                  />
                 </span>
                 {item.label}
               </Link>
@@ -66,11 +75,27 @@ export default function Sidebar({
           <span>IB Gateway</span>
           <span className="status-dot-wrap">
             <span
-              className={`status-dot ${ibConnected ? "status-dot-live" : "status-dot-dead"}`}
+              className={`status-dot ${!ibConnected ? "status-dot-dead" : upstreamLost ? "status-dot-stale" : "status-dot-live"}`}
             />
-            {ibConnected ? "CONNECTED" : "OFFLINE"}
+            {!ibConnected
+              ? "OFFLINE"
+              : upstreamLost
+                ? "NO IB SERVERS"
+                : "CONNECTED"}
           </span>
         </div>
+        {ibConnected && upstreamLost && (
+          <div className="status-row" data-testid="ib-upstream-lost">
+            <span className="status-muted">
+              {`Gateway lost IB servers${ibUpstream?.lastCode != null ? ` (${ibUpstream.lastCode})` : ""}`}
+            </span>
+            <span>
+              {ibUpstream?.since
+                ? new Date(ibUpstream.since).toLocaleTimeString()
+                : "—"}
+            </span>
+          </div>
+        )}
         <div className="status-row">
           <span>Last Sync</span>
           <span>{syncTime}</span>

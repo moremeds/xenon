@@ -257,7 +257,9 @@ def test_acquire_callers_dispatch_via_run_sync_not_to_thread():
     assert "owner.run(" not in attach_src
     for fn, role in targets:
         source = inspect.getsource(fn)
-        assert "run_sync" in source, (
+        # `_data_call` / `call_data_bounded` dispatch through pool.run_sync
+        # (bounded by XENON_IB_QUOTE_TIMEOUT_S, incident 2026-10-26).
+        assert "run_sync" in source or "_data_call(" in source or "call_data_bounded(" in source, (
             f"{fn.__qualname__} must dispatch IB work via "
             f"pool.run_sync('{role}', ...) so the call runs on the role-pinned "
             f"worker thread (not the default asyncio.to_thread executor)"

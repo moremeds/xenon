@@ -291,7 +291,11 @@ class _Pool:
 
         return _Ctx()
 
-    async def run_sync(self, role, fn, client, specs):
+    async def run_sync(self, role, fn, *args):
+        from xenon.api.ib_pool import bounded_data_job
+
+        assert fn is bounded_data_job  # worker bound + upstream check (PR #254 review)
+        _deadline, fn, client, specs = args
         self.calls += 1
         if self.fail:
             raise RuntimeError("data role down")

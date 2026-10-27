@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_INTERVAL_S = 30.0  # daemon handler interval_seconds
 NO_QUOTE_AFTER_S = 120.0  # spec §2.9: a quote older than 2 min is "no quote"
 CLOCK_SKEW_S = 5.0  # a tick this much newer than our clock still counts as fresh
+QUOTE_TIMEOUT_S = 30.0  # data-role deadline for one combo snapshot (legs x snapshot waits)
 EVENT_KIND = "RISK_ALERT_CROSSED"
 
 
@@ -239,7 +240,10 @@ def build_pool_quote_fn(pool: Any) -> QuoteFn:
     async def quote_fn(session: dict[str, Any]) -> ComboQuote | None:
         if not pool.is_connected("data"):
             return None
-        async with pool.acquire("data") as client:
-            return await pool.run_sync("data", _combo_quote_with_client, client, session["session_id"])
+        from xenon.api.ib_pool import call_data_bounded
+
+        # Bounded like the request path (deadline, worker bound, fencing,
+        # upstream fast-fail), with a budget for the multi-leg snapshot waits.
+        return await call_data_bounded(pool, _combo_quote_with_client, session["session_id"], timeout=QUOTE_TIMEOUT_S)
 
     return quote_fn

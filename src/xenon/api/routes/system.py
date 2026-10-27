@@ -410,16 +410,31 @@ def _service_health_rows() -> list[dict]:
     return out
 
 
+def _ib_upstream(pool) -> dict:
+    if pool is None:
+        return {"state": "unknown", "since": None, "last_code": None}
+    return pool.upstream_status()
+
+
 @router.get("/health")
 async def health():
     from xenon.api import server
 
     gw = await check_ib_gateway()
+    # Port open but the gateway lost IB servers (1100 / 2110 on the pool
+    # connections, incident 2026-10-26): `upstream.state` = lost → degraded.
+    gw = {**gw, "upstream": _ib_upstream(server.ib_pool)}
     owner = server.order_owner.status() if server.order_owner is not None else None
+    if owner and owner["halted"]:
+        status = "orders_halted"
+    elif gw["upstream"]["state"] == "lost":
+        status = "degraded"
+    else:
+        status = "ok"
     return {
         # Stays HTTP 200 (a failing healthcheck restart would clear the latch);
-        # a latched ORDERS_HALTED turns the status red.
-        "status": "orders_halted" if owner and owner["halted"] else "ok",
+        # a latched ORDERS_HALTED turns the status red and wins over degraded.
+        "status": status,
         "test_mode": server._is_test_mode(),
         "ib_gateway": gw,
         "ib_pool": server.ib_pool.status() if server.ib_pool else {},
