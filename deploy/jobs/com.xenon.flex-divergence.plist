@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.xenon.flex-divergence.plist: daily PG <-> IB Flex divergence check, run
+  FROM THE DEPLOYED api IMAGE. Writes one xenon.flex_divergence_runs row; the
+  Operator console Flex Divergence tile (/admin) reads it.
+
+  What runs:   docker-compose -f /opt/xenon/compose.yml run (one-off, removed on exit) api xenon-flex-divergence-check (apply flag)
+  Window:      the job compares the PREVIOUS New York day (yesterday 00:00 ET to
+               today 00:00 ET), so it runs in the morning, after IB has
+               processed the prior day's Flex data.
+  Schedule:    every day 07:30 ET. Weekend mornings compare a weekend day
+               (zero rows compared), which is harmless.
+  TZ / guard / lock / Watchtower: same scheme as com.xenon.nav-flex-refresh.plist.
+               System zone is Asia/Hong_Kong; 07:30 ET = 19:30 HKT (EDT) /
+               20:30 HKT (EST); fires at both, the sh guard runs the job only
+               when the New York hour is 07. Fixed container name = lock; a NOT
+               RUNNING container of that name is removed first (no force).
+  Creds:       none in this file. The api service env_file supplies DATABASE_URL,
+               IB_FLEX_TOKEN, IB_FLEX_QUERY_ID, XENON_TRADING_MODE,
+               XENON_BROKER_ACCOUNT (scope of the row). Flex unset or
+               unavailable: the CLI prints {"skipped": true} and exits 0, no row.
+  Logs:        /var/log/xenon/flex-divergence.stdout.log and .stderr.log
+
+  Install (Mac mini, as the user that runs the docker stack; needs a release
+  whose api image has the xenon-flex-divergence-check entry point):
+    cp deploy/jobs/com.xenon.flex-divergence.plist ~/Library/LaunchAgents/
+    plutil -lint ~/Library/LaunchAgents/com.xenon.flex-divergence.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.xenon.flex-divergence.plist
+  Test now:  launchctl kickstart only exercises the schedule path; outside
+             07:00-07:59 New York time the guard exits 0 BEFORE Docker starts.
+  Manual unguarded run (REAL WRITES: one flex_divergence_runs row; calls the
+             live IB Flex web service): see deploy/jobs/crontab.example
+             "Manual runs". Evidence: JSON output with "applied": true and a
+             run_id, exit code 0; then the /admin Flex Divergence tile shows it.
+  Uninstall: launchctl bootout gui/$(id -u)/com.xenon.flex-divergence
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.xenon.flex-divergence</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>[ "$(TZ=America/New_York date +%H)" = 07 ] || exit 0; docker rm xenon-job-flex-divergence >/dev/null 2>&amp;1; exec /opt/homebrew/bin/docker-compose -f /opt/xenon/compose.yml run --rm -T --no-deps --name xenon-job-flex-divergence --label com.centurylinklabs.watchtower.enable=false api xenon-flex-divergence-check --apply</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/opt/xenon</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <!-- System zone is HKT: 19:30 HKT = 07:30 EDT, 20:30 HKT = 07:30 EST.
+       The sh guard in ProgramArguments picks the one that matches. -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Hour</key>
+      <integer>19</integer>
+      <key>Minute</key>
+      <integer>30</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>20</integer>
+      <key>Minute</key>
+      <integer>30</integer>
+    </dict>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>/var/log/xenon/flex-divergence.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/var/log/xenon/flex-divergence.stderr.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

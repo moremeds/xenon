@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from xenon.execution.account_scope import AccountScope
 from xenon.jobs.flex_divergence_check import (
-    _main,
+    main,
     compute_divergence,
     filter_payload_by_execution_window,
     latest_run,
@@ -78,7 +78,7 @@ def test_main_skips_when_flex_unavailable(monkeypatch):
         patch("xenon.jobs.flex_divergence_check.fetch_blotter_pg", return_value=fake_pg),
         patch("xenon.jobs.flex_divergence_check.run_module", side_effect=fake_run_module),
     ):
-        rc = _main(["--apply"])
+        rc = main(["--apply"])
     assert rc == 0  # graceful no-op
 
 
@@ -110,7 +110,7 @@ def test_main_records_a_run_when_both_sides_present(monkeypatch):
         patch("xenon.jobs.flex_divergence_check.fetch_blotter_pg", return_value=fake_pg),
         patch("xenon.jobs.flex_divergence_check.run_module", side_effect=fake_run_module),
     ):
-        rc = _main(["--apply"])
+        rc = main(["--apply"])
     assert rc == 0
     latest = latest_run(scope=_SCOPE)
     assert latest is not None

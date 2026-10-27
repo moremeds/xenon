@@ -124,7 +124,7 @@ def filter_payload_by_execution_window(
     }
 
 
-def _main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Nightly PG↔Flex divergence check.")
     parser.add_argument("--apply", action="store_true", help="Insert a flex_divergence_runs row.")
     args = parser.parse_args(argv)
@@ -164,4 +164,4 @@ def _main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(_main())
+    sys.exit(main())
