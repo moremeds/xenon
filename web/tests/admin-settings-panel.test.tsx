@@ -318,3 +318,51 @@ describe("RuntimeSettingsPanel (R2 regressions)", () => {
     await waitFor(() => expect(sent).toEqual([{ value: 25000 }]));
   });
 });
+
+describe("RuntimeSettingsPanel (R3 regression)", () => {
+  it("a 428 that returns after the draft changed opens no confirm for the old value", async () => {
+    const sent: { value: boolean; confirm?: string }[] = [];
+    let release428!: () => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        if (!init || !init.method || init.method === "GET") return reply({ settings: pausedRows(false) });
+        const body = JSON.parse(String(init.body));
+        sent.push(body);
+        if (body.confirm) return reply({ changed: true });
+        return new Promise<Response>((resolve) => {
+          release428 = () => resolve(reply({ reason_code: "SETTING_CONFIRM_REQUIRED" }, 428));
+        });
+      }),
+    );
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    const r = await screen.findByTestId("setting-XENON_AUDIT_CANCEL");
+    const editor = within(r).getByLabelText("New value") as HTMLSelectElement;
+    fireEvent.change(editor, { target: { value: "true" } });
+    fireEvent.click(within(r).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(sent).toHaveLength(1)); // PUT true in flight
+    fireEvent.change(editor, { target: { value: "false" } });
+    await act(async () => {
+      release428();
+    });
+    await waitFor(() => expect(within(r).getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(false));
+    expect(within(r).queryByTestId("confirm-step")).toBeNull();
+    expect(sent).toEqual([{ value: true }]);
+  });
+
+  it("the confirm prompt shows the exact proposal", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        if (!init || !init.method || init.method === "GET") return reply({ settings: pausedRows(false) });
+        return reply({ reason_code: "SETTING_CONFIRM_REQUIRED" }, 428);
+      }),
+    );
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    const r = await screen.findByTestId("setting-XENON_AUDIT_CANCEL");
+    fireEvent.change(within(r).getByLabelText("New value"), { target: { value: "true" } });
+    fireEvent.click(within(r).getByRole("button", { name: "Save" }));
+    const step = await within(r).findByTestId("confirm-step");
+    expect(within(step).getByTestId("confirm-proposal").textContent).toBe("Set XENON_AUDIT_CANCEL to true");
+  });
+});

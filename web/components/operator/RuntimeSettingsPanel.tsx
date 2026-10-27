@@ -108,6 +108,13 @@ export default function RuntimeSettingsPanel({ onToast }: { onToast: Toast }) {
   // Bumped by every load and write: a load whose response arrives after a
   // newer load or write started is obsolete and is dropped.
   const seq = useRef(0);
+  // Per-row proposal token: every value/note edit bumps it. A response for an
+  // older proposal (e.g. a 428 that arrives after the edit) never opens a confirm.
+  const proposals = useRef<Record<string, number>>({});
+  const bumpProposal = (key: string) => {
+    proposals.current[key] = (proposals.current[key] ?? 0) + 1;
+    setPending((p) => (p?.key === key ? null : p));
+  };
 
   const load = useCallback(async () => {
     const mine = ++seq.current;
@@ -135,6 +142,7 @@ export default function RuntimeSettingsPanel({ onToast }: { onToast: Toast }) {
     async (key: string, op: "put" | "delete", value: unknown, note: string, confirm?: string) => {
       setBusy(key);
       seq.current += 1; // a load already in flight is now obsolete
+      const proposal = proposals.current[key] ?? 0;
       if (!confirm) setPending(null); // a fresh request replaces any pending confirm
       try {
         const url = `/api/admin/settings/${key}`;
@@ -155,7 +163,8 @@ export default function RuntimeSettingsPanel({ onToast }: { onToast: Toast }) {
           });
         }
         if (r.status === 428 && !confirm) {
-          setPending({ key, op, value, note, typed: "" });
+          // only for the proposal still on screen; an edited row needs a fresh Save
+          if (proposal === (proposals.current[key] ?? 0)) setPending({ key, op, value, note, typed: "" });
           return;
         }
         if (!r.ok) {
@@ -240,12 +249,11 @@ export default function RuntimeSettingsPanel({ onToast }: { onToast: Toast }) {
                   busy={busy === s.key}
                   pending={pending?.key === s.key ? pending : null}
                   onDraft={(v) => {
-                    // the pending confirm was for the old proposal: drop it
-                    setPending((p) => (p?.key === s.key ? null : p));
+                    bumpProposal(s.key); // a pending or in-flight confirm was for the old proposal
                     setDrafts((d) => ({ ...d, [s.key]: v }));
                   }}
                   onNote={(v) => {
-                    setPending((p) => (p?.key === s.key ? null : p));
+                    bumpProposal(s.key);
                     setNotes((n) => ({ ...n, [s.key]: v }));
                   }}
                   onSave={() => {
@@ -345,6 +353,9 @@ function SettingRow({
         </span>
         {pending ? (
           <span className="runtime-settings__confirm" data-testid="confirm-step">
+            <span className="runtime-settings__mono" data-testid="confirm-proposal">
+              {pending.op === "delete" ? `Revert ${s.key} to env` : `Set ${s.key} to ${fmt(pending.value)}`}
+            </span>
             <label className="runtime-settings__confirm-label">
               Type {s.key} to confirm
               <input
