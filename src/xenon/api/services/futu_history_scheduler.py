@@ -110,6 +110,8 @@ async def futu_history_loop(
                 finished_at=datetime.now(tz=ET),
             )
             continue
+        if not scopes:
+            logger.info("futu history: no live Futu scope configured; nothing to sync")
         # Sequential, one OpenD context at a time; one scope failing must not
         # skip the next one or poison the schedule.
         for scope in scopes:
@@ -122,6 +124,10 @@ async def _run_scope(engine_factory: Callable[[], Any], scope: Any, runner: Call
     The Futu SDK calls are blocking (connect, fetches, per-day throttle
     sleeps — an inception backfill runs for minutes), so the whole sync runs
     on a worker thread with its own event loop and engine, never on the API's.
+    ponytail: cancelling the loop task does not stop a running worker; a
+    shutdown mid-sync waits for it (SIGKILL at the compose grace period is
+    the backstop; the sync is idempotent). Add a stop flag between phases if
+    deploys during 16:30 ET become common.
     """
     try:
         result = await asyncio.to_thread(asyncio.run, _sync_one(engine_factory, scope, runner))

@@ -184,6 +184,12 @@ describe("FutuGatewayCard", () => {
     expect(paper.getByText("held ---")).toBeTruthy();
   });
 
+  it("falls back to the top-level block when no observation loop runs (read-only)", () => {
+    render(<FutuGatewayCard futu={{ ...rich, scopes: [] }} />);
+    expect(scopeRow("paper")).toBeTruthy();
+    expect(scopeRow("live")).toBeNull();
+  });
+
   it("marks a stored (rotated-out) scope instead of giving it the env's trading state", () => {
     const stored = { ...rich.scopes![0], configured: false };
     const { container } = render(

@@ -31,6 +31,23 @@ function heldEntries(held: FutuScope["held_rows"]) {
   });
 }
 
+/**
+ * Per-env scopes come from the observation loops; none run under
+ * XENON_READ_ONLY=1 (`dev.sh live`), so fall back to the top-level block.
+ */
+function scopesOf(futu: FutuInfo): FutuScope[] {
+  if (futu.scopes && futu.scopes.length > 0) return futu.scopes;
+  if (!futu.configured) return [];
+  return [
+    {
+      account_env: futu.scope_env ?? "paper",
+      last_sync_age_s: futu.last_sync_age_s,
+      observation: futu.observation,
+      held_rows: futu.held_rows,
+    },
+  ];
+}
+
 function quotesLine(q: FutuQuotesInfo | null | undefined): string {
   if (!q) return "---";
   const quota = q.quota ? `${q.quota.own_used}/${q.quota.ceiling}` : "---";
@@ -128,7 +145,7 @@ export function FutuGatewayCard({
   futu: FutuInfo;
   quotes?: FutuQuotesInfo | null;
 }) {
-  const scopes = futu.scopes ?? [];
+  const scopes = scopesOf(futu);
   const anyHeld = scopes.some((s) => heldEntries(s.held_rows).length > 0);
   const verdict = !futu.configured
     ? { label: "off", tone: "neutral" }

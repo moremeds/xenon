@@ -46,10 +46,11 @@ async def test_loop_runs_one_tick_then_cancels(monkeypatch):
 
     calls: list[tuple] = []
     cancel_after_first = asyncio.Event()
+    test_loop = asyncio.get_running_loop()
 
     async def _runner(engine, scope, since):
         calls.append((scope.broker, scope.account_env, scope.broker_account, since))
-        cancel_after_first.set()
+        test_loop.call_soon_threadsafe(cancel_after_first.set)  # runner is on the worker thread
         return {
             "trades_inserted": 0,
             "cashflows_inserted": 0,
@@ -101,12 +102,13 @@ async def test_loop_survives_runner_exception(monkeypatch):
 
     call_count = {"n": 0}
     second_call = asyncio.Event()
+    test_loop = asyncio.get_running_loop()
 
     async def _runner(engine, scope, since):
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise RuntimeError("synthetic failure")
-        second_call.set()
+        test_loop.call_soon_threadsafe(second_call.set)  # runner is on the worker thread
         return {
             "trades_inserted": 0,
             "cashflows_inserted": 0,
