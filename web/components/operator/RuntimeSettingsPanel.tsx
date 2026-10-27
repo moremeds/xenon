@@ -15,10 +15,12 @@ import type { ToastType } from "@/lib/useToast";
 
 const POLL_MS = 15_000;
 const PAUSE_KEY = "orders_paused";
+// Per row (rule subset / min / and): not every Safety key is narrow-only
+// (audit-cancel is a free override), so there is no group-wide claim.
 const NARROW_NOTE =
-  "Overrides here can only tighten what the environment allows. Revert to env restores the environment value.";
-const GROUPS: { id: SettingCategory; label: string; note?: string }[] = [
-  { id: "safety", label: "Safety", note: NARROW_NOTE },
+  "Narrow-only: an override can only tighten what the environment allows. Revert to env restores the environment value.";
+const GROUPS: { id: SettingCategory; label: string }[] = [
+  { id: "safety", label: "Safety" },
   { id: "toggle", label: "Quote routing" },
   { id: "tuning", label: "Tuning" },
 ];
@@ -59,7 +61,9 @@ function itemLabel(v: string): string {
 }
 
 function fmtNumber(n: number, unit: string | null): string {
-  const text = n.toLocaleString("en-US", { maximumFractionDigits: 6 });
+  let text = n.toLocaleString("en-US", { maximumFractionDigits: 6 });
+  // never show a nonzero value as 0 (0 is the "off" sentinel for some keys)
+  if (n !== 0 && Number(text.replace(/,/g, "")) === 0) text = String(n);
   return unit ? `${text} ${unit}` : text;
 }
 
@@ -315,11 +319,6 @@ export default function RuntimeSettingsPanel({ onToast }: { onToast: Toast }) {
           <section key={g.id} className="rs-group" data-testid={`settings-group-${g.id}`}>
             <header className="rs-group__head">
               <span className="rs-group__label">{g.label}</span>
-              {g.note && rows.some((s) => s.narrow_only) ? (
-                <span className="rs-group__note" title={NARROW_NOTE}>
-                  {NARROW_NOTE}
-                </span>
-              ) : null}
             </header>
             {rows.map((s) => (
               <SettingRow
@@ -422,6 +421,11 @@ function SettingRow({
           {v.source ? (
             <span className={`rs-chip rs-chip--${SOURCE_CHIP[v.source] ?? "plain"}`} data-testid="source">
               {v.source}
+            </span>
+          ) : null}
+          {s.narrow_only ? (
+            <span className="rs-chip rs-chip--plain" title={NARROW_NOTE}>
+              narrow-only
             </span>
           ) : null}
           {s.confirm_rule ? (

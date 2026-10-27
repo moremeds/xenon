@@ -71,18 +71,43 @@ describe("RuntimeSettingsPanel", () => {
     expect(within(row("XENON_GATE4_NETTING")).queryByText("typed confirm")).toBeNull();
   });
 
-  it("explains narrow-only once per group, never uses --- placeholders", async () => {
+  it("marks narrow-only per row (not as a blanket group rule), never uses --- placeholders", async () => {
     mockFetch(() => undefined);
     render(<RuntimeSettingsPanel onToast={vi.fn()} />);
     await screen.findByTestId("setting-XENON_FUTU_MKT_NOTIONAL_CAP");
     const panel = screen.getByTestId("runtime-settings");
-    expect(panel.textContent!.match(/can only tighten/g)).toHaveLength(1);
+    // no blanket claim: audit-cancel is a free override in the same group
+    expect(panel.textContent).not.toMatch(/Overrides here can only tighten/);
+    for (const key of ["XENON_FUTU_TRADING", "XENON_FUTU_MKT_NOTIONAL_CAP", "XENON_GATE4_NETTING"]) {
+      const chip = within(row(key)).getByText("narrow-only");
+      expect(chip.getAttribute("title")).toMatch(/can only tighten/);
+    }
+    expect(within(row("XENON_AUDIT_CANCEL")).queryByText("narrow-only")).toBeNull();
     expect(panel.textContent).not.toContain("---");
     expect(panel.textContent).not.toContain("applies live");
     edit("XENON_AUDIT_CANCEL");
     const ed = within(row("XENON_AUDIT_CANCEL")).getByTestId("editor");
     expect(ed.textContent).toContain("No override — using env");
     expect(ed.textContent).toContain("Never changed");
+  });
+
+  it("a nonzero value never displays as 0", async () => {
+    mockFetch((c) =>
+      c.method === "GET"
+        ? {
+            status: 200,
+            body: {
+              settings: settingsFixture().map((r) =>
+                r.key === "FUTU_BOOK_STALE_S" ? { ...r, db_value: 1e-7, effective: 1e-7 } : r,
+              ),
+            },
+          }
+        : undefined,
+    );
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    const book = await screen.findByTestId("setting-FUTU_BOOK_STALE_S");
+    expect(within(book).getByTestId("effective").textContent).toBe("1e-7 s");
+    expect(within(row("IB_REALTIME_STALE_TICK_MS")).getByTestId("effective").textContent).toBe("60,000 ms");
   });
 
   it("relay keys show the relay's live value; futu-quotes keys without override show service default", async () => {

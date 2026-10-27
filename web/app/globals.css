@@ -7519,10 +7519,6 @@ tr {
   text-transform: uppercase;
   color: var(--text-secondary);
 }
-.rs-group__note {
-  font-size: 11px;
-  color: var(--text-muted);
-}
 .rs-row {
   display: flex;
   flex-direction: column;
