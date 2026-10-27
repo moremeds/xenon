@@ -431,21 +431,54 @@ describe("RuntimeSettingsPanel (toggles review T5)", () => {
     );
   });
 
-  it("T5-1 keyboard: tabbing from a dirty field to Revert discards the draft; Revert sends only DELETE", async () => {
+  it("T5-R2 keyboard: type, Tab to Revert, Tab on applies the draft (one PUT); focus entering Revert keeps it", async () => {
     const calls = mockFetch(() => undefined);
     render(<RuntimeSettingsPanel onToast={vi.fn()} />);
     await screen.findByTestId("setting-XENON_FUTU_MKT_NOTIONAL_CAP");
     const f = field("XENON_FUTU_MKT_NOTIONAL_CAP", "Futu market-order cap");
+    const revert = within(row("XENON_FUTU_MKT_NOTIONAL_CAP")).getByRole("button", { name: "Revert to env" });
     f.focus();
     fireEvent.change(f, { target: { value: "12000" } });
+    fireEvent.blur(f, { relatedTarget: revert }); // Tab: focus enters Revert
+    expect(f.value).toBe("12000");
+    expect(writes(calls)).toHaveLength(0);
+    // Shift+Tab back into the same field: still nothing sent
+    fireEvent.blur(revert, { relatedTarget: f });
+    expect(writes(calls)).toHaveLength(0);
+    fireEvent.blur(f, { relatedTarget: revert }); // Tab again to Revert
+    const next = within(row("XENON_GATE4_NETTING")).getByRole("switch");
+    fireEvent.blur(revert, { relatedTarget: next }); // Tab past Revert, no activation
+    await waitFor(() => expect(writes(calls)).toHaveLength(1));
+    expect(writes(calls)[0]).toEqual(expect.objectContaining({ method: "PUT", body: { value: 12000 } }));
+  });
+
+  it("T5-R2 keyboard: type, Tab to Revert, Enter/Space discards the draft and sends only DELETE", async () => {
+    const calls = mockFetch(() => undefined);
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    await screen.findByTestId("setting-XENON_FUTU_MKT_NOTIONAL_CAP");
+    const f = field("XENON_FUTU_MKT_NOTIONAL_CAP", "Futu market-order cap");
     const revert = within(row("XENON_FUTU_MKT_NOTIONAL_CAP")).getByRole("button", { name: "Revert to env" });
-    fireEvent.blur(f, { relatedTarget: revert }); // Tab moves focus to Revert
-    revert.focus();
+    f.focus();
+    fireEvent.change(f, { target: { value: "12000" } });
+    fireEvent.blur(f, { relatedTarget: revert });
+    fireEvent.click(revert); // Enter / Space on the focused native button
+    fireEvent.blur(revert, { relatedTarget: null }); // focus may move on afterwards
+    await waitFor(() => expect(writes(calls)).toHaveLength(1));
+    await waitFor(() => expect(row("XENON_FUTU_MKT_NOTIONAL_CAP").getAttribute("aria-busy")).toBe("false"));
+    expect(writes(calls)).toEqual([expect.objectContaining({ method: "DELETE" })]);
+  });
+
+  it("T5-R2 an equal draft passing through Revert still sends nothing", async () => {
+    const calls = mockFetch(() => undefined);
+    render(<RuntimeSettingsPanel onToast={vi.fn()} />);
+    await screen.findByTestId("setting-XENON_FUTU_MKT_NOTIONAL_CAP");
+    const f = field("XENON_FUTU_MKT_NOTIONAL_CAP", "Futu market-order cap");
+    const revert = within(row("XENON_FUTU_MKT_NOTIONAL_CAP")).getByRole("button", { name: "Revert to env" });
+    fireEvent.change(f, { target: { value: "10000.0" } });
+    fireEvent.blur(f, { relatedTarget: revert });
+    fireEvent.blur(revert, { relatedTarget: null });
     expect(field("XENON_FUTU_MKT_NOTIONAL_CAP", "Futu market-order cap").value).toBe("10000");
     expect(writes(calls)).toHaveLength(0);
-    fireEvent.click(revert); // Enter / Space on the focused button
-    await waitFor(() => expect(writes(calls)).toHaveLength(1));
-    expect(writes(calls)[0].method).toBe("DELETE");
   });
 
   it("T5-2 a formatting-only number edit sends nothing and normalizes the field", async () => {

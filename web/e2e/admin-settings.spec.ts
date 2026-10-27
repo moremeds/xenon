@@ -164,12 +164,32 @@ test("admin runtime settings: in-row controls, pause, typed confirm, inline numb
   await expect.poll(() => puts.slice(mark)).toEqual([{ key: "XENON_FUTU_MKT_NOTIONAL_CAP", deleted: true }]);
   await expect(field).toHaveValue("10000");
 
+  // Keyboard: type -> Tab (focus on Revert, draft kept) -> Tab past it: the draft applies (one PUT).
+  const kb = puts.length;
+  await field.fill("12000");
+  await page.keyboard.press("Tab");
+  await expect(cap.getByRole("button", { name: "Revert to env" })).toBeFocused();
+  await expect(field).toHaveValue("12000");
+  expect(puts.length).toBe(kb);
+  await page.keyboard.press("Tab");
+  await expect.poll(() => puts.slice(kb)).toEqual([{ key: "XENON_FUTU_MKT_NOTIONAL_CAP", value: 12000 }]);
+
+  // Keyboard: type -> Tab -> Enter on Revert: only the DELETE.
+  const kb2 = puts.length;
+  await field.fill("13000");
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => puts.slice(kb2)).toEqual([{ key: "XENON_FUTU_MKT_NOTIONAL_CAP", deleted: true }]);
+  await expect(field).toHaveValue("10000");
+  await page.keyboard.press("Tab"); // leaving Revert after activation sends nothing more
+  expect(puts.length).toBe(kb2 + 1);
+
   // Formatting-only edit (85 -> 85.0): nothing is sent, the field normalizes.
   const lines = page.getByTestId("setting-IB_REALTIME_MAX_LINES").getByLabel("IB line budget");
   await lines.fill("85.0");
   await lines.press("Enter");
   await expect(lines).toHaveValue("85");
-  expect(puts.length).toBe(mark + 1);
+  expect(puts.length).toBe(kb2 + 1);
 });
 
 test.describe("narrow screen", () => {

@@ -35,6 +35,14 @@ const SOURCE_CHIP: Record<string, string> = { env: "muted", override: "override"
 type Toast = (type: ToastType, message: string) => void;
 type PendingConfirm = { key: string; op: "put" | "delete"; value?: unknown; typed: string };
 type Write = (op: "put" | "delete", value?: unknown) => void;
+/** A number / JSON field as seen by its row's Revert link (keyboard and pointer hand-off). */
+type FieldApi = {
+  /** Revert activated: drop the draft. */
+  discard: () => void;
+  /** Focus left Revert for `to` without activating it: apply a held draft, unless `to` is the field. */
+  leftRevert: (to: EventTarget | null) => void;
+};
+type FieldRef = { current: FieldApi | null };
 
 // ─── value wording ────────────────────────────────────────────────────────
 
@@ -332,6 +340,7 @@ function SettingRow({
   onCancelConfirm: () => void;
 }) {
   const v = shown(s);
+  const field = useRef<FieldApi | null>(null);
   const overridden = s.db_value != null || s.db_value_invalid;
   const change = changeLine(s);
   return (
@@ -360,7 +369,15 @@ function SettingRow({
           {s.db_value_invalid ? <span className="rs-row__invalid">Stored override is invalid and ignored.</span> : null}
         </div>
         <div className="rs-row__state">
-          <Control key={`${reset}:${fieldText(s, v.value)}`} s={s} v={v} busy={busy} onWrite={onWrite} onPropose={onPropose} />
+          <Control
+            key={`${reset}:${fieldText(s, v.value)}`}
+            s={s}
+            v={v}
+            busy={busy}
+            onWrite={onWrite}
+            onPropose={onPropose}
+            field={field}
+          />
           {busy ? <span className="rs-pending">Applying</span> : null}
           {v.source ? (
             <span className={`rs-chip rs-chip--${SOURCE_CHIP[v.source] ?? "plain"}`} data-testid="source">
@@ -386,7 +403,11 @@ function SettingRow({
               // keep focus in a dirty field: its blur would apply the draft before this DELETE
               onMouseDown={(e) => e.preventDefault()}
               title={s.env_known ? `Environment value: ${fmt(s, s.env_value)}` : undefined}
-              onClick={() => onWrite("delete")}
+              onBlur={(e) => field.current?.leftRevert(e.relatedTarget)}
+              onClick={() => {
+                field.current?.discard(); // Revert wins over an unsent field edit
+                onWrite("delete");
+              }}
             >
               Revert to env
             </button>
@@ -438,12 +459,14 @@ function Control({
   busy,
   onWrite,
   onPropose,
+  field,
 }: {
   s: RuntimeSetting;
   v: Shown;
   busy: boolean;
   onWrite: Write;
   onPropose: () => void;
+  field: FieldRef;
 }) {
   if (s.type === "bool") {
     const on = v.value === true;
@@ -514,7 +537,7 @@ function Control({
       </span>
     );
   }
-  return <FieldControl s={s} v={v} busy={busy} onWrite={onWrite} onPropose={onPropose} />;
+  return <FieldControl s={s} v={v} busy={busy} onWrite={onWrite} onPropose={onPropose} field={field} />;
 }
 
 /** Number / object field: applies on Enter or blur when the value changed and
@@ -526,17 +549,23 @@ function FieldControl({
   busy,
   onWrite,
   onPropose,
+  field,
 }: {
   s: RuntimeSetting;
   v: Shown;
   busy: boolean;
   onWrite: Write;
   onPropose: () => void;
+  field: FieldRef;
 }) {
   const server = fieldText(s, v.value);
   const [text, setText] = useState(server);
   const [error, setError] = useState<string | null>(null);
   const sent = useRef<string | null>(null); // the text already sent for this mount
+  const input = useRef<HTMLInputElement>(null);
+  // Focus moved to this row's Revert: the draft is held (not applied, not dropped)
+  // until Revert is activated (drop) or focus leaves it elsewhere (apply).
+  const held = useRef(false);
 
   const restore = () => {
     setText(server);
@@ -558,11 +587,28 @@ function FieldControl({
     sent.current = text;
     onWrite("put", parsed.value);
   };
+  useEffect(() => {
+    field.current = {
+      discard: () => {
+        held.current = false;
+        restore();
+      },
+      leftRevert: (to) => {
+        if (!held.current) return;
+        held.current = false;
+        if (to !== input.current) apply(); // back into the field: its own blur decides later
+      },
+    };
+    return () => {
+      field.current = null;
+    };
+  });
   const { min, max, envCap } = numberLimits(s);
   const isNumber = s.type !== "object";
   return (
     <span className="rs-number">
       <input
+        ref={input}
         className={`rs-input rs-input--mono ${isNumber ? "rs-input--number" : "rs-input--json"} ${v.text ? "rs-input--unset" : ""}`}
         type="text"
         inputMode={isNumber ? "decimal" : undefined}
@@ -582,9 +628,8 @@ function FieldControl({
           if (e.key === "Escape") restore();
         }}
         onBlur={(e) => {
-          // focus moving to this row's Revert means "back to env": drop the draft
           const to = e.relatedTarget as HTMLElement | null;
-          if (to?.hasAttribute("data-revert") && e.currentTarget.closest(".rs-row")?.contains(to)) restore();
+          if (to?.hasAttribute("data-revert") && e.currentTarget.closest(".rs-row")?.contains(to)) held.current = true;
           else apply();
         }}
       />
