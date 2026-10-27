@@ -9,7 +9,7 @@ Two surfaces:
 
   - `futu_history_loop(engine_factory, scope_factory, ...)`: forever
     asyncio loop. Sleeps until the next 16:30 ET weekday, runs the sync
-    end-to-end (M3 → M4 → M5 via run_history_sync), logs, loops. Cancelled
+    end-to-end per scope (M3 → M4 → M5 via run_history_sync), logs, loops. Cancelled
     cleanly when the lifespan shutdown task awaits the cancellation.
 
 US-market-holiday calendar is intentionally NOT modeled here — Futu's
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 ET = ZoneInfo("America/New_York")
 
-# scope_factory() opens the Futu SDK context, which retries a refused OpenD
+# scopes_factory() may open the Futu SDK context, which retries a refused OpenD
 # forever. Run it off the event loop with a bound so a dead OpenD costs one
 # failed tick, not a frozen API (2026-10 nightly wedge).
 SCOPE_TIMEOUT_S = 30.0
@@ -58,7 +58,7 @@ def next_run_at_et(now_et: datetime, *, hour: int = 16, minute: int = 30) -> dat
 
 async def futu_history_loop(
     engine_factory: Callable[[], Any],
-    scope_factory: Callable[[], Any],
+    scopes_factory: Callable[[], Any],
     *,
     runner: Callable[..., Any],
     hour: int = 16,
@@ -71,8 +71,9 @@ async def futu_history_loop(
     engine_factory : zero-arg, returns an AsyncEngine bound to the current
         DATABASE_URL. We don't accept a long-lived engine because dev-mode
         reloads may invalidate it.
-    scope_factory : zero-arg, returns the FUTU AccountScope. Allowed to
-        connect to OpenD to resolve scope (spec §10).
+    scopes_factory : zero-arg, returns the FUTU AccountScopes to sync, in
+        order (live only: Futu serves history to live accounts). Allowed to connect to OpenD to
+        resolve a legacy scope (spec §10); runs off the event loop.
     runner : usually `xenon.cli.futu_history_sync.run_history_sync`. Tests
         pass a synchronous spy.
 
@@ -91,60 +92,85 @@ async def futu_history_loop(
         )
         await asyncio.sleep(sleep_s)
 
-        scope = None
         try:
-            engine = engine_factory()
-            scope = await asyncio.wait_for(
-                asyncio.to_thread(scope_factory), timeout=SCOPE_TIMEOUT_S
-            )
-            result = await runner(engine, scope, since=None)
-            logger.info(
-                "futu history sync ok: trades=%s cashflows=%s nav_rows=%s",
-                result.get("trades_inserted"),
-                result.get("cashflows_inserted"),
-                result.get("nav_rows_written"),
-            )
-            record_service_health(
-                "futu_history",
-                "ok",
-                broker=scope.broker,
-                account_env=scope.account_env,
-                broker_account=scope.broker_account,
-                finished_at=datetime.now(tz=ET),
+            scopes = await asyncio.wait_for(
+                asyncio.to_thread(scopes_factory), timeout=SCOPE_TIMEOUT_S
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            # One failure must not poison the schedule. Log and loop back —
-            # the next 16:30 ET will try again. Record the error heartbeat under
-            # the FUTU scope so it lands in the same partition as the success row
-            # (and stays visible to the operator console, which matches
-            # futu_history by service across scopes). scope is None only when
-            # scope_factory() itself raised — fall back to broker="FUTU".
-            logger.exception("futu history sync failed; will retry next weekday")
-            if scope is not None:
-                record_service_health(
-                    "futu_history",
-                    "error",
-                    error={"msg": str(exc)},
-                    broker=scope.broker,
-                    account_env=scope.account_env,
-                    broker_account=scope.broker_account,
-                    finished_at=datetime.now(tz=ET),
-                )
-            else:
-                record_service_health(
-                    "futu_history",
-                    "error",
-                    error={"msg": str(exc)},
-                    broker="FUTU",
-                    finished_at=datetime.now(tz=ET),
-                )
-        finally:
-            try:
-                await engine.dispose()
-            except Exception:  # noqa: BLE001
-                pass
+            # No scope resolved: record under broker="FUTU" so the operator
+            # console still shows the failed night.
+            logger.exception("futu history scope resolution failed; will retry next weekday")
+            record_service_health(
+                "futu_history",
+                "error",
+                error={"msg": str(exc)},
+                broker="FUTU",
+                finished_at=datetime.now(tz=ET),
+            )
+            continue
+        if not scopes:
+            logger.info("futu history: no live Futu scope configured; nothing to sync")
+        # Sequential, one OpenD context at a time; one scope failing must not
+        # skip the next one or poison the schedule.
+        for scope in scopes:
+            await _run_scope(engine_factory, scope, runner)
+
+
+async def _run_scope(engine_factory: Callable[[], Any], scope: Any, runner: Callable[..., Any]) -> None:
+    """One scope's nightly sync; the heartbeat lands in that scope's partition.
+
+    The Futu SDK calls are blocking (connect, fetches, per-day throttle
+    sleeps — an inception backfill runs for minutes), so the whole sync runs
+    on a worker thread with its own event loop and engine, never on the API's.
+    ponytail: cancelling the loop task does not stop a running worker; a
+    shutdown mid-sync waits for it (SIGKILL at the compose grace period is
+    the backstop; the sync is idempotent). Add a stop flag between phases if
+    deploys during 16:30 ET become common.
+    """
+    try:
+        result = await asyncio.to_thread(asyncio.run, _sync_one(engine_factory, scope, runner))
+        logger.info(
+            "futu history sync ok (%s): trades=%s cashflows=%s nav_rows=%s",
+            scope.account_env,
+            result.get("trades_inserted"),
+            result.get("cashflows_inserted"),
+            result.get("nav_rows_written"),
+        )
+        record_service_health(
+            "futu_history",
+            "ok",
+            broker=scope.broker,
+            account_env=scope.account_env,
+            broker_account=scope.broker_account,
+            finished_at=datetime.now(tz=ET),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("futu history sync failed (%s); will retry next weekday", scope.account_env)
+        record_service_health(
+            "futu_history",
+            "error",
+            error={"msg": str(exc)},
+            broker=scope.broker,
+            account_env=scope.account_env,
+            broker_account=scope.broker_account,
+            finished_at=datetime.now(tz=ET),
+        )
+
+
+async def _sync_one(engine_factory: Callable[[], Any], scope: Any, runner: Callable[..., Any]) -> dict:
+    """Runs inside the worker thread's loop: the engine must live and die there."""
+    engine = engine_factory()
+    try:
+        return await runner(engine, scope, since=None)
+    finally:
+        try:
+            await engine.dispose()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 __all__ = ("next_run_at_et", "futu_history_loop")

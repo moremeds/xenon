@@ -10,6 +10,24 @@ function ago(secs: number | null): string {
   return `${Math.round(secs / 86400)}d ago`;
 }
 
+const ERROR_MAX_CHARS = 80;
+
+// Writers store last_error as raw text or a JSON `{"msg": ...}` envelope.
+function errorSummary(raw: string): { text: string; full: string } {
+  let full = raw;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && "msg" in parsed) {
+      full = String((parsed as { msg: unknown }).msg);
+    }
+  } catch {
+    // not JSON — show as-is
+  }
+  const text =
+    full.length > ERROR_MAX_CHARS ? `${full.slice(0, ERROR_MAX_CHARS)}…` : full;
+  return { text, full };
+}
+
 export function WriterFreshnessTable({
   writers,
   market,
@@ -40,9 +58,20 @@ export function WriterFreshnessTable({
             {writers.map((w) => {
               const stale = isWriterStale(w.service, w.age_secs, market);
               const fault = w.state === "error" || w.state === "missing";
+              const err =
+                w.state === "error" && w.last_error
+                  ? errorSummary(w.last_error)
+                  : null;
               return (
                 <tr key={w.service}>
-                  <td className="operator-writers__name">{w.service}</td>
+                  <td className="operator-writers__name">
+                    {w.service}
+                    {err ? (
+                      <span className="operator-writers__err" title={err.full}>
+                        {err.text}
+                      </span>
+                    ) : null}
+                  </td>
                   <td>
                     <span
                       className={`operator-pill operator-pill--${fault ? "fault" : "core"}`}

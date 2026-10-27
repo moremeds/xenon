@@ -2,7 +2,7 @@
 
 Drives the actual loop with injected fakes:
   * engine_factory returns a real AsyncEngine (so the loop can dispose it)
-  * scope_factory returns a fixed AccountScope (no OpenD)
+  * scopes_factory returns a fixed AccountScope list (no OpenD)
   * runner is a synchronous spy that records args + returns counts dict
 
 Cancels after one tick to confirm the schedule-then-run-then-loop flow,
@@ -46,10 +46,11 @@ async def test_loop_runs_one_tick_then_cancels(monkeypatch):
 
     calls: list[tuple] = []
     cancel_after_first = asyncio.Event()
+    test_loop = asyncio.get_running_loop()
 
     async def _runner(engine, scope, since):
         calls.append((scope.broker, scope.account_env, scope.broker_account, since))
-        cancel_after_first.set()
+        test_loop.call_soon_threadsafe(cancel_after_first.set)  # runner is on the worker thread
         return {
             "trades_inserted": 0,
             "cashflows_inserted": 0,
@@ -60,12 +61,12 @@ async def test_loop_runs_one_tick_then_cancels(monkeypatch):
         return create_async_engine(url, pool_pre_ping=True)
 
     def _scope_factory():
-        return SCOPE
+        return [SCOPE]
 
     task = asyncio.create_task(
         futu_history_loop(
             engine_factory=_engine_factory,
-            scope_factory=_scope_factory,
+            scopes_factory=_scope_factory,
             runner=_runner,
         )
     )
@@ -101,12 +102,13 @@ async def test_loop_survives_runner_exception(monkeypatch):
 
     call_count = {"n": 0}
     second_call = asyncio.Event()
+    test_loop = asyncio.get_running_loop()
 
     async def _runner(engine, scope, since):
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise RuntimeError("synthetic failure")
-        second_call.set()
+        test_loop.call_soon_threadsafe(second_call.set)  # runner is on the worker thread
         return {
             "trades_inserted": 0,
             "cashflows_inserted": 0,
@@ -119,7 +121,7 @@ async def test_loop_survives_runner_exception(monkeypatch):
     task = asyncio.create_task(
         futu_history_loop(
             engine_factory=_engine_factory,
-            scope_factory=lambda: SCOPE,
+            scopes_factory=lambda: [SCOPE],
             runner=_runner,
         )
     )
@@ -171,7 +173,7 @@ async def test_error_heartbeat_uses_futu_scope(monkeypatch):
     task = asyncio.create_task(
         futu_history_loop(
             engine_factory=_engine_factory,
-            scope_factory=lambda: SCOPE,
+            scopes_factory=lambda: [SCOPE],
             runner=_runner,
         )
     )
@@ -186,3 +188,53 @@ async def test_error_heartbeat_uses_futu_scope(monkeypatch):
     assert err["broker"] == "FUTU"
     assert err["account_env"] == "paper"
     assert err["broker_account"] == "pytest"
+
+
+@pytest.mark.asyncio
+async def test_loop_runs_every_scope_and_one_failure_does_not_skip_the_next(monkeypatch):
+    """The loop syncs every scope it is given; each records its own heartbeat."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    import xenon.api.services.futu_history_scheduler as sched_mod
+
+    real_sleep = asyncio.sleep
+
+    async def _instant_sleep(seconds):
+        return await real_sleep(0)
+
+    monkeypatch.setattr(sched_mod.asyncio, "sleep", _instant_sleep)
+    health: list[tuple] = []
+    done = asyncio.Event()
+
+    def _capture(service, state="ok", **kwargs):
+        health.append((state, kwargs.get("account_env")))
+        if len(health) == 2:
+            done.set()
+
+    monkeypatch.setattr(sched_mod, "record_service_health", _capture)
+    live = AccountScope(broker="FUTU", account_env="live", broker_account="pytest-live")
+    ran: list[str] = []
+
+    async def _runner(engine, scope, since):
+        ran.append(scope.account_env)
+        if scope.account_env == "paper":
+            raise RuntimeError("synthetic paper failure")
+        return {"trades_inserted": 0, "cashflows_inserted": 0, "nav_rows_written": 0}
+
+    def _engine_factory():
+        eng = MagicMock()
+        eng.dispose = AsyncMock()
+        return eng
+
+    task = asyncio.create_task(
+        futu_history_loop(engine_factory=_engine_factory, scopes_factory=lambda: [SCOPE, live], runner=_runner)
+    )
+    await asyncio.wait_for(done.wait(), timeout=5.0)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert ran[:2] == ["paper", "live"]
+    assert health[:2] == [("error", "paper"), ("ok", "live")]

@@ -72,6 +72,24 @@ def trd_env_for(scope: AccountScope) -> str:
     return _ENV_TO_TRD[scope.account_env]
 
 
+def new_client(scope: AccountScope | None):
+    """A FutuClient for one scope, OpenD address from env (`FUTU_OPEND_HOST`/`_PORT`).
+
+    With a scope: exactly that account and TrdEnv, no fallback. None: the
+    legacy client (`FUTU_TRD_ENV`, first account of that env).
+    """
+    from xenon.clients.futu_client import FutuClient
+
+    return FutuClient(
+        host=os.environ.get("FUTU_OPEND_HOST", "127.0.0.1"),
+        port=int(os.environ.get("FUTU_OPEND_PORT", "11111")),
+        security_firm=os.environ.get("FUTU_SECURITY_FIRM", "FUTUSECURITIES"),
+        trd_env=trd_env_for(scope) if scope else os.environ.get("FUTU_TRD_ENV", "REAL"),
+        filter_trading_market=os.environ.get("FUTU_MARKET", "US"),
+        acc_id=int(scope.broker_account) if scope else None,
+    )
+
+
 def verify_live(scope: AccountScope, acc_rows: Iterable[Mapping[str, Any]] | Any) -> tuple[bool, str | None]:
     """Pure check of `scope` against `get_acc_list()` rows (a DataFrame or row dicts)."""
     trd_env = _ENV_TO_TRD.get(scope.account_env)

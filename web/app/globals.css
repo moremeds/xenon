@@ -7390,6 +7390,9 @@ tr {
   margin: 0 8px;
   color: var(--text-muted);
 }
+.operator-rollup__degraded {
+  color: var(--warning);
+}
 .operator-rollup__updated {
   color: var(--text-muted);
 }
@@ -7738,6 +7741,56 @@ tr {
   color: var(--text-primary);
 }
 
+.operator-kv__wide {
+  grid-column: 1 / -1;
+}
+
+/* Futu per-env scope rows: env, orders on/off, sync age, observation, held. */
+.operator-scopes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.operator-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.operator-scope__main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+}
+.operator-scope__env {
+  min-width: 40px;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 10px;
+}
+.operator-scope__incomplete {
+  color: var(--warning);
+}
+.operator-scope__ids {
+  margin: 0;
+  font-size: 11px;
+  color: var(--warning);
+  overflow-wrap: anywhere;
+}
+.operator-caps {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 /* Role pills embedded at the bottom of the IB / Futu gateway cards. */
 .operator-roles {
   display: flex;
@@ -7803,6 +7856,14 @@ tr {
 }
 .operator-writers__fresh--stale {
   color: var(--fault);
+}
+.operator-writers__err {
+  display: block;
+  margin-top: 2px;
+  max-width: 48ch;
+  font-size: 11px;
+  color: var(--fault);
+  overflow-wrap: anywhere;
 }
 .operator-writers__empty {
   color: var(--text-muted);

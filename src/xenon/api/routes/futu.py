@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
-import os
 import threading
 from typing import Optional
 
@@ -60,14 +59,7 @@ def _get_futu_lock() -> asyncio.Lock:
 def _new_client(scope: Optional[AccountScope]) -> FutuClient:
     from xenon.execution import futu_scope
 
-    return FutuClient(
-        host=os.environ.get("FUTU_OPEND_HOST", "127.0.0.1"),
-        port=int(os.environ.get("FUTU_OPEND_PORT", "11111")),
-        security_firm=os.environ.get("FUTU_SECURITY_FIRM", "FUTUSECURITIES"),
-        trd_env=futu_scope.trd_env_for(scope) if scope else os.environ.get("FUTU_TRD_ENV", "REAL"),
-        filter_trading_market=os.environ.get("FUTU_MARKET", "US"),
-        acc_id=int(scope.broker_account) if scope else None,
-    )
+    return futu_scope.new_client(scope)
 
 
 def _get_futu_client(account_env: Optional[str] = None) -> FutuClient:

@@ -124,7 +124,7 @@ def filter_payload_by_execution_window(
     }
 
 
-def _main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Nightly PG↔Flex divergence check.")
     parser.add_argument("--apply", action="store_true", help="Insert a flex_divergence_runs row.")
     args = parser.parse_args(argv)
@@ -141,6 +141,11 @@ def _main(argv: list[str] | None = None) -> int:
 
     scope = resolve_from_env()
     start_utc, end_utc = yesterday_session_window()
+    # ponytail: weekends only; a holiday still records a 0/0 row (add the
+    # market calendar if that matters).
+    if start_utc.astimezone(_NY).weekday() >= 5:
+        print(json.dumps({"skipped": True, "reason": "no_session"}, indent=2))
+        return 0
     days = max(1, int((datetime.now(timezone.utc) - start_utc).total_seconds() // 86400) + 1)
 
     engine = get_sync_engine()
@@ -164,4 +169,4 @@ def _main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(_main())
+    sys.exit(main())
