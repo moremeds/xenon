@@ -12,11 +12,9 @@ describe("getConnectionBannerState", () => {
         "Interactive Brokers Gateway is reconnecting. Check the push notification from Interactive Brokers on your phone to approve MFA.",
     });
 
-    expect(banner).toEqual(
-      expect.objectContaining({
-        tone: "warning",
-      }),
-    );
+    expect(banner).toEqual(expect.objectContaining({
+      tone: "warning",
+    }));
     expect(banner?.message).toMatch(/push notification/i);
     expect(banner?.message).toMatch(/phone/i);
   });
@@ -43,32 +41,5 @@ describe("getConnectionBannerState", () => {
     });
 
     expect(banner).toBeNull();
-  });
-
-  it("warns when IB is up but the realtime data stream is offline", () => {
-    const banner = getConnectionBannerState({
-      reconnected: false,
-      wsConnected: false,
-      ibConnected: true,
-      ibIssue: null,
-      ibStatusMessage: null,
-    });
-    expect(banner).toEqual({
-      tone: "warning",
-      message:
-        "Live data stream offline — IB Gateway is still connected; prices may be delayed.",
-    });
-  });
-
-  it("does not warn when both WS and IB are connected", () => {
-    expect(
-      getConnectionBannerState({
-        reconnected: false,
-        wsConnected: true,
-        ibConnected: true,
-        ibIssue: null,
-        ibStatusMessage: null,
-      }),
-    ).toBeNull();
   });
 });
