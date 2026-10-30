@@ -14,6 +14,7 @@ the extension is not installed on this database.
 
 from __future__ import annotations
 
+import sqlalchemy as sa
 from alembic import op
 
 revision: str = "2026_06_21_option_chain_archive"
@@ -23,11 +24,26 @@ depends_on = None
 
 
 def _try_timescaledb(sql: str) -> None:
-    """Run a TimescaleDB-specific statement; silently skip if not available."""
+    """Run a TimescaleDB-specific statement inside a SAVEPOINT.
+
+    On Postgres, a statement that errors inside the migration's transaction
+    leaves the *whole* transaction aborted — every subsequent DDL then fails
+    with "current transaction is aborted". Since this migration targets plain
+    PostgreSQL too (TimescaleDB optional), the first `create_hypertable` call
+    on a non-Timescale DB would otherwise poison the rest of the migration
+    (underlying_ohlcv, v_staleness, indexes would never be created).
+
+    Wrapping each call in a SAVEPOINT (begin_nested) scopes the rollback to
+    just this statement, so the outer transaction survives and the schema is
+    created correctly with hypertables simply skipped.
+    """
+    bind = op.get_bind()
+    savepoint = bind.begin_nested()
     try:
-        op.execute(sql)
+        bind.execute(sa.text(sql))
+        savepoint.commit()
     except Exception:
-        pass
+        savepoint.rollback()
 
 
 def upgrade() -> None:

@@ -17,6 +17,12 @@ log = logging.getLogger(__name__)
 class PGPersister:
     """Thin wrapper around a psycopg connection for archive writes."""
 
+    # A wedged write must not hang the snapshotter forever. The daemon calls
+    # these methods via asyncio.to_thread, but a thread blocked on a stuck DB
+    # connection would still leak and starve the cycle. statement_timeout makes
+    # every statement fail after this bound, surfacing as an error run instead.
+    STATEMENT_TIMEOUT_MS = 30_000
+
     def __init__(self, dsn: str) -> None:
         # Strip SQLAlchemy dialect prefix if present.
         self._dsn = dsn.replace("postgresql+psycopg://", "postgresql://", 1)
@@ -27,8 +33,12 @@ class PGPersister:
     # ------------------------------------------------------------------ #
 
     def connect(self) -> None:
-        self._conn = psycopg.connect(self._dsn, autocommit=True)
-        log.info("PGPersister connected")
+        self._conn = psycopg.connect(
+            self._dsn,
+            autocommit=True,
+            options=f"-c statement_timeout={self.STATEMENT_TIMEOUT_MS}",
+        )
+        log.info("PGPersister connected (statement_timeout=%dms)", self.STATEMENT_TIMEOUT_MS)
 
     def close(self) -> None:
         if self._conn is not None:

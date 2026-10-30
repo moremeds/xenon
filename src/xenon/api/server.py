@@ -338,6 +338,31 @@ def _maybe_start_futu_history_loop() -> None:
     logger.info("futu history loop started (target: 16:30 ET weekdays)")
 
 
+async def _snapshotter_supervise_loop(run_factory, *, backoff_s: float) -> None:
+    """Restart the snapshotter run-coroutine after any non-cancellation crash.
+
+    The snapshotter runs in-process under the FastAPI lifespan, so nothing
+    external restarts it — a single uncaught exception (e.g. DATABASE_URL down
+    at PGPersister.connect(), a load_cadence() blip) must not kill it for the
+    rest of the process's life. On CancelledError (shutdown) it stops cleanly;
+    on a clean return it stops rather than hot-looping.
+
+    Extracted to module scope so the retry logic is unit-testable without the
+    lifespan / advisory-lock wrapping. Tests: test_snapshotter_supervisor.py.
+    """
+    while True:
+        try:
+            await run_factory()
+            logger.warning("option chain snapshotter run_forever returned unexpectedly — supervisor stopping")
+            return
+        except asyncio.CancelledError:
+            logger.info("option chain snapshotter cancelled — supervisor stopping")
+            raise
+        except Exception:
+            logger.exception("option chain snapshotter crashed — restarting in %.0fs", backoff_s)
+            await asyncio.sleep(backoff_s)
+
+
 def _maybe_start_snapshotter() -> None:
     """Start the option chain archive snapshotter as a background task.
 
@@ -377,6 +402,12 @@ def _maybe_start_snapshotter() -> None:
     ib_port = int(os.environ.get("IB_GATEWAY_PORT", str(DEFAULT_GATEWAY_PORT)))
     ib_client_id = int(os.environ.get("IB_CLIENT_ID_SNAPSHOTTER", "901"))
 
+    # Restart back-off after an unexpected crash (e.g. DATABASE_URL down at
+    # PGPersister.connect(), a load_cadence() blip). run_forever() already
+    # self-heals IB-connection loss internally, so reaching the except below
+    # means something outside that loop failed.
+    supervisor_backoff_s = 60.0
+
     async def _supervised() -> None:
         async with pg_try_advisory_lock(LOCK_KEY_OPTION_CHAIN_SNAPSHOTTER) as got_lock:
             if not got_lock:
@@ -388,14 +419,27 @@ def _maybe_start_snapshotter() -> None:
                 ib_port,
                 ib_client_id,
             )
-            await _snapshotter_run_forever(
-                ib_host=ib_host,
-                ib_port=ib_port,
-                ib_client_id=ib_client_id,
-                database_url=db_url,
+            await _snapshotter_supervise_loop(
+                lambda: _snapshotter_run_forever(
+                    ib_host=ib_host,
+                    ib_port=ib_port,
+                    ib_client_id=ib_client_id,
+                    database_url=db_url,
+                ),
+                backoff_s=supervisor_backoff_s,
             )
 
+    def _on_snapshotter_done(t: _asyncio.Task) -> None:
+        # Surface a silent death: if the task ends with an exception (e.g. the
+        # advisory-lock context itself failed) it would otherwise vanish.
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            logger.error("option chain snapshotter task exited with exception: %r", exc)
+
     task = _asyncio.create_task(_supervised(), name="option_chain_snapshotter")
+    task.add_done_callback(_on_snapshotter_done)
     app.state.snapshotter_task = task
     logger.info("option chain snapshotter task created")
 

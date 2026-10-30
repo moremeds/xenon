@@ -17,9 +17,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta, timezone
-from typing import AsyncIterator
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 from ib_async import IB, Index, Option
 
@@ -27,6 +26,7 @@ from .config import (
     BATCH_SIZE,
     BATCH_TIMEOUT,
     DEFAULT_IB_CLIENT_ID_A,
+    EXCLUDE_VENUES,
     IB_NO_VOLUME,
     INDEX_EXCHANGE,
     MAX_EXPIRATIONS,
@@ -35,6 +35,12 @@ from .config import (
 )
 
 log = logging.getLogger(__name__)
+
+# Expiry/DTE math must be anchored to the US market date, not the host's local
+# date. On a non-US host (e.g. Asia/Hong_Kong) date.today() rolls over while US
+# RTH is still in session, so a next-US-day expiry would be misread as 0DTE and
+# dropped by MIN_DTE. Use the NYSE calendar's timezone.
+_MARKET_TZ = ZoneInfo("America/New_York")
 
 
 # --------------------------------------------------------------------------- #
@@ -79,23 +85,28 @@ class IBFetcher:
     async def _fetch_spot(self, underlier: Index, timeout: float = 8.0) -> float | None:
         """Fetch spot price for an Index underlier.  Returns None on timeout."""
         ticker = self.ib.reqMktData(underlier, "", snapshot=True, regulatorySnapshot=False)
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            await asyncio.sleep(0.1)
-            for field in ("last", "close", "markPrice"):
-                v = getattr(ticker, field, None)
-                if isinstance(v, (int, float)) and v == v and v > 0:
-                    self.ib.cancelMktData(underlier)
-                    return float(v)
+        try:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                await asyncio.sleep(0.1)
+                for field in ("last", "close", "markPrice"):
+                    v = getattr(ticker, field, None)
+                    if isinstance(v, (int, float)) and v == v and v > 0:
+                        return float(v)
+                try:
+                    mp = ticker.marketPrice()
+                    if mp is not None and mp == mp and mp > 0:
+                        return float(mp)
+                except Exception:
+                    pass
+            return None
+        finally:
+            # Always release the line — even if cancelled by the cycle-timeout
+            # guard or shutdown mid-wait.
             try:
-                mp = ticker.marketPrice()
-                if mp is not None and mp == mp and mp > 0:
-                    self.ib.cancelMktData(underlier)
-                    return float(mp)
+                self.ib.cancelMktData(underlier)
             except Exception:
                 pass
-        self.ib.cancelMktData(underlier)
-        return None
 
     async def enumerate_contracts(
         self,
@@ -133,10 +144,22 @@ class IBFetcher:
             log.error("[%s] reqSecDefOptParams returned nothing", ticker)
             return [], spot
 
-        today = date.today()
+        today = datetime.now(tz=_MARKET_TZ).date()
         contracts: list[Option] = []
 
         for params in params_list:
+            # Skip routing aliases — SMART/IBUSOPT return the same conIds as the
+            # listed exchange but inflate the contract count ~3x and produce no
+            # additional market data in snapshot mode.
+            if params.exchange in EXCLUDE_VENUES:
+                log.debug(
+                    "[%s] skipping tradingClass=%s exchange=%s (in EXCLUDE_VENUES)",
+                    ticker,
+                    params.tradingClass,
+                    params.exchange,
+                )
+                continue
+
             # Pick the front N expirations that meet the min DTE requirement.
             expirations = sorted(
                 exp
@@ -165,6 +188,12 @@ class IBFetcher:
                     strike_pct_range=strike_pct_range,
                 )
                 contracts.extend(expiry_contracts)
+
+        # Sort NTM-first so the first batch contains the most liquid (ATM) contracts.
+        # This ensures the dark-feed check (batch_idx==0 early-abort) sees real data
+        # rather than deep-OTM contracts that may have no market quote.
+        if spot is not None:
+            contracts.sort(key=lambda c: abs(c.strike - spot))
 
         log.info("[%s] total contracts enumerated: %d", ticker, len(contracts))
         return contracts, spot
@@ -204,7 +233,9 @@ class IBFetcher:
         result: list[Option] = []
         for cd in details:
             c = cd.contract
-            if not isinstance(c, Option) or not c.conId:
+            # reqContractDetailsAsync always returns generic Contract objects,
+            # never typed Option subclasses — isinstance(c, Option) is always False.
+            if not c.conId or not getattr(c, "strike", None):
                 continue
             # Strike filter (skip if spot is unknown)
             if spot is not None:
@@ -220,7 +251,7 @@ class IBFetcher:
     # Snapshot fetching
     # ---------------------------------------------------------------------- #
 
-    async def fetch_snapshots(
+    async def iter_snapshot_batches(
         self,
         ticker: str,
         contracts: list[Option],
@@ -228,18 +259,20 @@ class IBFetcher:
         request_ts: datetime,
         batch_size: int = BATCH_SIZE,
         timeout: float = BATCH_TIMEOUT,
-    ) -> list[dict]:
-        """Request market-data snapshots for *contracts* in batches.
+    ):
+        """Async generator: yield one batch of row dicts per IB snapshot round-trip.
 
-        Returns a list of row dicts ready for PGPersister.persist_rows().
-        Rows are only produced when at least one of bid, ask, or last is
-        present — contracts that return no data within *timeout* are skipped
-        and counted as attempted-but-not-persisted.
+        Callers persist each batch immediately so partial results survive daemon
+        restarts or cycle timeouts. Rows are only produced when at least one of
+        bid, ask, or last is present — contracts with no data within *timeout*
+        are skipped and counted as attempted-but-not-persisted.
+
+        Yields:
+            list[dict] — one per completed batch (may be empty for dark tickers).
         """
-        rows: list[dict] = []
         total = len(contracts)
 
-        for batch_start in range(0, total, batch_size):
+        for batch_idx, batch_start in enumerate(range(0, total, batch_size)):
             batch = contracts[batch_start : batch_start + batch_size]
             batch_rows = await self._fetch_batch(
                 ticker=ticker,
@@ -248,9 +281,22 @@ class IBFetcher:
                 request_ts=request_ts,
                 timeout=timeout,
             )
-            rows.extend(batch_rows)
 
-        return rows
+            # Dark-feed fast-path: if the very first full batch produced zero
+            # rows, this ticker has no live market data this cycle (entitlement
+            # gap / feed down). Abort instead of burning the full per-batch
+            # timeout on every remaining contract.
+            if batch_idx == 0 and not batch_rows and total > len(batch):
+                log.warning(
+                    "[%s] first batch of %d returned no data — treating ticker as dark this cycle, "
+                    "skipping remaining %d contracts",
+                    ticker,
+                    len(batch),
+                    total - len(batch),
+                )
+                return
+
+            yield batch_rows
 
     async def _fetch_batch(
         self,
@@ -260,33 +306,47 @@ class IBFetcher:
         request_ts: datetime,
         timeout: float,
     ) -> list[dict]:
-        tickers = [self.ib.reqMktData(c, "", snapshot=True, regulatorySnapshot=False) for c in batch]
-
+        # Request incrementally and track exactly which lines were opened, so a
+        # mid-batch reqMktData failure (bad contract, disconnect, line limit)
+        # still lets the finally cancel precisely the lines we created — and a
+        # single bad contract is skipped rather than aborting the whole batch.
+        requested: list[tuple[Option, object]] = []
         quote_ts_map: dict[int, datetime] = {}
         greeks_ts_map: dict[int, datetime] = {}
 
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            await asyncio.sleep(0.2)
-            now_utc = datetime.now(tz=timezone.utc)
-            for i, t in enumerate(tickers):
-                if i not in quote_ts_map and _has_quote(t):
-                    quote_ts_map[i] = now_utc
-                if i not in greeks_ts_map and t.modelGreeks is not None and t.modelGreeks.delta is not None:
-                    greeks_ts_map[i] = now_utc
-            # Exit early once all have at least a quote
-            if len(quote_ts_map) == len(tickers):
-                break
+        try:
+            for c in batch:
+                try:
+                    td = self.ib.reqMktData(c, "", snapshot=True, regulatorySnapshot=False)
+                except Exception as exc:
+                    log.warning("[%s] reqMktData failed for conId=%s: %s", ticker, getattr(c, "conId", "?"), exc)
+                    continue
+                requested.append((c, td))
 
-        # Cancel all lines regardless of completion
-        for c in batch:
-            try:
-                self.ib.cancelMktData(c)
-            except Exception:
-                pass
+            tickers = [td for _c, td in requested]
+            deadline = time.monotonic() + timeout
+            while tickers and time.monotonic() < deadline:
+                await asyncio.sleep(0.2)
+                now_utc = datetime.now(tz=timezone.utc)
+                for i, t in enumerate(tickers):
+                    if i not in quote_ts_map and _has_quote(t):
+                        quote_ts_map[i] = now_utc
+                    if i not in greeks_ts_map and t.modelGreeks is not None and t.modelGreeks.delta is not None:
+                        greeks_ts_map[i] = now_utc
+                # Exit early once all have at least a quote
+                if len(quote_ts_map) == len(tickers):
+                    break
+        finally:
+            # Cancel exactly the lines we opened — including when this batch is
+            # cancelled by the cycle-timeout guard or shutdown.
+            for c, _td in requested:
+                try:
+                    self.ib.cancelMktData(c)
+                except Exception:
+                    pass
 
         rows = []
-        for i, (contract, ticker_data) in enumerate(zip(batch, tickers)):
+        for i, (contract, ticker_data) in enumerate(requested):
             # Skip contracts with no useful data
             if not _has_quote(ticker_data) and ticker_data.modelGreeks is None:
                 continue
@@ -298,8 +358,13 @@ class IBFetcher:
             expiry_str = contract.lastTradeDateOrContractMonth
             try:
                 expiry_date = date(int(expiry_str[:4]), int(expiry_str[4:6]), int(expiry_str[6:8]))
-            except (ValueError, IndexError):
-                expiry_date = None
+            except (ValueError, IndexError, TypeError):
+                # archive.option_chain.expiry is DATE NOT NULL — a single
+                # un-parseable expiry in the batch would make the whole
+                # executemany fail and lose every row for this ticker. Skip
+                # just this contract instead.
+                log.warning("[%s] skipping conId=%s — unparseable expiry %r", ticker, contract.conId, expiry_str)
+                continue
 
             rows.append(
                 {
@@ -343,9 +408,18 @@ def _has_quote(ticker_data: object) -> bool:
 
 
 def _safe(v: object) -> object:
-    """Convert NaN/None to None for DB insertion."""
+    """Convert NaN/None/subnormal to None for DB insertion.
+
+    Postgres FLOAT8 rejects subnormal floats (|v| < ~2.2e-308) with
+    NumericValueOutOfRange. Deep-OTM Greeks (gamma, vega) can underflow to
+    these values, so clamp them to NULL rather than letting a single bad row
+    abort the entire executemany batch.
+    """
     if v is None:
         return None
-    if isinstance(v, float) and v != v:
-        return None
+    if isinstance(v, float):
+        if v != v:  # NaN
+            return None
+        if v != 0 and abs(v) < 2.3e-308:  # subnormal / near-underflow
+            return None
     return v

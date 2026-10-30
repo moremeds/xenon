@@ -22,9 +22,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .config import (
+    BATCH_SIZE,
+    CYCLE_TIMEOUT_S,
     DEFAULT_CADENCE_S,
     DEFAULT_IB_CLIENT_ID_A,
     MAX_RECONNECT_ATTEMPTS,
+    RECONNECT_COOLDOWN_S,
     RECONNECT_DELAY_S,
     TICKERS,
 )
@@ -51,57 +54,75 @@ async def run_ticker_cycle(
     fetcher: IBFetcher,
     persister: PGPersister,
 ) -> CycleResult:
-    """Snapshot one ticker's option chain and write to archive."""
-    run_id = None
+    """Snapshot one ticker's option chain and write to archive.
+
+    The IB-bound work (enumerate + snapshot) is bounded by an internal
+    ``asyncio.timeout(CYCLE_TIMEOUT_S)`` so a hung IB call cannot freeze the
+    daemon. Crucially the timeout is handled *here* (not via an outer
+    ``wait_for``) so the run ledger records the real ``attempted`` count and a
+    distinct ``timeout`` status instead of an opaque ``cancelled``. DB writes
+    go through ``asyncio.to_thread`` so the sync psycopg calls never block the
+    FastAPI event loop, and ``statement_timeout`` bounds them at the driver.
+    """
+    run_id: int | None = None
+    attempted = 0
     t0 = time.monotonic()
     try:
-        run_id, snapshot_ts = persister.insert_run(ticker)
+        run_id, snapshot_ts = await asyncio.to_thread(persister.insert_run, ticker)
         log.info("[%s] run_id=%d started", ticker, run_id)
 
         request_ts = datetime.now(tz=timezone.utc)
-        contracts, spot = await fetcher.enumerate_contracts(ticker)
-        attempted = len(contracts)
 
-        if not contracts:
-            persister.finish_run(
-                run_id,
-                status="error",
-                contracts_attempted=0,
-                contracts_persisted=0,
-                duration_ms=int((time.monotonic() - t0) * 1000),
-                error="enumerate_contracts returned empty",
-            )
-            return CycleResult(
+        async with asyncio.timeout(CYCLE_TIMEOUT_S):
+            contracts, spot = await fetcher.enumerate_contracts(ticker)
+            attempted = len(contracts)
+
+            if not contracts:
+                await asyncio.to_thread(
+                    persister.finish_run,
+                    run_id,
+                    status="error",
+                    contracts_attempted=0,
+                    contracts_persisted=0,
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                    error="enumerate_contracts returned empty",
+                )
+                return CycleResult(
+                    ticker=ticker,
+                    run_id=run_id,
+                    status="error",
+                    contracts_attempted=0,
+                    contracts_persisted=0,
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                    error="enumerate_contracts returned empty",
+                )
+
+            persisted = 0
+            async for batch_rows in fetcher.iter_snapshot_batches(
                 ticker=ticker,
-                run_id=run_id,
-                status="error",
-                contracts_attempted=0,
-                contracts_persisted=0,
-                duration_ms=int((time.monotonic() - t0) * 1000),
-                error="enumerate_contracts returned empty",
-            )
+                contracts=contracts,
+                spot=spot,
+                request_ts=request_ts,
+            ):
+                if batch_rows:
+                    persisted += await asyncio.to_thread(
+                        persister.persist_rows, batch_rows, run_id=run_id, snapshot_ts=snapshot_ts
+                    )
 
-        rows = await fetcher.fetch_snapshots(
-            ticker=ticker,
-            contracts=contracts,
-            spot=spot,
-            request_ts=request_ts,
-        )
-
-        persisted = persister.persist_rows(rows, run_id=run_id, snapshot_ts=snapshot_ts)
         duration_ms = int((time.monotonic() - t0) * 1000)
 
         status = "ok" if persisted == attempted else "partial"
         if persisted == 0:
             status = "error"
 
-        persister.finish_run(
+        await asyncio.to_thread(
+            persister.finish_run,
             run_id,
             status=status,
             contracts_attempted=attempted,
             contracts_persisted=persisted,
             duration_ms=duration_ms,
-            ib_lines_peak=min(attempted, 50),
+            ib_lines_peak=min(attempted, BATCH_SIZE),
         )
         log.info(
             "[%s] run_id=%d %s — %d/%d contracts in %dms",
@@ -122,13 +143,14 @@ async def run_ticker_cycle(
         )
 
     except asyncio.CancelledError:
-        # Propagate — the task is being shut down.
+        # Genuine shutdown cancel (cycle timeouts surface as TimeoutError below,
+        # because asyncio.timeout converts its own deadline into TimeoutError).
         if run_id is not None:
             try:
                 persister.finish_run(
                     run_id,
                     status="error",
-                    contracts_attempted=0,
+                    contracts_attempted=attempted,
                     contracts_persisted=0,
                     duration_ms=int((time.monotonic() - t0) * 1000),
                     error="cancelled",
@@ -137,16 +159,44 @@ async def run_ticker_cycle(
                 pass
         raise
 
+    except TimeoutError:
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        err_msg = f"cycle timeout after {CYCLE_TIMEOUT_S:.0f}s (attempted={attempted})"
+        log.error("[%s] %s", ticker, err_msg)
+        if run_id is not None:
+            try:
+                await asyncio.to_thread(
+                    persister.finish_run,
+                    run_id,
+                    status="error",
+                    contracts_attempted=attempted,
+                    contracts_persisted=0,
+                    duration_ms=duration_ms,
+                    error=err_msg,
+                )
+            except Exception:
+                pass
+        return CycleResult(
+            ticker=ticker,
+            run_id=run_id,
+            status="error",
+            contracts_attempted=attempted,
+            contracts_persisted=0,
+            duration_ms=duration_ms,
+            error=err_msg,
+        )
+
     except Exception as exc:
         duration_ms = int((time.monotonic() - t0) * 1000)
         err_msg = f"{type(exc).__name__}: {exc}"
         log.exception("[%s] cycle failed: %s", ticker, err_msg)
         if run_id is not None:
             try:
-                persister.finish_run(
+                await asyncio.to_thread(
+                    persister.finish_run,
                     run_id,
                     status="error",
-                    contracts_attempted=0,
+                    contracts_attempted=attempted,
                     contracts_persisted=0,
                     duration_ms=duration_ms,
                     error=err_msg[:500],
@@ -157,7 +207,7 @@ async def run_ticker_cycle(
             ticker=ticker,
             run_id=run_id,
             status="error",
-            contracts_attempted=0,
+            contracts_attempted=attempted,
             contracts_persisted=0,
             duration_ms=duration_ms,
             error=err_msg,
@@ -205,7 +255,10 @@ async def run_forever(
             # ── Market-hours gate ──────────────────────────────────────── #
             if not is_session_open():
                 next_open = next_session_open()
-                wait_s = max(0.0, (next_open - datetime.now(tz=timezone.utc)).total_seconds())
+                # 1s floor: if we wake a hair before the window boundary,
+                # is_session_open() can still read False and recompute the same
+                # next_open ≈ now; the floor stops that from becoming a spin.
+                wait_s = max(1.0, (next_open - datetime.now(tz=timezone.utc)).total_seconds())
                 log.info("Outside session — sleeping %.0f s until next open", wait_s)
                 await asyncio.sleep(wait_s)  # CancelledError propagates here
                 continue
@@ -224,8 +277,19 @@ async def run_forever(
                         exc,
                     )
                     if consecutive_failures >= MAX_RECONNECT_ATTEMPTS:
-                        log.critical("Reconnect budget exhausted — snapshotter stopping")
-                        return
+                        # Do NOT exit — this task runs in-process under the
+                        # FastAPI lifespan, so nothing would restart it. Back
+                        # off, reset the budget, and keep trying so the daemon
+                        # self-heals when IB Gateway returns (nightly restart,
+                        # 2FA re-auth).
+                        log.critical(
+                            "Reconnect budget exhausted (%d attempts) — cooling down %.0fs then retrying",
+                            consecutive_failures,
+                            RECONNECT_COOLDOWN_S,
+                        )
+                        consecutive_failures = 0
+                        await asyncio.sleep(RECONNECT_COOLDOWN_S)
+                        continue
                     await asyncio.sleep(RECONNECT_DELAY_S)
                     continue
 
@@ -237,6 +301,9 @@ async def run_forever(
                 if not fetcher.is_connected:
                     log.warning("IB disconnected mid-cycle — will reconnect next iteration")
                     break
+                # run_ticker_cycle bounds itself with asyncio.timeout(CYCLE_TIMEOUT_S)
+                # and records its own run-ledger row on timeout/error, so a single
+                # hung/slow ticker can't freeze the daemon or kill its siblings.
                 await run_ticker_cycle(ticker, fetcher, persister)
 
             # ── Sleep for remaining cadence ────────────────────────────── #
