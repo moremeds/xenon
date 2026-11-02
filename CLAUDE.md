@@ -102,7 +102,7 @@ Real live trading must go through the macmini Docker stack, which writes `core_d
 
 **Read first:** `docs/reference/order-path-incident-history.md` — chronological log of every non-trivial order-path bug, root cause, fix, and regression test. Append a row when you ship a similar fix.
 
-Automated guards lock in regression patterns. The first two came from PR #61; the write-side guard shipped with the dev/prod DB split. Full design: `docs/superpowers/plans/_archive/2026-04-28-order-path-regression-prevention.md`.
+Automated guards lock in regression patterns. The first two came from PR #61; the write-side guard shipped with the dev/prod DB split. Full design: `docs/superpowers/plans/_archive/2026-04-28-order-path-regression-prevention.md` (removed; see git history).
 
 - **Edit-time reminder** (`.claude/hooks/order-path-reminder.sh`) — PreToolUse hook prints an order-path checklist when Claude edits files under `src/xenon/execution/`, `src/xenon/api/server.py`, `src/xenon/api/services/order_entry.py`, `src/xenon/api/routes/order_entry.py`, `src/xenon/api/routes/portfolio.py`, `src/xenon/api/routes/orders*`, `web/app/api/orders/`, `web/lib/order/`, `web/lib/nakedShortGuard.ts`, `web/lib/placeOrderBodySchema.ts`, or `web/lib/orderReasonCodes.ts`. Advisory, never blocks.
 - **CI guards** (`.github/workflows/ci.yml::order-path-guards`):
@@ -309,3 +309,16 @@ Two escape hatches:
 ## Strategy Registry Sync
 
 `docs/trading/strategies.md` is the source of truth. `data/strategies.json` is gitignored local data (read by `src/xenon/reports/portfolio_attribution.py`). If `strategies.md` changes, update your local `data/strategies.json` and validate it with `uv run python -m json.tool data/strategies.json`. The signal layer that consumed the registry was removed in the pure-portfolio pivot.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+When the user types `/graphify`, use the installed graphify skill or instructions before doing anything else.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- Dirty graphify-out/ files are expected after hooks or incremental updates; dirty graph files are not a reason to skip graphify. Only skip graphify if the task is about stale or incorrect graph output, or the user explicitly says not to use it.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

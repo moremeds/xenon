@@ -594,20 +594,3 @@ for ${sym}"`) survives, but the wrapping prefix is gone.
     deal-less open source (assignment records or statement lots), so it depends on the
     Futu statement ingestion path (`futu_statement_sync.py`). CHANGELOG 0.12.0 lists the
     warn-once change; the cause stays unverified.
-
-- 2026-10-21 — **Wizard protect has no Gate-4 coverage / reserve check** —
-  `POST /wizard/sessions/{id}/protect` runs only `ensure_order_allowed` and
-  `require_writable` before it hands the TP placement to the order owner.
-  - **Notes:** Verified in `src/xenon/api/routes/wizard.py` (`wizard_protect`): no call
-    to the Gate-4 path that place uses (`gate4.reserve_with_coverage` in
-    `src/xenon/api/services/order_entry.py`). The only naked-short check on protect is
-    leg-level and portfolio-blind: `_tp_would_naked_short` in
-    `src/xenon/execution/combo_wizard/protect.py` and the same rule in
-    `combo_wizard/ib_adapter.py` (`NakedShortGuardError`), which count SELL calls
-    against BUY calls in the session legs only. The TP is a closing order, so it may be
-    safe by construction; that is a design decision, not a verified fact. Decide:
-    (a) accept and document it in `src/xenon/api/CLAUDE.md`, or (b) route protect
-    through the shared Gate-4 reserve so the TP is checked against the live snapshot
-    and working-order reservations. Option (b) touches the order path: read
-    `docs/reference/order-path-incident-history.md` first and add a route test plus a browser test.
-  - **Status:** option (b) done on branch `fix/wizard-protect-gate4` (incident-history row 41). No browser test: no web component calls the protect proxy route yet.
