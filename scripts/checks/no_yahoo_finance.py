@@ -40,6 +40,7 @@ EXCLUDE_DIRS = {
     "_archive",
     "tasks",
     "output",
+    "tmp",  # gitignored scratch
 }
 
 # Code files only — docs may discuss the ban itself.

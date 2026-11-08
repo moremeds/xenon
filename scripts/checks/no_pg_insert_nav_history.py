@@ -37,6 +37,7 @@ EXCLUDE_DIRS = (
     "node_modules",
     "data",
     ".pytest_cache",
+    "tmp",  # gitignored scratch
     "scripts/checks",  # this file references the pattern by name
 )
 
