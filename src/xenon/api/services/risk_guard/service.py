@@ -51,6 +51,9 @@ HEARTBEAT_S = 30.0
 SNAPSHOT_STALE_S = 120.0
 DB_TIMEOUT_S = 5.0
 OPEN_GRACE_S = 60.0
+REDELIVER_S = 30.0  # retry a send that reached no channel ...
+REDELIVER_MAX = 10  # ... at most this many times (5 min)
+MAX_RECORDS_IN_FLIGHT = 4  # risk_events writes; more are skipped, never queued
 WATCH_FROM = dtime(9, 0)
 WINDOWS = {"5m": 300, "15m": 900, "30m": 1800, "60m": 3600}
 
@@ -115,6 +118,10 @@ class RiskGuard:
         self.last_tick_at: str | None = None
         self._acct_at = self._basis_at = self._beat_at = -1e18
         self._pending: set[asyncio.Task] = set()
+        self.basis_error: str | None = None
+        # key -> (event, title, body, scope, attempt, due): a send that reached no channel
+        self._redeliver: dict[str, tuple[Event, str, str, Any, int, float]] = {}
+        self._records_in_flight = 0
 
     # ── evaluation ───────────────────────────────────────────────────
 
@@ -137,9 +144,12 @@ class RiskGuard:
         extra = tuple(self.extra_fn())
         self.extra = {s: self.extra.get(s) or SourceState(s) for s in extra}
         quotes: dict[str, Quote] = await self.feed.read(extra)
+        # The trading date is part of the session: a cash index prints nothing
+        # between closes, so "rth" alone would carry yesterday's high/low over.
+        day = wall.astimezone(market_calendar.ET).date().isoformat()
         spx_session = "rth" if rth else "closed"  # cash indexes print in RTH only
         for name, src in {**self.sources, **self.extra}.items():
-            src.observe(now, wall, quotes.get(name), eq_session if name == "SPY" else spx_session)
+            src.observe(now, wall, quotes.get(name), f"{eq_session if name == 'SPY' else spx_session}:{day}")
 
         scope = self.scope_fn()
         events: list[Event] = []
@@ -162,6 +172,8 @@ class RiskGuard:
                 health["GUARD_ERROR"] = f"system health check failed ({type(exc).__name__})"
             if not self.db_ok:
                 health["DB_DOWN"] = "account snapshot read failed"
+            if self.basis_error:
+                health["BASIS_UNAVAILABLE"] = f"drawdown basis read failed ({self.basis_error}); drawdown alerts blind"
             age = self.account.snapshot_age_s if self.account else None
             if rth and scope is not None and (age is None or age > SNAPSHOT_STALE_S):
                 health["SNAPSHOT_STALE"] = "no IB account snapshot" if age is None else f"IB snapshot {age:.0f} s old"
@@ -182,6 +194,7 @@ class RiskGuard:
 
         for ev in events:
             self._dispatch(ev, scope)
+        self._redeliver_due(now)
         if self.heartbeat_fn is not None and now - self._beat_at >= HEARTBEAT_S:
             self._beat_at = now
             self._spawn(self.heartbeat_fn(self.heartbeat_payload(wall, now)))
@@ -207,9 +220,11 @@ class RiskGuard:
             try:
                 async with asyncio.timeout(DB_TIMEOUT_S):
                     self.basis = await self.basis_fn(scope, wall.astimezone(market_calendar.ET).date())
-                self._basis_at = now
+                self._basis_at, self.basis_error = now, None
             except Exception as exc:  # noqa: BLE001
-                logger.warning("risk guard drawdown basis read failed: %s", type(exc).__name__)
+                if self.basis_error is None:
+                    logger.warning("risk guard drawdown basis read failed: %s", type(exc).__name__)
+                self.basis_error = type(exc).__name__
         is_new = snap is not None and (self.snapshot is None or snap[1] != self.snapshot[1])
         self.snapshot = snap
         if not is_new:
@@ -248,7 +263,7 @@ class RiskGuard:
             ret_15m=s.window.ret(now, WINDOWS["15m"]),
             ret_30m=s.window.ret(now, WINDOWS["30m"]),
             ret_60m=s.window.ret(now, WINDOWS["60m"]),
-            day=day_return(s.last, s.prior_close) if s.window.session == "rth" else None,
+            day=day_return(s.last, s.prior_close) if _rth(s) else None,
             session_low=s.window.low,
         )
 
@@ -275,7 +290,7 @@ class RiskGuard:
             ret_15m=metric(lambda s: s.window.ret(now, WINDOWS["15m"])),
             ret_30m=metric(lambda s: s.window.ret(now, WINDOWS["30m"])),
             ret_60m=metric(lambda s: s.window.ret(now, WINDOWS["60m"])),
-            day=metric(lambda s: day_return(s.last, s.prior_close) if s.window.session == "rth" else None),
+            day=metric(lambda s: day_return(s.last, s.prior_close) if _rth(s) else None),
             levels_broken=levels,
             min_short_distance=acct.min_short_distance if acct else None,
             long_itm=bool(acct and acct.long_itm),
@@ -292,6 +307,7 @@ class RiskGuard:
         task.add_done_callback(self._pending.discard)
 
     def _dispatch(self, ev: Event, scope: Any) -> None:
+        self._redeliver.pop(ev.key, None)  # a newer send for the key supersedes a retry
         try:
             title, body = self.render(ev, scope)
         except Exception as exc:  # noqa: BLE001 — a render bug must not drop the alert
@@ -300,42 +316,74 @@ class RiskGuard:
             body = "; ".join(ev.reasons) or ev.key
         self._spawn(self._send(ev, title, body, scope))
 
-    async def _send(self, ev: Event, title: str, body: str, scope: Any) -> None:
+    async def _send(self, ev: Event, title: str, body: str, scope: Any, attempt: int = 0) -> None:
         result = await self.notifier.send(title, body, priority(ev), tags=tags(ev))
         self.last_result = {"at": self.wall().isoformat(), "key": ev.key, "kind": ev.kind, **asdict(result)}
         if result.push != "sent" and result.email != "sent":
             logger.error(
-                "risk guard: %s %s reached no channel (push=%s email=%s)", ev.key, ev.kind, result.push, result.email
+                "risk guard: %s %s reached no channel (push=%s email=%s, attempt %d)",
+                ev.key,
+                ev.kind,
+                result.push,
+                result.email,
+                attempt + 1,
             )
+            failed = "failed" in (result.push, result.email)
+            if failed and attempt + 1 < REDELIVER_MAX and ev.key not in self._redeliver:
+                self._redeliver[ev.key] = (ev, title, body, scope, attempt + 1, self.mono() + REDELIVER_S)
         await self._record(ev, scope, {"title": title, "reasons": list(ev.reasons), **asdict(result)})
+
+    def _redeliver_due(self, now: float) -> None:
+        """Re-send what reached no channel; drop it once acked or the incident is gone."""
+        for key, (ev, title, body, scope, attempt, due) in list(self._redeliver.items()):
+            if now < due:
+                continue
+            del self._redeliver[key]
+            inc = self.book.incidents.get(key)
+            if not key.startswith("ratio:") and (inc is None or inc.acked_at is not None):
+                continue
+            self._spawn(self._send(ev, title, body, scope, attempt))
 
     async def _record(self, ev: Event, scope: Any, detail: dict[str, Any]) -> bool:
         if scope is None or self.read_only_fn():
             return False
+        if self._records_in_flight >= MAX_RECORDS_IN_FLIGHT:
+            logger.error("risk guard: risk_events write skipped (%d in flight)", self._records_in_flight)
+            return False
+        self._records_in_flight += 1
         try:
-            await self.record_fn(
-                scope,
-                incident_key=ev.key,
-                incident_id=ev.incident_id,
-                kind=ev.kind,
-                severity=ev.severity,
-                detail=detail,
-            )
+            async with asyncio.timeout(DB_TIMEOUT_S):  # a locked table must not hold pool connections
+                await self.record_fn(
+                    scope,
+                    incident_key=ev.key,
+                    incident_id=ev.incident_id,
+                    kind=ev.kind,
+                    severity=ev.severity,
+                    detail=detail,
+                )
         except Exception as exc:  # noqa: BLE001 — record is best-effort; the alert already went out
             logger.error("risk guard: risk_events write failed: %s", type(exc).__name__)
             self.db_ok = False
             return False
+        finally:
+            self._records_in_flight -= 1
         return True
 
     async def ack(self, key: str) -> str:
-        """Persist the ack, then apply it. ``ok`` | ``unknown`` | ``unavailable`` (no DB: alerts go on)."""
+        """Persist the ack, then apply it. ``ok`` | ``unknown`` | ``unavailable`` (no DB: alerts go on)
+        | ``changed`` (the incident rose or was replaced during the write: not applied, ack again)."""
         inc = self.book.incidents.get(key)
         if inc is None:
             return "unknown"
-        ev = Event(key, "ack", inc.severity, inc.reasons, inc.incident_id)
+        iid, severity = inc.incident_id, inc.severity
+        ev = Event(key, "ack", severity, inc.reasons, iid)
         if not await self._record(ev, self.scope_fn(), {"reasons": list(inc.reasons)}):
             return "unavailable"
+        cur = self.book.incidents.get(key)
+        if cur is None or cur.incident_id != iid or cur.severity > severity:
+            return "changed"
         self.book.ack(key, self.mono())
+        self._redeliver.pop(key, None)
         return "ok"
 
     async def drain(self) -> None:
@@ -485,6 +533,10 @@ def _x(v: float | None) -> str:
 
 def _usd(v: float | None) -> str:
     return "n/a" if v is None else f"${v:,.0f}"
+
+
+def _rth(s: SourceState) -> bool:
+    return (s.window.session or "").startswith("rth:")
 
 
 async def run_loop(guard: RiskGuard, *, tick_s: float = TICK_S) -> None:

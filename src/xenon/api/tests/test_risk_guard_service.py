@@ -5,8 +5,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from xenon.api.services.risk_guard import service as rg_service
 from xenon.api.services.risk_guard.account import DrawdownBasis
-from xenon.api.services.risk_guard.incidents import Thresholds
+from xenon.api.services.risk_guard.incidents import CRASH, Event, Thresholds
 from xenon.api.services.risk_guard.notify import SendResult
 from xenon.api.services.risk_guard.service import RiskGuard, in_watch_window, priority
 from xenon.api.services.risk_guard.sources import Quote
@@ -336,3 +337,92 @@ async def test_slow_basis_keeps_the_snapshot(monkeypatch):
     g.basis_fn = slow_basis
     await asyncio.wait_for(_run(g, clock, 2), timeout=2)
     assert g.db_ok and g.snapshot is not None and "DB_DOWN" not in g.health and g.basis is None
+
+
+# ── review fixes (Astra, PR #268) ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_ack_not_applied_when_the_incident_rises_during_the_write():
+    clock = Clock()
+    g, n, _ = _guard(clock)
+    await _run(g, clock, 1800)
+    await _run(g, clock, 5, fall=lambda t: -0.016)  # FAST
+    gate, record = asyncio.Event(), g.record_fn
+
+    async def slow(scope, **kw):
+        if kw["kind"] == "ack":
+            await gate.wait()
+        await record(scope, **kw)
+
+    g.record_fn = slow
+    task = asyncio.create_task(g.ack("market"))
+    await asyncio.sleep(0)
+    g.feed.prices = {"SPX": 7000.0 * 0.96, "SPY": 700.0 * 0.96}  # day -4 %: CRASH
+    await g.tick()
+    gate.set()
+    assert await task == "changed"
+    inc = g.book.incidents["market"]
+    assert inc.severity == CRASH and inc.acked_at is None
+
+
+@pytest.mark.asyncio
+async def test_one_shot_alert_that_reached_no_channel_is_redelivered():
+    clock = Clock()
+    g, n, _ = _guard(clock)
+    fails = [2]
+
+    async def send(title, body, priority, tags=(), today=None):
+        n.sent.append((title, body, priority))
+        if fails[0]:
+            fails[0] -= 1
+            return SendResult("failed", "off")
+        return SendResult("sent", "off")
+
+    g.notifier.send = send
+    await _run(g, clock, 900)
+    for _ in range(5):
+        await _run(g, clock, 31, fall=lambda t: -0.008)  # 15 m -0.8 %: WATCH, sent once
+    assert len([s for s in n.sent if s[0].startswith("WATCH")]) == 3  # failed, failed, sent
+    assert g._redeliver == {}
+
+
+@pytest.mark.asyncio
+async def test_session_high_does_not_carry_into_the_next_day():
+    clock = Clock()
+    g, _, _ = _guard(clock)  # key level 6950
+    await _run(g, clock, 5)  # SPX 7000 on Monday
+    clock.t += 86400  # Tuesday, same time: the cash index prints again from 6900
+    g.feed.prices = {"SPX": 6900.0, "SPY": 690.0}
+    await _run(g, clock, 3)
+    assert g.inputs.levels_broken == ()
+
+
+@pytest.mark.asyncio
+async def test_failed_drawdown_basis_is_blind():
+    clock = Clock()
+    g, n, _ = _guard(clock)
+
+    async def boom(_scope, _today):
+        raise OSError("nav_history down")
+
+    g.basis_fn = boom
+    await _run(g, clock, 2)
+    assert "BASIS_UNAVAILABLE" in g.health
+    assert any("BLIND BASIS_UNAVAILABLE" in s[0] for s in n.sent)
+
+
+@pytest.mark.asyncio
+async def test_event_write_is_bounded_and_capped(monkeypatch):
+    monkeypatch.setattr(rg_service, "DB_TIMEOUT_S", 0.05)
+    g, _, _ = _guard(Clock())
+
+    async def hang(_scope, **_kw):
+        await asyncio.sleep(10)
+
+    g.record_fn = hang
+    ev = Event("market", "open", 2, (), "market#1")
+    assert await asyncio.wait_for(g._record(ev, LIVE, {}), 1) is False
+    assert g._records_in_flight == 0
+    g._records_in_flight = rg_service.MAX_RECORDS_IN_FLIGHT
+    assert await g._record(ev, LIVE, {}) is False

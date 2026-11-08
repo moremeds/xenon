@@ -34,6 +34,7 @@ STALE_S = 20.0
 SKEW_S = 5.0
 DIVERGENCE = 0.003  # 0.3 pp on the 5 m return
 DIVERGENCE_WINDOW_S = 300
+DATA_LOST_CODE = 1101  # IB: connectivity restored, market data lost
 # Optional single-source indexes (``XENON_RISK_WATCH_SYMBOLS``) -> IB exchange.
 # Verified with reqContractDetails on the live gateway, 2026-11-08.
 EXTRA_INDEX_EXCHANGE = {"NDX": "NASDAQ", "RUT": "RUSSELL", "DJX": "CBOE"}
@@ -149,6 +150,7 @@ class IBQuoteFeed:
         self._contracts: dict[str, Any] = {}
         self.last_error: str | None = None
         self._reconnect_at: float | None = None
+        self._resubscribed_at = 0.0
 
     def _contract(self, symbol: str) -> Any:
         from ib_async import Index, Stock
@@ -162,6 +164,14 @@ class IBQuoteFeed:
         ib = client.ib
         if client is not self._client:
             self._client, self._contracts = client, {}
+        lost_at = getattr(client, "readiness_event_at", 0.0)
+        if getattr(client, "readiness_code", None) == DATA_LOST_CODE and lost_at > self._resubscribed_at:
+            # 1101: connectivity restored, market data lost. The socket and the
+            # Ticker objects survive, so ib.ticker() alone never notices.
+            self._resubscribed_at = lost_at
+            for contract in self._contracts.values():
+                ib.cancelMktData(contract)
+            self._contracts = {}
         wanted = self.SYMBOLS + tuple(s for s in extra if s not in self.SYMBOLS)
         for sym in [s for s in self._contracts if s not in wanted]:
             ib.cancelMktData(self._contracts.pop(sym))

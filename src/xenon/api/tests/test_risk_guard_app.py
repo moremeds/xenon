@@ -93,7 +93,11 @@ class FakeGuard:
 
 @pytest.mark.parametrize(
     ("ack", "status", "code"),
-    [("unknown", 404, "RISK_INCIDENT_UNKNOWN"), ("unavailable", 503, "RISK_ACK_UNAVAILABLE")],
+    [
+        ("unknown", 404, "RISK_INCIDENT_UNKNOWN"),
+        ("unavailable", 503, "RISK_ACK_UNAVAILABLE"),
+        ("changed", 409, "RISK_INCIDENT_CHANGED"),
+    ],
 )
 def test_ack_refusals_have_top_level_reason_code(state, ack, status, code):
     state.risk_guard = FakeGuard(ack)

@@ -174,6 +174,17 @@ def test_ib_feed_extra_indexes_one_new_per_read_and_cancel_on_removal():
     assert c.ib.cancelled == ["NDX"] and "NDX" not in feed._contracts
 
 
+def test_ib_feed_resubscribes_once_after_data_lost_1101():
+    from xenon.api.services.risk_guard.sources import IBQuoteFeed
+
+    feed, c = IBQuoteFeed(pool=None), _Client()
+    feed._read(c)
+    c.readiness_code, c.readiness_event_at = 1101, 1000.0  # socket kept, market data lost
+    feed._read(c)
+    feed._read(c)
+    assert c.ib.cancelled == ["SPX", "SPY"] and c.ib.req == ["SPX", "SPY", "SPX", "SPY"]
+
+
 @pytest.mark.asyncio
 async def test_ib_feed_retries_a_down_data_role_at_most_every_30s(monkeypatch):
     """The pool reconnects only inside acquire: a down role gets one bounded

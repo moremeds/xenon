@@ -8,6 +8,7 @@ Both need the internal token (no API key lists ``/risk``).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter
@@ -44,7 +45,8 @@ async def risk_state():
     scope = resolve_scope(server.app.state)[0]
     if scope is not None:
         try:
-            events = await recent_events(get_engine(), scope, limit=20)
+            async with asyncio.timeout(5):
+                events = await recent_events(get_engine(), scope, limit=20)
         except Exception as exc:  # noqa: BLE001 — the live state is still useful
             logger.warning("risk events read failed: %s", type(exc).__name__)
     return {**state, "events": events}
@@ -62,4 +64,8 @@ async def risk_ack(key: str):
         return _refusal(404, "RISK_INCIDENT_UNKNOWN", f"no open incident {key!r}")
     if result == "unavailable":
         return _refusal(503, "RISK_ACK_UNAVAILABLE", "ack not recorded (database); alerts continue")
+    if result == "changed":
+        return _refusal(
+            409, "RISK_INCIDENT_CHANGED", f"incident {key!r} rose or was replaced during the ack; ack again"
+        )
     return {"key": key, "acked": True}

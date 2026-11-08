@@ -37,7 +37,9 @@ A FastAPI lifespan task ticks once per second:
    `FEED_DIVERGENCE` (5 m returns differ > 0.3 pp), `OWNER_HALTED`,
    `DATA_ROLE_DOWN`, `UPSTREAM_LOST` (1100/2110), `SCOPE_UNRESOLVED`,
    `DB_DOWN` (read failed or > 5 s), `SNAPSHOT_STALE` (> 120 s in RTH),
-   `ACCOUNT_UNREADABLE`, `GUARD_ERROR`. Stale feeds count from 09:31 ET
+   `BASIS_UNAVAILABLE` (the drawdown basis read failed: drawdown alerts are
+   blind), `ACCOUNT_UNREADABLE`, `GUARD_ERROR`. After IB 1101 (connectivity
+   restored, market data lost) the guard re-subscribes its lines once. Stale feeds count from 09:31 ET
    (the cash index first prints at the open). A down data role is retried
    every 30 s (the pool reconnects only inside `acquire`). System causes alarm only on a
    trading day from 09:00 ET to the close.
@@ -51,7 +53,11 @@ A FastAPI lifespan task ticks once per second:
 
 Every send goes to ntfy (push) and Resend (email) at once, then is recorded
 in `xenon.risk_events` (skipped under `XENON_READ_ONLY=1`). A failed DB write
-never blocks the alert. Paper / test scopes prefix titles with `[TEST]`.
+never blocks the alert; each write has a 5 s deadline and at most 4 run at
+once (more are skipped and logged), so a locked table cannot drain the DB
+pool. A send that reached no channel (a channel failed) is retried every 30 s,
+up to 10 times, until a newer send for the same key goes out or the incident
+is acked. Paper / test scopes prefix titles with `[TEST]`.
 
 ## Enable
 
@@ -97,8 +103,9 @@ With no channel configured the task still runs and logs an ERROR at start.
 - Banner on every workspace page (`RiskGuardBanner`): one row per open
   incident with **ACK**.
 - API: `POST /risk/incidents/{key}/ack` (internal token; keys `market` or
-  `health:<CAUSE>`). 503 `RISK_ACK_UNAVAILABLE` = the ack could not be
-  recorded, so alerts continue. 403 `READ_ONLY_MODE` under `XENON_READ_ONLY`.
+  `health:<CAUSE>`, `market:<SYM>`). 503 `RISK_ACK_UNAVAILABLE` = the ack could not be
+  recorded, so alerts continue. 409 `RISK_INCIDENT_CHANGED` = the incident
+  rose or was replaced while the ack was written: not applied, ack again. 403 `READ_ONLY_MODE` under `XENON_READ_ONLY`.
 - State: `GET /risk/state` (live state + last 20 `risk_events`), `/health`
   `risk_guard` block (no account values).
 
