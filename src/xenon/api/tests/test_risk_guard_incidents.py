@@ -111,6 +111,47 @@ def test_worsening_after_ack_new_low():
     assert _step(book, 42, _m(day=-0.021, session_low=99.75, cushion=0.15)) == []
 
 
+def test_return_to_crash_after_ack_and_drop_resends():
+    book = IncidentBook(TH)
+    _step(book, 0, _m(day=-0.031))
+    book.ack("market", 1)
+    _step(book, 5, _m(day=-0.021))  # drops to FAST, incident stays open
+    ev = _step(book, 40, _m(day=-0.031))
+    assert [e.kind for e in ev] == ["rise"]
+
+
+def test_re_rise_flapping_is_rate_limited():
+    book = IncidentBook(TH)
+    _step(book, 0, _m(day=-0.031))
+    book.ack("market", 1)
+    _step(book, 2, _m(day=-0.029))
+    assert _step(book, 3, _m(day=-0.031)) == []  # re-rise inside 30 s of the last send
+    assert [e.kind for e in _step(book, 30, _m(day=-0.031))] == ["rise"]
+
+
+def test_first_rise_is_immediate():
+    book = IncidentBook(TH)
+    _step(book, 0, _m(day=-0.011))
+    assert [e.kind for e in _step(book, 1, _m(day=-0.021))] == ["rise"]
+
+
+def test_worsening_reference_seeded_when_missing_at_ack():
+    book = IncidentBook(TH)
+    _step(book, 0, _m(day=-0.031, cushion=None))
+    book.ack("market", 1)
+    assert _step(book, 2, _m(day=-0.031, cushion=0.15)) == []  # first value seeds the reference
+    assert [e.kind for e in _step(book, 3, _m(day=-0.031, cushion=0.05))] == ["worsening"]
+
+
+def test_all_inputs_unavailable_holds_the_incident():
+    book = IncidentBook(TH)
+    _step(book, 0, _m(cushion=0.07))
+    book.ack("market", 1)
+    _step(book, 10)  # no data at all: hold, do not start the clear timer
+    _step(book, 400)
+    assert "market" in book.incidents
+
+
 def test_worsening_after_ack_cushion_and_strike():
     book = IncidentBook(TH)
     _step(book, 0, _m(day=-0.021, cushion=0.15, shorts_crossed=0))
@@ -124,10 +165,10 @@ def test_incident_closes_after_5_min_clear_then_reopens():
     book = IncidentBook(TH)
     _step(book, 0, _m(day=-0.021))
     book.ack("market", 1)
-    assert _step(book, 10) == []
-    assert _step(book, 309) == []
+    assert _step(book, 10, _m(day=-0.001, cushion=0.5)) == []
+    assert _step(book, 309, _m(day=-0.001, cushion=0.5)) == []
     assert "market" in book.incidents
-    _step(book, 310)
+    _step(book, 310, _m(day=-0.001, cushion=0.5))
     assert "market" not in book.incidents
     assert [e.kind for e in _step(book, 311, _m(day=-0.021))] == ["open"]
 
@@ -136,7 +177,7 @@ def test_short_clear_keeps_incident_and_ack():
     book = IncidentBook(TH)
     _step(book, 0, _m(day=-0.021))
     book.ack("market", 1)
-    _step(book, 10)
+    _step(book, 10, _m(day=-0.001, cushion=0.5))
     assert _step(book, 100, _m(day=-0.021)) == []
 
 
@@ -177,16 +218,16 @@ def test_ack_unknown_key_is_false():
 
 def test_leverage_cross_and_step():
     a = RatioAlarm("leverage", TH.leverage_levels, TH.leverage_step, higher_is_worse=True)
-    assert a.update(0.4) is None
-    ev = a.update(0.51)
+    assert a.update(0.4, now=0) is None
+    ev = a.update(0.51, now=1)
     assert ev.kind == "cross" and ev.severity == 1
-    assert a.update(0.74) is None
-    assert a.update(0.76).severity == 2
-    assert a.update(1.2).severity == 3
-    assert a.update(1.44) is None
-    assert a.update(1.45).kind == "step"  # +0.25 vs last send 1.2
-    assert a.update(0.9).kind == "cross"  # improves a level: also sent
-    assert a.update(None) is None
+    assert a.update(0.74, now=2) is None
+    assert a.update(0.76, now=3).severity == 2
+    assert a.update(1.2, now=4).severity == 3
+    assert a.update(1.44, now=5) is None
+    assert a.update(1.45, now=6).kind == "step"  # +0.25 vs last send 1.2
+    assert a.update(0.9, now=1000).kind == "cross"  # improves a level: also sent
+    assert a.update(None, now=1001) is None
 
 
 def test_drawdown_cross_and_step():
@@ -196,6 +237,14 @@ def test_drawdown_cross_and_step():
     assert a.update(-0.069) is None
     assert a.update(-0.07).kind == "step"
     assert a.update(-0.16).severity == 3
+
+
+def test_ratio_improving_flap_is_rate_limited():
+    a = RatioAlarm("leverage", TH.leverage_levels, TH.leverage_step, higher_is_worse=True)
+    assert a.update(1.01, now=0).kind == "cross"
+    assert a.update(0.99, now=10) is None  # improvement within 10 min of a send
+    assert a.update(1.01, now=20).kind == "cross"  # worsening cross always sends
+    assert a.update(0.99, now=700).kind == "cross"
 
 
 def test_ratio_standing_at_boot_sends_once():

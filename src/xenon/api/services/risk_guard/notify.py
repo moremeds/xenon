@@ -104,7 +104,7 @@ class Notifier:
     async def _push(self, title: str, body: str, priority: int, tags: tuple[str, ...]) -> str:
         headers = {"X-Title": title.encode("ascii", "replace").decode(), "X-Priority": str(priority)}
         if tags:
-            headers["X-Tags"] = ",".join(tags)
+            headers["X-Tags"] = ",".join(tags).encode("ascii", "replace").decode()
         if self.cfg.ntfy_token:
             headers["Authorization"] = f"Bearer {self.cfg.ntfy_token}"
         return await self._post("ntfy", self.cfg.ntfy_url, content=body.encode(), headers=headers)
@@ -117,10 +117,10 @@ class Notifier:
     async def _post(self, channel: str, url: str, **kw) -> str:
         try:
             resp = await self._client.post(url, timeout=TIMEOUT_S, **kw)
-        except httpx.HTTPError as exc:
+        except Exception as exc:  # a send never raises; the type name carries no token
             logger.error("risk_guard %s send failed: %s", channel, type(exc).__name__)
             return "failed"
-        if resp.status_code >= 400:
+        if not 200 <= resp.status_code < 300:
             logger.error("risk_guard %s send failed: HTTP %s", channel, resp.status_code)
             return "failed"
         return "sent"

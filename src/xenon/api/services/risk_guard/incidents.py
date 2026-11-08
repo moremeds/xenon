@@ -9,7 +9,13 @@ Cadence. WATCH sends once. FAST, CRASH and every health incident re-send every
 ``repeat_s`` until acked. After an ack the incident sends only on a severity
 rise (which re-arms the repeats) or on worsening: a session low >= 0.25% under
 the low at the last send, a cushion >= 2 pp lower, or one more short strike
-crossed. An incident closes after its condition stays clear for ``clear_s``.
+crossed. A rise to a tier never sent before is immediate; a return to a tier
+already sent (after a drop) waits ``repeat_s`` since the last send, so a value
+flapping on a threshold sends at most every ``repeat_s``. A missing reference
+value is seeded by the first value seen after the ack. An incident closes
+after its condition stays clear for ``clear_s``; a market evaluation with no
+available input at all holds the incident (missing data is a BLIND cause,
+never "clear").
 
 Leverage and drawdown are standing conditions (``RatioAlarm``): they send on a
 level crossing in either direction and on each further step of worsening.
@@ -17,7 +23,7 @@ level crossing in either direction and on each further step of worsening.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time
 
 from xenon.utils import market_calendar
@@ -116,8 +122,9 @@ class Incident:
     key: str
     incident_id: str
     severity: int
-    sent_severity: int
+    sent_severity: int  # tier of the last send; drops with the tier
     last_sent_at: float
+    max_sent: int = 0
     reasons: tuple[str, ...] = ()
     acked_at: float | None = None
     clear_since: float | None = None
@@ -141,7 +148,10 @@ class IncidentBook:
         """Advance every incident to ``now``; return the notifications to send."""
         events: list[Event] = []
         tier, reasons = market
-        self._advance("market", now, tier, tuple(reasons), inputs, repeats=tier >= FAST, events=events)
+        if tier or _any_input(inputs):
+            self._advance("market", now, tier, tuple(reasons), inputs, repeats=tier >= FAST, events=events)
+        elif "market" in self.incidents:
+            self.incidents["market"].clear_since = None
         for cause, detail in health.items():
             self._advance(f"health:{cause}", now, CRASH, (detail,) if detail else (), None, repeats=True, events=events)
         for key in [k for k in self.incidents if k.startswith("health:") and k[7:] not in health]:
@@ -163,21 +173,29 @@ class IncidentBook:
         inc = self.incidents.get(key)
         if inc is None:
             self._seq += 1
-            inc = Incident(key, f"{key}#{self._seq}", severity, severity, now, reasons, ref=inputs, last_inputs=inputs)
+            inc = Incident(
+                key, f"{key}#{self._seq}", severity, severity, now, severity, reasons, ref=inputs, last_inputs=inputs
+            )
             self.incidents[key] = inc
             events.append(Event(key, "open", severity, reasons, inc.incident_id))
             return
         inc.clear_since, inc.severity, inc.reasons, inc.last_inputs = None, severity, reasons, inputs
+        if inputs is not None and inc.ref is not None:
+            inc.ref = _seed(inc.ref, inputs)
+        if severity < inc.sent_severity:
+            inc.sent_severity = severity
         kind = None
         if severity > inc.sent_severity:
-            kind, inc.acked_at = "rise", None
+            if severity > inc.max_sent or now - inc.last_sent_at >= self.th.repeat_s:
+                kind, inc.acked_at = "rise", None
         elif inc.acked_at is None:
             if repeats and now - inc.last_sent_at >= self.th.repeat_s:
                 kind = "repeat"
         elif inputs is not None and self._worse(inputs, inc.ref):
             kind = "worsening"
         if kind:
-            inc.sent_severity, inc.last_sent_at, inc.ref = max(inc.sent_severity, severity), now, inputs
+            inc.sent_severity, inc.last_sent_at, inc.ref = severity, now, inputs
+            inc.max_sent = max(inc.max_sent, severity)
             events.append(Event(key, kind, severity, reasons, inc.incident_id))
 
     def _clear(self, key: str, now: float) -> None:
@@ -201,37 +219,58 @@ class IncidentBook:
         return m.shorts_crossed > ref.shorts_crossed
 
 
+def _any_input(m: MarketInputs) -> bool:
+    return any(
+        v is not None for v in (m.ret_15m, m.ret_30m, m.ret_60m, m.day, m.min_short_distance, m.cushion)
+    ) or bool(m.levels_broken or m.long_itm)
+
+
+def _seed(ref: MarketInputs, now: MarketInputs) -> MarketInputs:
+    """Fill reference values that were missing at the ack with the first value seen."""
+    fills = {f: getattr(now, f) for f in ("session_low", "cushion") if getattr(ref, f) is None}
+    return replace(ref, **fills) if any(v is not None for v in fills.values()) else ref
+
+
 @dataclass
 class RatioAlarm:
-    """Standing ratio (leverage or drawdown): send on level change and per step worse."""
+    """Standing ratio (leverage or drawdown): send on level change and per step worse.
+
+    An improving level change within ``quiet_s`` of the last send is not sent
+    (a ratio hovering on a threshold); a worsening one always is.
+    """
 
     name: str
     levels: tuple[float, ...]
     step: float
     higher_is_worse: bool
+    quiet_s: float = 600.0
     level: int | None = None
     last_sent_value: float | None = None
+    last_sent_at: float | None = None
 
     def level_of(self, value: float) -> int:
         if self.higher_is_worse:
             return sum(value > x for x in self.levels)
         return sum(value <= x for x in self.levels)
 
-    def update(self, value: float | None) -> Event | None:
+    def update(self, value: float | None, now: float = 0.0) -> Event | None:
         if value is None:
             return None
         level = self.level_of(value)
         prev, self.level = self.level, level
         kind = None
-        if (prev is None and level > 0) or (prev is not None and level != prev):
+        if (prev is None and level > 0) or (prev is not None and level > prev):
             kind = "cross"
+        elif prev is not None and level < prev:
+            quiet = self.last_sent_at is not None and now - self.last_sent_at < self.quiet_s
+            kind = None if quiet else "cross"
         elif level > 0 and self.last_sent_value is not None:
             delta = value - self.last_sent_value if self.higher_is_worse else self.last_sent_value - value
             if delta >= self.step - 1e-12:
                 kind = "step"
         if kind is None:
             return None
-        self.last_sent_value = value
+        self.last_sent_value, self.last_sent_at = value, now
         return Event(f"ratio:{self.name}", kind, level, (f"{self.name} {value:.4g}",), f"ratio:{self.name}")
 
 

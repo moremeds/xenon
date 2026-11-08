@@ -76,6 +76,25 @@ async def test_failures_never_raise_and_hide_tokens(caplog):
 
 
 @pytest.mark.asyncio
+async def test_redirect_is_not_sent():
+    async with _client(lambda req: httpx.Response(301, headers={"Location": "https://elsewhere"})) as c:
+        r = await Notifier(CFG, c).send("t", "b", 3)
+    assert (r.push, r.email) == ("failed", "failed")
+
+
+@pytest.mark.asyncio
+async def test_unexpected_error_in_one_channel_keeps_the_other():
+    def handler(req):
+        if req.url.host == "ntfy.example":
+            raise RuntimeError("bug")
+        return httpx.Response(200)
+
+    async with _client(handler) as c:
+        r = await Notifier(CFG, c).send("t", "b", 3, tags=("tag-é",))
+    assert (r.push, r.email) == ("failed", "sent")
+
+
+@pytest.mark.asyncio
 async def test_failed_email_does_not_use_cap():
     async with _client(lambda req: httpx.Response(500)) as c:
         n = Notifier(CFG, c)
