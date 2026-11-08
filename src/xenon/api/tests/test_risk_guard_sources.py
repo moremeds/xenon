@@ -112,7 +112,11 @@ class _Ticker:
 
 class _IB:
     def __init__(self):
-        self.req, self.tickers = [], {}
+        self.req, self.tickers, self.cancelled = [], {}, []
+
+    def cancelMktData(self, contract):
+        self.cancelled.append(contract.symbol)
+        self.tickers.pop(contract.symbol, None)
 
     def ticker(self, contract):
         return self.tickers.get(contract.symbol)
@@ -157,6 +161,19 @@ def test_ib_feed_resubscribes_on_new_client_or_dropped_ticker():
     assert c2.ib.req == ["SPX", "SPY"]
 
 
+def test_ib_feed_extra_indexes_one_new_per_read_and_cancel_on_removal():
+    from xenon.api.services.risk_guard.sources import IBQuoteFeed
+
+    feed, c = IBQuoteFeed(pool=None), _Client()
+    out = feed._read(c, ("NDX", "RUT"))
+    assert c.ib.req == ["SPX", "SPY", "NDX"] and "RUT" not in out  # one new extra per read
+    out = feed._read(c, ("NDX", "RUT"))
+    assert c.ib.req == ["SPX", "SPY", "NDX", "RUT"] and set(out) == {"SPX", "SPY", "NDX", "RUT"}
+    assert (feed._contracts["NDX"].exchange, feed._contracts["RUT"].exchange) == ("NASDAQ", "RUSSELL")
+    feed._read(c, ("RUT",))
+    assert c.ib.cancelled == ["NDX"] and "NDX" not in feed._contracts
+
+
 @pytest.mark.asyncio
 async def test_ib_feed_retries_a_down_data_role_at_most_every_30s(monkeypatch):
     """The pool reconnects only inside acquire: a down role gets one bounded
@@ -166,7 +183,7 @@ async def test_ib_feed_retries_a_down_data_role_at_most_every_30s(monkeypatch):
 
     calls = []
 
-    async def fake_call(pool, fn, timeout=None):
+    async def fake_call(pool, fn, *args, timeout=None):
         calls.append(timeout)
         raise ConnectionError("IB pool: data is not connected")
 

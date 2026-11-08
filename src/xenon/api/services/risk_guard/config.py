@@ -47,3 +47,7 @@ def thresholds() -> Thresholds:
 
 def key_levels() -> tuple[float, ...]:
     return tuple(runtime_settings.effective("XENON_RISK_KEY_LEVELS") or ())
+
+
+def watch_symbols() -> tuple[str, ...]:
+    return tuple(runtime_settings.effective("XENON_RISK_WATCH_SYMBOLS") or ())

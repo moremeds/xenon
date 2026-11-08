@@ -28,6 +28,7 @@ from xenon.api.services.risk_guard import config as rg_config
 from xenon.api.services.risk_guard.account import AccountView, DrawdownBasis, account_view, drawdown
 from xenon.api.services.risk_guard.incidents import (
     CRASH,
+    FAST,
     TIER_NAMES,
     Event,
     IncidentBook,
@@ -86,6 +87,7 @@ class RiskGuard:
         enabled_fn: Callable[[], bool] = rg_config.enabled,
         thresholds_fn: Callable[[], Thresholds] = rg_config.thresholds,
         levels_fn: Callable[[], tuple[float, ...]] = rg_config.key_levels,
+        extra_fn: Callable[[], tuple[str, ...]] = rg_config.watch_symbols,
         mono: Callable[[], float] = time.monotonic,
         wall: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
@@ -93,8 +95,10 @@ class RiskGuard:
         self.snapshot_fn, self.basis_fn, self.record_fn, self.health_fn = snapshot_fn, basis_fn, record_fn, health_fn
         self.heartbeat_fn, self.read_only_fn, self.enabled_fn = heartbeat_fn, read_only_fn, enabled_fn
         self.thresholds_fn, self.levels_fn, self.mono, self.wall = thresholds_fn, levels_fn, mono, wall
+        self.extra_fn = extra_fn
         th = Thresholds()
         self.sources = {"SPX": SourceState("SPX"), "SPY": SourceState("SPY")}
+        self.extra: dict[str, SourceState] = {}  # single-source indexes, own incidents, no BLIND
         self.book = IncidentBook(th)
         self.leverage = RatioAlarm("leverage", th.leverage_levels, th.leverage_step, higher_is_worse=True)
         self.drawdown = RatioAlarm("drawdown", th.drawdown_levels, th.drawdown_step, higher_is_worse=False)
@@ -130,10 +134,12 @@ class RiskGuard:
             eq_session = market_calendar.us_equity_session(wall)
         except market_calendar.CalendarYearMissing:
             eq_session = "closed"
-        quotes: dict[str, Quote] = await self.feed.read()
-        spx_session = "rth" if rth else "closed"  # the cash index prints in RTH only
-        for name, src in self.sources.items():
-            src.observe(now, wall, quotes.get(name), spx_session if name == "SPX" else eq_session)
+        extra = tuple(self.extra_fn())
+        self.extra = {s: self.extra.get(s) or SourceState(s) for s in extra}
+        quotes: dict[str, Quote] = await self.feed.read(extra)
+        spx_session = "rth" if rth else "closed"  # cash indexes print in RTH only
+        for name, src in {**self.sources, **self.extra}.items():
+            src.observe(now, wall, quotes.get(name), eq_session if name == "SPY" else spx_session)
 
         scope = self.scope_fn()
         events: list[Event] = []
@@ -163,7 +169,12 @@ class RiskGuard:
 
         self.inputs = self._market_inputs(now, blind=bool(health))
         self.tier, reasons = market_tier(self.inputs, th)
-        events = self.book.step(now, (self.tier, reasons), self.inputs, health) + events
+        extras = {}
+        for sym, src in self.extra.items():
+            m = self._single_inputs(src, now)
+            t, r = market_tier(m, th)
+            extras[sym] = (min(t, FAST), r, m)  # one source, no cross-check: FAST at most
+        events = self.book.step(now, (self.tier, reasons), self.inputs, health, extras) + events
 
         if self.account is not None and daily_line_due(et, self.daily_sent):
             self.daily_sent = et.date()
@@ -228,6 +239,18 @@ class RiskGuard:
 
     def _drawdown(self, view: AccountView | None) -> float | None:
         return drawdown(view.nlv if view else None, self.basis.peak if self.basis else None)
+
+    @staticmethod
+    def _single_inputs(s: SourceState, now: float) -> MarketInputs:
+        if not s.fresh(now):
+            return MarketInputs()
+        return MarketInputs(
+            ret_15m=s.window.ret(now, WINDOWS["15m"]),
+            ret_30m=s.window.ret(now, WINDOWS["30m"]),
+            ret_60m=s.window.ret(now, WINDOWS["60m"]),
+            day=day_return(s.last, s.prior_close) if s.window.session == "rth" else None,
+            session_low=s.window.low,
+        )
 
     def _market_inputs(self, now: float, *, blind: bool) -> MarketInputs:
         fresh = [s for s in self.sources.values() if s.fresh(now)]
@@ -330,11 +353,12 @@ class RiskGuard:
         elif ev.key.startswith("health:"):
             title = f"{test}BLIND {ev.key[7:]}: stops and alerts may be blind"
         else:
-            title = f"{test}{TIER_NAMES[ev.severity]} SPX " + (", ".join(ev.reasons[:2]) or "")
+            sym = ev.key[7:] if ev.key.startswith("market:") else "SPX"
+            title = f"{test}{TIER_NAMES[ev.severity]} {sym} " + (", ".join(ev.reasons[:2]) or "")
         lines = [f"{title.removeprefix(test)}  [{ev.kind} {ev.incident_id}]"]
         if ev.reasons:
             lines.append("Why: " + "; ".join(ev.reasons))
-        for s in self.sources.values():
+        for s in {**self.sources, **self.extra}.values():
             age = s.age(now)
             lines.append(
                 f"{s.name} {s.last if s.last is not None else '---'} (tick age {'never' if age is None else f'{age:.0f} s'})"
@@ -395,7 +419,7 @@ class RiskGuard:
                 {
                     "key": i.key,
                     "incident_id": i.incident_id,
-                    "severity": TIER_NAMES.get(i.severity, str(i.severity)) if i.key == "market" else "BLIND",
+                    "severity": "BLIND" if i.key.startswith("health:") else TIER_NAMES.get(i.severity, str(i.severity)),
                     "reasons": list(i.reasons),
                     "acked": i.acked_at is not None,
                     "clearing": i.clear_since is not None,
@@ -413,7 +437,7 @@ class RiskGuard:
                     "returns": {k: s.window.ret(now, w) for k, w in WINDOWS.items()},
                     "day": day_return(s.last, s.prior_close),
                 }
-                for n, s in self.sources.items()
+                for n, s in {**self.sources, **self.extra}.items()
             },
             "account": None
             if a is None

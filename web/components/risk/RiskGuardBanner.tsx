@@ -106,7 +106,11 @@ export default function RiskGuardBanner() {
           data-testid={`risk-incident-${i.key}`}
         >
           <span className="risk-guard-incident__label">
-            {isBlind(i) ? `BLIND · ${i.key.slice(7)}` : i.severity}
+            {isBlind(i)
+              ? `BLIND · ${i.key.slice(7)}`
+              : i.key.startsWith("market:")
+                ? `${i.severity} · ${i.key.slice(7)}`
+                : i.severity}
           </span>
           <span className="risk-guard-incident__text">
             {i.reasons.join("; ") || "no detail"}

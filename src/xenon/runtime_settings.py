@@ -183,6 +183,13 @@ def _price_levels(key: str, value: Any) -> list[float]:
     return sorted(set(value), reverse=True)
 
 
+def _watch_symbols(key: str, value: Any) -> list[str]:
+    allowed = importlib.import_module("xenon.api.services.risk_guard.sources").EXTRA_INDEX_EXCHANGE
+    if not isinstance(value, list) or not all(isinstance(x, str) and x in allowed for x in value):
+        raise _invalid(key, f"must be a list over {sorted(allowed)}")
+    return sorted(set(value))
+
+
 def _turns_off(old: Any, new: Any) -> bool:
     return bool(old) and not bool(new)
 
@@ -470,6 +477,17 @@ _SETTINGS: tuple[Setting, ...] = (
         default=[],
         env_value=lambda: [],
         consumers=("risk_guard.config.key_levels",),
+    ),
+    Setting(
+        "XENON_RISK_WATCH_SYMBOLS",
+        "tuning",
+        "object",
+        "Extra indexes (NDX, RUT, DJX) with their own speed alerts: one IB line each, single source, FAST at most.",
+        _watch_symbols,
+        label="Tail-risk extra indexes",
+        default=[],
+        env_value=lambda: [],
+        consumers=("risk_guard.config.watch_symbols",),
     ),
     Setting(
         "orders_paused",

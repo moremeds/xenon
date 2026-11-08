@@ -82,6 +82,15 @@ With no channel configured the task still runs and logs an ERROR at start.
   bounds-checked (`risk_guard/config.py::THRESHOLD_BOUNDS`).
 - `XENON_RISK_KEY_LEVELS` — JSON list of SPX levels; breaking one from above
   inside the session raises WATCH.
+- `XENON_RISK_WATCH_SYMBOLS` — JSON list over `NDX`, `RUT`, `DJX` (IB cash
+  indexes NASDAQ / RUSSELL / CBOE, verified with `reqContractDetails`
+  2026-11-08). Each symbol costs one market-data line (shared ~100-line
+  account budget) and gets its own incident `market:<SYM>` (own ack, same
+  speed thresholds, capped at FAST: one source, no cross-check). A stale extra
+  index raises no BLIND. One new symbol is subscribed per tick; a removed one
+  has its line cancelled and its incident clears after `clear_s`. SPX + SPY
+  stay fixed (BLIND causes, key levels and strike distances depend on them).
+  VIX is not offered: a rise is its risk, and that rule is not chosen yet.
 
 ## Ack
 

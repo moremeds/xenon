@@ -34,6 +34,9 @@ STALE_S = 20.0
 SKEW_S = 5.0
 DIVERGENCE = 0.003  # 0.3 pp on the 5 m return
 DIVERGENCE_WINDOW_S = 300
+# Optional single-source indexes (``XENON_RISK_WATCH_SYMBOLS``) -> IB exchange.
+# Verified with reqContractDetails on the live gateway, 2026-11-08.
+EXTRA_INDEX_EXCHANGE = {"NDX": "NASDAQ", "RUT": "RUSSELL", "DJX": "CBOE"}
 
 
 @dataclass(frozen=True)
@@ -126,12 +129,14 @@ def _finite(v: Any) -> float | None:
 
 
 class IBQuoteFeed:
-    """SPX + SPY streaming tickers on the api ``data`` role.
+    """SPX + SPY (+ the configured extra indexes) streaming tickers on the api ``data`` role.
 
     The subscription is re-made whenever the role's client object changes
     (a reconnect builds a new client) or IB drops the ticker. Reads go through
     ``ib_pool.call_data_bounded`` (role worker, deadline, upstream fast-fail),
-    so a wedged gateway costs one bounded read, never a hang.
+    so a wedged gateway costs one bounded read, never a hang. At most one new
+    extra index is qualified per read (the read has a 3 s deadline); an extra
+    no longer wanted has its line cancelled.
     """
 
     SYMBOLS = ("SPX", "SPY")
@@ -148,18 +153,28 @@ class IBQuoteFeed:
     def _contract(self, symbol: str) -> Any:
         from ib_async import Index, Stock
 
-        return Index("SPX", "CBOE", "USD") if symbol == "SPX" else Stock(symbol, "SMART", "USD")
+        if symbol == "SPY":
+            return Stock(symbol, "SMART", "USD")
+        return Index(symbol, EXTRA_INDEX_EXCHANGE.get(symbol, "CBOE"), "USD")
 
-    def _read(self, client: Any) -> dict[str, Quote]:
+    def _read(self, client: Any, extra: tuple[str, ...] = ()) -> dict[str, Quote]:
         """Runs on the data role worker thread."""
         ib = client.ib
         if client is not self._client:
             self._client, self._contracts = client, {}
+        wanted = self.SYMBOLS + tuple(s for s in extra if s not in self.SYMBOLS)
+        for sym in [s for s in self._contracts if s not in wanted]:
+            ib.cancelMktData(self._contracts.pop(sym))
         out: dict[str, Quote] = {}
-        for sym in self.SYMBOLS:
+        new_extra = False
+        for sym in wanted:
             contract = self._contracts.get(sym)
             ticker = ib.ticker(contract) if contract is not None else None
             if ticker is None:
+                if sym not in self.SYMBOLS:
+                    if new_extra:
+                        continue  # next read: keep one read inside TIMEOUT_S
+                    new_extra = True
                 contract = self._contract(sym)
                 ib.qualifyContracts(contract)
                 ticker = ib.reqMktData(contract, "", False, False)
@@ -172,7 +187,7 @@ class IBQuoteFeed:
             )
         return out
 
-    async def read(self) -> dict[str, Quote]:
+    async def read(self, extra: tuple[str, ...] = ()) -> dict[str, Quote]:
         """Quotes, or {} on any failure. A down data role is retried (the pool
         reconnects inside ``acquire``) at most every ``RECONNECT_EVERY_S``: the
         pool has no reconnect loop of its own, so without this a guard alone on
@@ -188,7 +203,7 @@ class IBQuoteFeed:
         from xenon.api.ib_pool import call_data_bounded
 
         try:
-            out = await call_data_bounded(self.pool, self._read, timeout=self.TIMEOUT_S)
+            out = await call_data_bounded(self.pool, self._read, tuple(extra), timeout=self.TIMEOUT_S)
         except Exception as exc:  # noqa: BLE001 — a failed read is a stale source, never a crash
             if self.last_error != type(exc).__name__:
                 logger.warning("risk guard IB read failed: %s", type(exc).__name__)

@@ -33,9 +33,11 @@ class Feed:
     def __init__(self, clock):
         self.clock, self.prices = clock, {"SPX": 7000.0, "SPY": 700.0}
 
-    async def read(self):
-        at = self.clock.wall()
-        return {n: Quote(p, {"SPX": 7000.0, "SPY": 700.0}[n], at, True) for n, p in self.prices.items() if p}
+    async def read(self, extra=()):
+        at, close = self.clock.wall(), {"SPX": 7000.0, "SPY": 700.0, "NDX": 25000.0}
+        return {
+            n: Quote(p, close[n], at, True) for n, p in self.prices.items() if p and n in ("SPX", "SPY", *extra)
+        }
 
 
 class Notifier:
@@ -47,7 +49,7 @@ class Notifier:
         return SendResult("sent", "off")
 
 
-def _guard(clock, *, scope=LIVE, snapshot=None, read_only=False, snapshot_fn=None, health=None):
+def _guard(clock, *, scope=LIVE, snapshot=None, read_only=False, snapshot_fn=None, health=None, extra=()):
     """Default account: a fresh snapshot on every read, ratios quiet, daily line already sent."""
     records, notifier = [], Notifier()
 
@@ -72,6 +74,7 @@ def _guard(clock, *, scope=LIVE, snapshot=None, read_only=False, snapshot_fn=Non
         enabled_fn=lambda: True,
         thresholds_fn=Thresholds,
         levels_fn=lambda: (6950.0,),
+        extra_fn=lambda: extra,
         mono=clock.mono,
         wall=clock.wall,
     )
@@ -117,6 +120,30 @@ async def test_fast_fall_sends_and_repeats_every_30s_then_ack_stops():
     await _run(g, clock, 90, fall=lambda t: -0.016)
     assert len(n.sent) == before
     assert records[-1]["kind"] == "ack"
+
+
+@pytest.mark.asyncio
+async def test_extra_index_own_incident_capped_at_fast_no_blind():
+    clock = Clock()
+    g, n, _ = _guard(clock, extra=("NDX",))
+    g.feed.prices["NDX"] = 25000.0
+    await _run(g, clock, 1800)
+    g.feed.prices["NDX"] = 24000.0  # -4 %: CRASH-level day and 60 m, SPX flat
+    await _run(g, clock, 60)
+    titles = [s[0] for s in n.sent]
+    assert titles and all(t.startswith("FAST NDX ") for t in titles)  # capped, SPX quiet
+    assert [(i["key"], i["severity"]) for i in g.state()["incidents"]] == [("market:NDX", "FAST")]
+    assert "NDX" in g.state()["sources"]
+    assert await g.ack("market:NDX") == "ok"
+    before = len(n.sent)
+    await _run(g, clock, 60)
+    assert len(n.sent) == before
+    g.feed.prices["NDX"] = None  # a stale extra raises no BLIND
+    await _run(g, clock, 40)
+    assert g.health == {}
+    g.extra_fn = lambda: ()  # removed: its incident clears
+    await _run(g, clock, 302)
+    assert "market:NDX" not in g.book.incidents and g.extra == {}
 
 
 @pytest.mark.asyncio

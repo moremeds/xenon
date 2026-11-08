@@ -144,14 +144,23 @@ class IncidentBook:
         market: tuple[int, list[str]],
         inputs: MarketInputs,
         health: dict[str, str],
+        extras: dict[str, tuple[int, list[str], MarketInputs]] | None = None,
     ) -> list[Event]:
-        """Advance every incident to ``now``; return the notifications to send."""
+        """Advance every incident to ``now``; return the notifications to send.
+
+        ``extras``: per extra index, its own ``market:<SYM>`` incident.
+        """
         events: list[Event] = []
-        tier, reasons = market
-        if tier or _any_input(inputs):
-            self._advance("market", now, tier, tuple(reasons), inputs, repeats=tier >= FAST, events=events)
-        elif "market" in self.incidents:
-            self.incidents["market"].clear_since = None
+        extras = extras or {}
+        for key, (tier, reasons), m in [("market", market, inputs)] + [
+            (f"market:{sym}", (t, r), m) for sym, (t, r, m) in extras.items()
+        ]:
+            if tier or _any_input(m):
+                self._advance(key, now, tier, tuple(reasons), m, repeats=tier >= FAST, events=events)
+            elif key in self.incidents:
+                self.incidents[key].clear_since = None
+        for key in [k for k in self.incidents if k.startswith("market:") and k[7:] not in extras]:
+            self._clear(key, now)
         for cause, detail in health.items():
             self._advance(f"health:{cause}", now, CRASH, (detail,) if detail else (), None, repeats=True, events=events)
         for key in [k for k in self.incidents if k.startswith("health:") and k[7:] not in health]:

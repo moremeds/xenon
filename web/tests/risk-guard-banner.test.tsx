@@ -124,6 +124,28 @@ describe("RiskGuardBanner", () => {
     ).toBeTruthy();
   });
 
+  it("labels an extra-index incident with its symbol", async () => {
+    stub({
+      "/api/risk/state": {
+        ok: true,
+        body: {
+          ...state,
+          incidents: [
+            {
+              ...state.incidents[0],
+              key: "market:NDX",
+              reasons: ["30m -1.70%"],
+            },
+          ],
+        },
+      },
+    });
+    render(<RiskGuardBanner />);
+    const row = await screen.findByTestId("risk-incident-market:NDX");
+    expect(row.textContent).toContain("FAST · NDX");
+    expect(row.className).toContain("risk-guard-incident--fast");
+  });
+
   it("renders nothing with no incident, when not running, or when the route fails", async () => {
     for (const r of [
       { ok: true, body: { ...state, incidents: [] } },

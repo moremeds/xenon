@@ -64,3 +64,14 @@ def test_key_levels(monkeypatch):
         rs.validate("XENON_RISK_KEY_LEVELS", [-1])
     monkeypatch.setattr(rs, "override", lambda key: {"XENON_RISK_KEY_LEVELS": levels}.get(key))
     assert config.key_levels() == (7500, 7400.5)
+
+
+def test_watch_symbols(monkeypatch):
+    assert config.watch_symbols() == ()
+    _, syms = rs.validate("XENON_RISK_WATCH_SYMBOLS", ["RUT", "NDX", "RUT"])
+    assert syms == ["NDX", "RUT"]
+    for bad in (["VIX"], ["SPX"], "NDX", [1]):
+        with pytest.raises(rs.SettingError):
+            rs.validate("XENON_RISK_WATCH_SYMBOLS", bad)
+    monkeypatch.setattr(rs, "override", lambda key: {"XENON_RISK_WATCH_SYMBOLS": syms}.get(key))
+    assert config.watch_symbols() == ("NDX", "RUT")
