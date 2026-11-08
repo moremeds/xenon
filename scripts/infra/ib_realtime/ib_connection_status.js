@@ -57,3 +57,11 @@ export function isDepthPermissionError(code, message) {
   if (numeric === 10089 || numeric === 10092) return true;
   return DEPTH_PERMISSION_PATTERN.test(String(message ?? ""));
 }
+
+// Cooldown after the Nth consecutive stale-data reconnect with no tick in
+// between: 2 min, doubling, capped at 30 min. A reconnect does not cure an
+// upstream that sends nothing (2026-11-03..05: 166 reconnects/day).
+export function staleRestartCooldownMs(streak) {
+  const n = Math.max(1, Number(streak) || 1);
+  return Math.min(120_000 * 2 ** (n - 1), 1_800_000);
+}

@@ -73,6 +73,17 @@ export function updateDerivedLast(data) {
   }
 }
 
+// In RTH a cash index's value comes from live ticks. A stale index line in RTH
+// holds the previous session's close (updateDerivedLast / applyAuthoritativeClose),
+// which is not a price: withhold `last` so no consumer reads it as live (11-05,
+// risk-guard P0). `stale` stays true. Outside RTH the close IS the latest value.
+// Returns the snapshot itself or a copy; never mutates it.
+export function maskStaleIndexLast(snapshot, sessionOpen) {
+  if (!sessionOpen || !snapshot.stale || snapshot.last == null) return snapshot;
+  if (snapshot.symbol.includes("_") || !CASH_INDEX_SYMBOLS.has(snapshot.symbol)) return snapshot;
+  return { ...snapshot, last: null };
+}
+
 // IB serves market data on two independent planes: the streaming `reqMktData`
 // subscription and the `reqHistoricalData` bars. A streaming line can FREEZE
 // per-contract — if it was starved (error 101 "max tickers") across a session
