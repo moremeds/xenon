@@ -60,19 +60,22 @@ up to 10 times, until a newer send for the same key goes out or the incident
 is acked. Paper / test scopes prefix titles with `[TEST]`.
 
 **Restart.** A guard restart (deploy, api recreate) does not re-page an acked
-incident. Before its first evaluation the guard reads the scope's
-`risk_events` rows of the current ET date and restores, acked, every incident
-whose last lifecycle row is `ack` (or a `worsening` after it): no later
-`open` / `repeat` / `rise` / `ack_void` / `close` row of the same incident id.
-The first tick then compares live values with the ack reference, so a rise or
-a worsening during the downtime alerts at once. A cleared incident writes a
-`close` row; an ack that was written but not applied (the incident rose during
-the write, 409 `RISK_INCIDENT_CHANGED`) writes `ack_void`. Both rows retry
-every 30 s, up to 10 times. A failed restore read restores nothing: open
-incidents page again (fail loud). Limits: unacked incidents re-open and page
-after a restart; the leverage / drawdown ratio alarms and the daily line send
-once again after a restart; a lifecycle row that failed all retries can
-restore a stale ack on the same ET date.
+incident. The guard keeps one `ack_state` row in `xenon.risk_events`: each
+time the set of acked incidents changes (an ack is applied, an acked incident
+rises, worsens or clears) and once at start, a single serialized writer
+appends the whole set (incident id, sent and highest severity, worsening
+reference); a failed write retries every 5 s, and shutdown tries once more.
+Before its first evaluation a new process restores the newest `ack_state` row
+of the current ET date. The first tick then compares live values with the
+stored reference, so a rise or a worsening during the downtime alerts at once,
+and a worsening already sent before the restart is not sent again. An ack row
+that was written but not applied (409 `RISK_INCIDENT_CHANGED`) is never in the
+state. An entry that fails validation is dropped and logged (that incident
+pages again); a failed restore read restores nothing (fail loud). Limits:
+unacked incidents re-open and page after a restart; the leverage / drawdown
+ratio alarms and the daily line send once again; a state change whose write
+failed until the process died is lost (the older state is restored; a higher
+tier still alerts at once). `GET /risk/state` hides `ack_state` rows.
 
 ## Enable
 

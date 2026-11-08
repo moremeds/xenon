@@ -8,13 +8,15 @@ One ``tick`` per second:
 3. collect BLIND causes: market feed health (RTH) plus system causes in the
    watch window (trading day, 09:00 ET to the close);
 4. step the incident book; send each event (push + email), then record it in
-   ``risk_events`` best-effort (never under ``XENON_READ_ONLY``); a closed
-   incident is recorded (``close``), never sent;
+   ``risk_events`` best-effort (never under ``XENON_READ_ONLY``);
 5. every ``HEARTBEAT_S`` post the dead-man heartbeat, when configured.
 
-Restart: before the first step, incidents acked earlier on the same ET date
-and not closed are restored acked (``restore_fn``, read once), so a deploy does
-not re-page an acked incident. A failed read restores nothing: alerts as usual.
+Restart: one writer appends the whole acked-incident state (``ack_state`` row:
+id, sent / max severity, worsening reference) whenever it changes, and once
+at start; writes are serialized, so the latest row is the latest state. Before
+the first step a new process restores the latest ``ack_state`` row of the
+current ET date (``restore_fn``, read once). An entry that fails validation is
+dropped (that incident pages again); a failed read restores nothing.
 
 IO edges are injected so the loop is testable without IB or Postgres.
 """
@@ -24,7 +26,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import asdict, fields
+import uuid
+from dataclasses import asdict
 from datetime import date, datetime, timezone
 from datetime import time as dtime
 from typing import Any, Awaitable, Callable
@@ -35,6 +38,7 @@ from xenon.api.services.risk_guard.incidents import (
     CRASH,
     FAST,
     TIER_NAMES,
+    WATCH,
     Event,
     IncidentBook,
     MarketInputs,
@@ -65,7 +69,8 @@ WINDOWS = {"5m": 300, "15m": 900, "30m": 1800, "60m": 3600}
 SnapshotFn = Callable[[Any], Awaitable["tuple[dict, datetime] | None"]]
 BasisFn = Callable[[Any, date], Awaitable[DrawdownBasis]]
 RecordFn = Callable[..., Awaitable[None]]
-RestoreFn = Callable[[Any, datetime], Awaitable["list[dict[str, Any]]"]]
+RestoreFn = Callable[[Any, datetime], Awaitable["dict[str, Any] | None"]]
+STATE_RETRY_S = 5.0  # a failed ack_state write retries this often
 
 
 def in_watch_window(wall: datetime) -> bool:
@@ -107,10 +112,15 @@ class RiskGuard:
         self.thresholds_fn, self.levels_fn, self.mono, self.wall = thresholds_fn, levels_fn, mono, wall
         self.extra_fn, self.restore_fn = extra_fn, restore_fn
         self._restored = False
+        # ack_state writer: None = never written by this process (the first tick writes)
+        self._state_seen: list[dict] | None = None
+        self._state_dirty = self._state_writing = False
+        self._state_due = -1e18
+        self._state_scope: Any = None
         th = Thresholds()
         self.sources = {"SPX": SourceState("SPX"), "SPY": SourceState("SPY")}
         self.extra: dict[str, SourceState] = {}  # single-source indexes, own incidents, no BLIND
-        self.book = IncidentBook(th, epoch=f"{int(self.wall().timestamp() * 1000)}.")
+        self.book = IncidentBook(th, epoch=f"{uuid.uuid4().hex[:8]}.")
         self.leverage = RatioAlarm("leverage", th.leverage_levels, th.leverage_step, higher_is_worse=True)
         self.drawdown = RatioAlarm("drawdown", th.drawdown_levels, th.drawdown_step, higher_is_worse=False)
         self.snapshot: tuple[dict, datetime] | None = None
@@ -131,8 +141,6 @@ class RiskGuard:
         self._redeliver: dict[str, tuple[Event, str, str, Any, int, float, float, int]] = {}
         self._rev: dict[str, int] = {}  # per-key dispatch revision: an older in-flight send never re-queues
         self._records_in_flight = 0
-        # (event, scope, attempt, due): close / ack_void rows the restart restore depends on
-        self._lifecycle_retry: list[tuple[Event, Any, int, float]] = []
 
     # ── evaluation ───────────────────────────────────────────────────
 
@@ -201,9 +209,7 @@ class RiskGuard:
             self._restored = True
             await self._restore(scope, wall, now)
         events = self.book.step(now, (self.tier, reasons), self.inputs, health, extras) + events
-        closed, self.book.closed = self.book.closed, []
-        for ev in closed:
-            self._spawn(self._record_lifecycle(ev, scope))
+        self._persist_acks(scope, now)
 
         if self.account is not None and daily_line_due(et, self.daily_sent):
             self.daily_sent = et.date()
@@ -212,9 +218,6 @@ class RiskGuard:
         for ev in events:
             self._dispatch(ev, scope)
         self._redeliver_due(now)
-        for item in [x for x in self._lifecycle_retry if now >= x[3]]:
-            self._lifecycle_retry.remove(item)
-            self._spawn(self._record_lifecycle(item[0], item[1], item[2]))
         if self.heartbeat_fn is not None and now - self._beat_at >= HEARTBEAT_S:
             self._beat_at = now
             self._spawn(self.heartbeat_fn(self.heartbeat_payload(wall, now)))
@@ -395,12 +398,58 @@ class RiskGuard:
             self._records_in_flight -= 1
         return True
 
-    async def _record_lifecycle(self, ev: Event, scope: Any, attempt: int = 0) -> None:
-        """A row the restart restore reads (``close``, ``ack_void``): retried like a failed send."""
-        if await self._record(ev, scope, {"reasons": list(ev.reasons)}):
+    # ── restart state ────────────────────────────────────────────────
+
+    def _ack_state(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "key": i.key,
+                "incident_id": i.incident_id,
+                "sent_severity": i.sent_severity,
+                "max_sent": i.max_sent,
+                "ref": asdict(i.ref) if i.ref is not None else None,
+            }
+            for i in self.book.incidents.values()
+            if i.acked_at is not None
+        ]
+
+    def _persist_acks(self, scope: Any, now: float) -> None:
+        state = self._ack_state()
+        if state != self._state_seen:
+            self._state_seen, self._state_dirty = state, True
+        if scope is None or self.read_only_fn():
             return
-        if scope is not None and not self.read_only_fn() and attempt + 1 < REDELIVER_MAX:
-            self._lifecycle_retry.append((ev, scope, attempt + 1, self.mono() + REDELIVER_S))
+        self._state_scope = scope
+        if self._state_dirty and not self._state_writing and now >= self._state_due:
+            self._state_writing = True
+            self._spawn(self._write_acks(scope))
+
+    async def _write_acks(self, scope: Any) -> None:
+        """Serialized: one write at a time, each with the state current at write time."""
+        try:
+            while self._state_dirty:
+                self._state_dirty = False
+                ev = Event("guard:acks", "ack_state", 0, (), "guard:acks")
+                if not await self._record(ev, scope, {"acked": self._ack_state()}):
+                    self._state_dirty, self._state_due = True, self.mono() + STATE_RETRY_S
+                    return
+        finally:
+            self._state_writing = False
+
+    async def _restore(self, scope: Any, wall: datetime, now: float) -> None:
+        if scope is None or self.restore_fn is None:
+            return
+        since = wall.astimezone(market_calendar.ET).replace(hour=0, minute=0, second=0, microsecond=0)
+        try:
+            async with asyncio.timeout(DB_TIMEOUT_S):
+                detail = await self.restore_fn(scope, since)
+        except Exception as exc:  # noqa: BLE001 — no restore = open incidents alert again (fail loud)
+            logger.error("risk guard: ack restore failed (%s); open incidents alert again", type(exc).__name__)
+            return
+        for key, iid, sent, max_sent, ref in restorable(detail):
+            self.book.restore(key, iid, sent, max_sent, ref, now)
+        if self.book.incidents:
+            logger.info("risk guard: restored acked incidents %s", sorted(self.book.incidents))
 
     async def ack(self, key: str) -> str:
         """Persist the ack, then apply it. ``ok`` | ``unknown`` | ``unavailable`` (no DB: alerts go on)
@@ -412,35 +461,20 @@ class RiskGuard:
         # (a worsening during the write must still alert), no send in between.
         iid, severity, sent_at, ref = inc.incident_id, inc.severity, inc.last_sent_at, inc.last_inputs
         ev = Event(key, "ack", severity, inc.reasons, iid)
-        detail = {"reasons": list(inc.reasons), "ref": asdict(ref) if ref is not None else None}
-        scope = self.scope_fn()
-        if not await self._record(ev, scope, detail):
+        detail = {"reasons": list(inc.reasons), "ref": asdict(ref) if ref is not None else None}  # audit
+        if not await self._record(ev, self.scope_fn(), detail):
             return "unavailable"
         cur = self.book.incidents.get(key)
         if cur is None or cur.incident_id != iid or cur.severity > severity or cur.last_sent_at != sent_at:
-            # The ack row is written but not applied: void it, or a restart would restore it.
-            await self._record_lifecycle(Event(key, "ack_void", severity, inc.reasons, iid), scope)
             return "changed"
         self.book.ack(key, self.mono(), ref)
         self._redeliver.pop(key, None)
         return "ok"
 
-    async def _restore(self, scope: Any, wall: datetime, now: float) -> None:
-        if scope is None or self.restore_fn is None:
-            return
-        since = wall.astimezone(market_calendar.ET).replace(hour=0, minute=0, second=0, microsecond=0)
-        try:
-            async with asyncio.timeout(DB_TIMEOUT_S):
-                rows = await self.restore_fn(scope, since)
-        except Exception as exc:  # noqa: BLE001 — no restore = open incidents alert again (fail loud)
-            logger.error("risk guard: ack restore failed (%s); open incidents alert again", type(exc).__name__)
-            return
-        for key, (iid, severity, ref) in acked_incidents(rows).items():
-            self.book.restore(key, iid, severity, ref, now)
-        if self.book.incidents:
-            logger.info("risk guard: restored acked incidents %s", sorted(self.book.incidents))
-
     async def drain(self) -> None:
+        if self._state_dirty and not self._state_writing and self._state_scope is not None:
+            self._state_writing = True  # shutdown: one last try of a pending ack_state write
+            self._spawn(self._write_acks(self._state_scope))
         if self._pending:
             await asyncio.gather(*self._pending, return_exceptions=True)
 
@@ -561,37 +595,60 @@ class RiskGuard:
         }
 
 
-_INPUT_FIELDS = {f.name for f in fields(MarketInputs)}
+_FLOATS = ("ret_15m", "ret_30m", "ret_60m", "day", "min_short_distance", "cushion", "session_low")
 
 
-def acked_incidents(rows: list[dict[str, Any]]) -> dict[str, tuple[str, int, MarketInputs | None]]:
-    """``risk_events`` rows (oldest first) -> key: (incident id, severity, ack reference)
-    for incidents whose latest state is acked: the last ack/worsening row is newer
-    than any open, repeat, rise, ack_void or close row of the same incident id. A
-    later incident id of the same key wins. Residual: a lifecycle row that failed
-    every retry (``REDELIVER_MAX``) can restore a stale ack on the same ET date."""
-    state: dict[str, tuple[str, bool, int, MarketInputs | None]] = {}
-    for r in rows:
-        key, iid, kind = r["incident_key"], r["incident_id"], r["kind"]
-        if key.startswith("ratio:") or kind not in ("open", "repeat", "rise", "worsening", "ack", "ack_void", "close"):
+def _number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float("inf")
+
+
+def _inputs(raw: Any) -> MarketInputs:
+    """A stored reference, fully type-checked (a bad value would break every later tick)."""
+    if not isinstance(raw, dict):
+        raise ValueError("reference is not an object")
+    kw: dict[str, Any] = {}
+    for f in _FLOATS:
+        v = raw.get(f)
+        if v is not None and not _number(v):
+            raise ValueError(f"bad {f}")
+        kw[f] = v
+    levels, itm, crossed = raw.get("levels_broken", []), raw.get("long_itm", False), raw.get("shorts_crossed", 0)
+    if not isinstance(levels, (list, tuple)) or not all(_number(x) for x in levels):
+        raise ValueError("bad levels_broken")
+    if not isinstance(itm, bool) or not isinstance(crossed, int) or isinstance(crossed, bool) or crossed < 0:
+        raise ValueError("bad long_itm / shorts_crossed")
+    return MarketInputs(levels_broken=tuple(levels), long_itm=itm, shorts_crossed=crossed, **kw)
+
+
+def restorable(detail: Any) -> list[tuple[str, str, int, int, MarketInputs | None]]:
+    """Validated entries of an ``ack_state`` row. A market incident needs its worsening
+    reference (else it could never alert again); a health incident has none."""
+    items = detail.get("acked") if isinstance(detail, dict) else None
+    if not isinstance(items, list):
+        if detail is not None:
+            logger.error("risk guard: ack_state row unreadable; nothing restored")
+        return []
+    out = []
+    for it in items:
+        try:
+            key, iid, sent, top = it["key"], it["incident_id"], it["sent_severity"], it["max_sent"]
+            if not (isinstance(key, str) and isinstance(iid, str) and key and iid):
+                raise ValueError("bad key / id")
+            if not all(isinstance(x, int) and not isinstance(x, bool) for x in (sent, top)):
+                raise ValueError("bad severity")
+            if not (WATCH <= sent <= top <= CRASH):
+                raise ValueError("severity out of range")
+            if key.startswith("health:"):
+                ref = None
+            elif key == "market" or key.startswith("market:"):
+                ref = _inputs(it["ref"])
+            else:
+                raise ValueError("unknown key")
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.error("risk guard: ack_state entry dropped (%s); it pages again", exc)
             continue
-        prev = state.get(key)
-        ref = prev[3] if prev and prev[0] == iid else None
-        if kind == "ack":
-            raw = (r.get("detail") or {}).get("ref")
-            try:
-                ref = (
-                    None
-                    if raw is None
-                    else MarketInputs(
-                        **{k: tuple(v) if k == "levels_broken" else v for k, v in raw.items() if k in _INPUT_FIELDS}
-                    )
-                )
-            except (TypeError, ValueError):
-                ref = None  # unreadable reference: seeded by the first value seen
-        acked = kind == "ack" or (kind == "worsening" and bool(prev and prev[0] == iid and prev[1]))
-        state[key] = (iid, acked, int(r["severity"]), ref)
-    return {k: (iid, sev, ref) for k, (iid, acked, sev, ref) in state.items() if acked}
+        out.append((key, iid, sent, top, ref))
+    return out
 
 
 def priority(ev: Event) -> int:

@@ -75,7 +75,7 @@ def build() -> RiskGuard:
         snapshot_fn=lambda scope: q.latest_snapshot(get_engine(), scope),
         basis_fn=lambda scope, today: load_drawdown_basis(get_engine(), scope, today),
         record_fn=lambda scope, **kw: q.record_event(get_engine(), scope, **kw),
-        restore_fn=lambda scope, since: q.events_since(get_engine(), scope, since),
+        restore_fn=lambda scope, since: q.latest_ack_state(get_engine(), scope, since),
         health_fn=system_health,
         notifier=notifier,
         heartbeat_fn=heartbeat if beat_url else None,

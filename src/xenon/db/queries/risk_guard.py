@@ -60,6 +60,7 @@ async def recent_events(engine: AsyncEngine, scope: AccountScope, limit: int = 5
         .where(risk_events.c.broker == scope.broker)
         .where(risk_events.c.account_env == scope.account_env)
         .where(risk_events.c.broker_account == scope.broker_account)
+        .where(risk_events.c.kind != "ack_state")  # restart state, not an alert
         .order_by(risk_events.c.occurred_at.desc(), risk_events.c.id.desc())
         .limit(limit)
     )
@@ -68,16 +69,18 @@ async def recent_events(engine: AsyncEngine, scope: AccountScope, limit: int = 5
     return [{**r, "occurred_at": r["occurred_at"].isoformat()} for r in rows]
 
 
-async def events_since(engine: AsyncEngine, scope: AccountScope, since: datetime) -> list[dict[str, Any]]:
-    """Incident rows of ``scope`` since ``since``, oldest first (guard restart restore)."""
+async def latest_ack_state(engine: AsyncEngine, scope: AccountScope, since: datetime) -> dict[str, Any] | None:
+    """``detail`` of the newest ``ack_state`` row of ``scope`` since ``since`` (guard restart restore)."""
     c = risk_events.c
     stmt = (
-        select(c.incident_key, c.incident_id, c.kind, c.severity, c.detail)
+        select(c.detail)
         .where(c.broker == scope.broker)
         .where(c.account_env == scope.account_env)
         .where(c.broker_account == scope.broker_account)
+        .where(c.kind == "ack_state")
         .where(c.occurred_at >= since)
-        .order_by(c.occurred_at, c.id)
+        .order_by(c.id.desc())
+        .limit(1)
     )
     async with engine.connect() as conn:
-        return [dict(r) for r in (await conn.execute(stmt)).mappings().all()]
+        return (await conn.execute(stmt)).scalar_one_or_none()

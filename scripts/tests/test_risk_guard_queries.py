@@ -67,12 +67,22 @@ async def test_record_and_read_events(eng):
     assert isinstance(rows[0]["occurred_at"], str)
 
     since = datetime.now(timezone.utc) - timedelta(hours=1)
-    rows = await q.events_since(eng, SCOPE, since)
-    assert [r["kind"] for r in rows] == ["open", "ack"]  # oldest first: the restart restore input
-    assert set(rows[0]) == {"incident_key", "incident_id", "kind", "severity", "detail"}
-    assert await q.events_since(eng, SCOPE, datetime.now(timezone.utc) + timedelta(hours=1)) == []
+    assert await q.latest_ack_state(eng, SCOPE, since) is None
+    for acked in ([{"key": "market"}], []):
+        await q.record_event(
+            eng,
+            SCOPE,
+            incident_key="guard:acks",
+            incident_id="guard:acks",
+            kind="ack_state",
+            severity=0,
+            detail={"acked": acked},
+        )
+    assert await q.latest_ack_state(eng, SCOPE, since) == {"acked": []}  # newest row wins
+    assert await q.latest_ack_state(eng, SCOPE, datetime.now(timezone.utc) + timedelta(hours=1)) is None
     other = AccountScope(broker="IB", account_env="live", broker_account=ACCT)
-    assert await q.events_since(eng, other, since) == []
+    assert await q.latest_ack_state(eng, other, since) is None
+    assert [r["kind"] for r in await q.recent_events(eng, SCOPE)] == ["ack", "open"]  # state rows hidden
 
 
 async def test_drawdown_basis_uses_close_rows_and_flows(eng):

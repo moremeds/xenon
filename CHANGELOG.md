@@ -5,7 +5,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-- **Tail-risk guard: acks survive a restart.** A deploy or api restart no longer re-pages an incident the operator acked earlier the same ET day. Before its first evaluation the guard restores those incidents, acked, from `risk_events`; a rise or a worsening during the downtime still alerts on the first tick. A cleared incident now writes a `close` row, and an ack that was written but not applied writes `ack_void` (both retried every 30 s, max 10). Incident ids carry a per-process prefix, so they stay unique across restarts. No schema change.
+- **Tail-risk guard: acks survive a restart.** A deploy or api restart no longer re-pages an incident the operator acked earlier the same ET day. The guard appends its acked-incident state to `risk_events` (`ack_state` row, one serialized writer, on every change) and restores the newest row of the day before its first evaluation; a rise or a worsening during the downtime still alerts on the first tick, and a worsening sent before the restart is not sent again. Incident ids carry a per-process nonce. `GET /risk/state` hides the state rows. No schema change.
 
 ## [0.21.1] — 2026-11-09
 
