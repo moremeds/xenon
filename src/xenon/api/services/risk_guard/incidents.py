@@ -167,12 +167,13 @@ class IncidentBook:
             self._clear(key, now)
         return events
 
-    def ack(self, key: str, now: float) -> bool:
+    def ack(self, key: str, now: float, ref: MarketInputs | None = None) -> bool:
+        """``ref``: the inputs the operator saw when acking (default: the latest)."""
         inc = self.incidents.get(key)
         if inc is None:
             return False
         inc.acked_at = now
-        inc.ref = inc.last_inputs
+        inc.ref = ref if ref is not None else inc.last_inputs
         return True
 
     def _advance(self, key, now, severity, reasons, inputs, *, repeats, events) -> None:

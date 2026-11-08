@@ -424,3 +424,63 @@ async def test_event_write_is_bounded_and_capped(monkeypatch):
     assert g._records_in_flight == 0
     g._records_in_flight = rg_service.MAX_RECORDS_IN_FLIGHT
     assert await g._record(ev, LIVE, {}) is False
+
+
+@pytest.mark.asyncio
+async def test_worsening_during_the_ack_write_still_alerts_after_the_ack():
+    clock = Clock()
+    g, n, records = _guard(clock)
+    await _run(g, clock, 1800)
+    await _run(g, clock, 5, fall=lambda t: -0.016)  # FAST
+    gate, record = asyncio.Event(), g.record_fn
+
+    async def slow(scope, **kw):
+        if kw["kind"] == "ack":
+            await gate.wait()
+        await record(scope, **kw)
+
+    g.record_fn = slow
+    task = asyncio.create_task(g.ack("market"))
+    await asyncio.sleep(0)
+    g.feed.prices = {"SPX": 7000.0 * 0.981, "SPY": 700.0 * 0.981}  # still FAST, low 0.3 % lower
+    await g.tick()
+    clock.t += 1
+    gate.set()
+    assert await task == "ok"
+    await _run(g, clock, 2)
+    assert records[-1]["kind"] == "worsening"
+
+
+@pytest.mark.asyncio
+async def test_failed_worsening_after_an_ack_is_redelivered():
+    clock = Clock()
+    g, n, _ = _guard(clock)
+    await _run(g, clock, 1800)
+    await _run(g, clock, 5, fall=lambda t: -0.016)
+    assert await g.ack("market") == "ok"
+    fails, send = [1], g.notifier.send
+
+    async def flaky(title, body, priority, tags=(), today=None):
+        if fails[0]:
+            fails[0] -= 1
+            n.sent.append((title, body, priority))
+            return SendResult("failed", "off")
+        return await send(title, body, priority, tags)
+
+    g.notifier.send = flaky
+    for _ in range(3):
+        await _run(g, clock, 31, fall=lambda t: -0.019)  # worsening, sent once after the ack
+    assert len([s for s in n.sent if "[worsening " in s[1]]) == 2  # failed, then redelivered
+
+
+@pytest.mark.asyncio
+async def test_an_older_in_flight_send_never_requeues_a_retry():
+    g, _, _ = _guard(Clock())
+
+    async def failed(*_a, **_kw):
+        return SendResult("failed", "off")
+
+    g.notifier.send = failed
+    g._rev["market"] = 2  # a newer send for the key was dispatched meanwhile
+    await g._send(Event("market", "open", 1, (), "market#1"), "t", "b", LIVE, 0, 0.0, 1)
+    assert g._redeliver == {}

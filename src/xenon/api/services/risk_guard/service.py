@@ -119,8 +119,9 @@ class RiskGuard:
         self._acct_at = self._basis_at = self._beat_at = -1e18
         self._pending: set[asyncio.Task] = set()
         self.basis_error: str | None = None
-        # key -> (event, title, body, scope, attempt, due): a send that reached no channel
-        self._redeliver: dict[str, tuple[Event, str, str, Any, int, float]] = {}
+        # key -> (event, title, body, scope, attempt, due, born, rev): a send that reached no channel
+        self._redeliver: dict[str, tuple[Event, str, str, Any, int, float, float, int]] = {}
+        self._rev: dict[str, int] = {}  # per-key dispatch revision: an older in-flight send never re-queues
         self._records_in_flight = 0
 
     # ── evaluation ───────────────────────────────────────────────────
@@ -308,15 +309,18 @@ class RiskGuard:
 
     def _dispatch(self, ev: Event, scope: Any) -> None:
         self._redeliver.pop(ev.key, None)  # a newer send for the key supersedes a retry
+        rev = self._rev[ev.key] = self._rev.get(ev.key, 0) + 1
         try:
             title, body = self.render(ev, scope)
         except Exception as exc:  # noqa: BLE001 — a render bug must not drop the alert
             logger.exception("risk guard render failed")
             title = f"RISK {ev.key} {ev.kind} (render failed: {type(exc).__name__})"
             body = "; ".join(ev.reasons) or ev.key
-        self._spawn(self._send(ev, title, body, scope))
+        self._spawn(self._send(ev, title, body, scope, 0, self.mono(), rev))
 
-    async def _send(self, ev: Event, title: str, body: str, scope: Any, attempt: int = 0) -> None:
+    async def _send(
+        self, ev: Event, title: str, body: str, scope: Any, attempt: int = 0, born: float = 0.0, rev: int = 0
+    ) -> None:
         result = await self.notifier.send(title, body, priority(ev), tags=tags(ev))
         self.last_result = {"at": self.wall().isoformat(), "key": ev.key, "kind": ev.kind, **asdict(result)}
         if result.push != "sent" and result.email != "sent":
@@ -329,20 +333,23 @@ class RiskGuard:
                 attempt + 1,
             )
             failed = "failed" in (result.push, result.email)
-            if failed and attempt + 1 < REDELIVER_MAX and ev.key not in self._redeliver:
-                self._redeliver[ev.key] = (ev, title, body, scope, attempt + 1, self.mono() + REDELIVER_S)
+            if failed and attempt + 1 < REDELIVER_MAX and self._rev.get(ev.key) == rev:
+                due = self.mono() + REDELIVER_S
+                self._redeliver[ev.key] = (ev, title, body, scope, attempt + 1, due, born, rev)
         await self._record(ev, scope, {"title": title, "reasons": list(ev.reasons), **asdict(result)})
 
     def _redeliver_due(self, now: float) -> None:
-        """Re-send what reached no channel; drop it once acked or the incident is gone."""
-        for key, (ev, title, body, scope, attempt, due) in list(self._redeliver.items()):
+        """Re-send what reached no channel; drop it once the incident is gone or acked after it."""
+        for key, (ev, title, body, scope, attempt, due, born, rev) in list(self._redeliver.items()):
             if now < due:
                 continue
             del self._redeliver[key]
             inc = self.book.incidents.get(key)
-            if not key.startswith("ratio:") and (inc is None or inc.acked_at is not None):
+            if not key.startswith("ratio:") and (
+                inc is None or inc.incident_id != ev.incident_id or (inc.acked_at is not None and inc.acked_at > born)
+            ):
                 continue
-            self._spawn(self._send(ev, title, body, scope, attempt))
+            self._spawn(self._send(ev, title, body, scope, attempt, born, rev))
 
     async def _record(self, ev: Event, scope: Any, detail: dict[str, Any]) -> bool:
         if scope is None or self.read_only_fn():
@@ -375,14 +382,16 @@ class RiskGuard:
         inc = self.book.incidents.get(key)
         if inc is None:
             return "unknown"
-        iid, severity = inc.incident_id, inc.severity
+        # What the operator acks: this incident, this tier, the inputs of now
+        # (a worsening during the write must still alert), no send in between.
+        iid, severity, sent_at, ref = inc.incident_id, inc.severity, inc.last_sent_at, inc.last_inputs
         ev = Event(key, "ack", severity, inc.reasons, iid)
         if not await self._record(ev, self.scope_fn(), {"reasons": list(inc.reasons)}):
             return "unavailable"
         cur = self.book.incidents.get(key)
-        if cur is None or cur.incident_id != iid or cur.severity > severity:
+        if cur is None or cur.incident_id != iid or cur.severity > severity or cur.last_sent_at != sent_at:
             return "changed"
-        self.book.ack(key, self.mono())
+        self.book.ack(key, self.mono(), ref)
         self._redeliver.pop(key, None)
         return "ok"
 
