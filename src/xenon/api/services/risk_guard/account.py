@@ -119,7 +119,10 @@ def account_view(payload: dict, snapshot_at: datetime, now: datetime, spots: dic
         # NLV is USD. No rate for a non-USD position = not measured, never 1:1.
         ccy = pos.get("currency") or "USD"
         fx = 1.0 if ccy == "USD" else _num(fx_rates.get(ccy))
-        risk = _expiry_risk(pos) if fx else None
+        mixed = any(
+            (leg.get("currency") or ccy) != ccy for leg in pos.get("legs") or []
+        )  # one rate cannot fix a mixed sum
+        risk = _expiry_risk(pos) if fx and not mixed else None
         if risk is None:
             undefined += 1
         else:

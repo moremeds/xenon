@@ -115,6 +115,9 @@ def test_non_usd_position_converted_with_payload_fx_rates():
     assert v.max_loss == pytest.approx(6_300) and v.undefined_positions == 0
     v = account_view(_payload([jp]), NOW, NOW, {})  # no rate: not measured, never 1:1
     assert v.max_loss == 0 and v.undefined_positions == 1
+    mixed = {**jp, "legs": [{**jp["legs"][0], "currency": "JPY"}, {**_leg("SHORT", "C", 5000), "currency": "USD"}]}
+    v = account_view({**_payload([mixed]), "fx_rates": {"JPY": 0.0063}}, NOW, NOW, {})
+    assert v.max_loss == 0 and v.undefined_positions == 1  # mixed-currency legs: not measured
 
 
 def test_covered_call_net_credit_not_clamped_away():
