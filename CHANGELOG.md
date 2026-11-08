@@ -5,12 +5,14 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-11-09
+
+
 - **Tail-risk guard, P1 (alerts only, off by default).** After the 2026-11-05 SPX fall, a new api task (`XENON_RISK_GUARD=1`) watches SPX and SPY streaming quotes on the IB `data` role and the latest account snapshot every second. It sends push (ntfy) and email (Resend) alerts in three market tiers: WATCH (15 m −0.75 %, day −1 %, key level, cushion < 20 %), FAST (30 m −1.5 %, day −2 %, short strike within 0.5 %, cushion < 12 %; every 30 s until ack) and CRASH (60 m −2.5 %, day −3 %, long leg ITM, cushion < 8 %). It sends BLIND alerts when its own inputs fail (stale or divergent feed, orders halted, data connection down, IB upstream lost, DB down, stale snapshot). Leverage (Σ max loss / NLV) and flow-adjusted drawdown send on level changes, plus a 09:00 ET daily line. Incidents are acked from a new banner or `POST /risk/incidents/{key}/ack`. New table `xenon.risk_events` (migration `2026_11_09_risk_events`), routes `GET /risk/state`, `/health` `risk_guard` block, runtime settings `XENON_RISK_GUARD` / `XENON_RISK_THRESHOLDS` / `XENON_RISK_KEY_LEVELS`, optional dead-man heartbeat `XENON_RISK_HEARTBEAT_URL`. It never places, cancels or modifies an order. Runbook: `docs/runbooks/risk-guard.md`; replay: `docs/research/2026-11-08-risk-guard-replay.md`.
 - **Tail-risk guard: extra indexes.** Runtime setting `XENON_RISK_WATCH_SYMBOLS` (`/admin`) adds NDX, RUT and/or DJX (IB cash indexes; one market-data line each). Each gets its own speed alert `market:<SYM>` with its own ack, on the same thresholds, at most FAST (one source, no cross-check). A stale extra index is shown in the details panel and raises no BLIND alert. SPX and SPY stay fixed; VIX is not offered yet (a rise rule is still open).
 - **Tail-risk guard: review fixes.** An ack applies only to the incident and tier it was written for (else 409 `RISK_INCIDENT_CHANGED`, ack again). A send that reached no channel retries every 30 s (max 10) until a newer send or an ack. IB 1101 (market data lost) re-subscribes the guard's lines. Session high/low reset per trading date (no carry-over into the next day's key-level check). A failed drawdown basis read raises BLIND `BASIS_UNAVAILABLE`. `risk_events` writes have a 5 s deadline and at most 4 in flight; the `/risk/state` events read has a 5 s deadline.
 - **Market calendar: NYSE early closes and the US equity session.** `session_close(d)` returns 13:00 ET on early-close days (`src/xenon/config/market_early_closes.json`), `is_open` / `last_close` use it, and `us_equity_session(now)` returns `rth`, `extended`, `overnight` (Sun–Thu 20:00 → 03:50) or `closed`.
 - **Relay: no stale cash-index last in RTH.** A stale SPX / NDX / RUT / DJX / VIX snapshot in RTH now carries `last: null` instead of the previous close (slow indexes such as MOVE or OVX keep theirs; the relay has no holiday table, so these five show `---` on a weekday holiday); the stale-restart loop backs off (120 s doubling, max 30 min) and IB info codes are logged.
-
 ## [0.20.3] — 2026-10-28
 
 
