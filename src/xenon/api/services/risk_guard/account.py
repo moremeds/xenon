@@ -10,6 +10,8 @@ Source: the latest IB ``account_snapshots`` row (``payload`` + ``snapshot_at``).
   counted in ``undefined_positions``, not summed;
 - width = the same worst case without the premium (a credit vertical: strike
   width x 100 x qty); cushion = ExcessLiquidity / NLV;
+- max loss and width are converted to USD with the payload ``fx_rates`` by the
+  position ``currency``; a non-USD position without a rate is undefined;
 - strike distance per option leg with a known underlying spot, as a fraction of
   spot, positive = out of the money (put: (S - K) / S, call: (K - S) / S);
 - drawdown = NLV / peak - 1, peak = the highest ``nav_history`` close after
@@ -111,13 +113,21 @@ def account_view(payload: dict, snapshot_at: datetime, now: datetime, spots: dic
     undefined = without_spot = 0
     distances: list[LegDistance] = []
     long_itm = False
+    fx_rates = payload.get("fx_rates") or {}
     for pos in payload.get("positions") or []:
-        risk = _expiry_risk(pos)
+        # entry_cost and strikes are in the position currency (6981 TSEJ: JPY);
+        # NLV is USD. No rate for a non-USD position = not measured, never 1:1.
+        ccy = pos.get("currency") or "USD"
+        fx = 1.0 if ccy == "USD" else _num(fx_rates.get(ccy))
+        mixed = any(
+            (leg.get("currency") or ccy) != ccy for leg in pos.get("legs") or []
+        )  # one rate cannot fix a mixed sum
+        risk = _expiry_risk(pos) if fx and not mixed else None
         if risk is None:
             undefined += 1
         else:
-            max_loss += risk[0]
-            width += risk[1]
+            max_loss += risk[0] * fx
+            width += risk[1] * fx
         legs = [leg for leg in pos.get("legs") or [] if leg.get("type") in ("Put", "Call")]
         if not legs:
             continue

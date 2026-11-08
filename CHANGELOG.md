@@ -5,6 +5,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+- **Tail-risk guard: leverage in USD.** Max loss and width of a non-USD position (for example the TSEJ stock 6981, cost in JPY) are now converted with the snapshot `fx_rates`; before, the JPY cost was read as USD and the first live run reported leverage 18.3× instead of about 2.5×. A non-USD position without a rate counts as not measured.
+
 ## [0.21.0] — 2026-11-09
 
 
