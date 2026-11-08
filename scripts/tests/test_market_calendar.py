@@ -255,7 +255,10 @@ def test_cli_status_formats(monkeypatch):
 # ── early closes (NYSE 13:00 ET; source nyse.com/markets/hours-calendars, read 2026-11-08) ──
 
 
-@pytest.mark.parametrize("d", [date(2025, 7, 3), date(2025, 11, 28), date(2025, 12, 24), date(2026, 11, 27), date(2026, 12, 24), date(2027, 11, 26)])
+@pytest.mark.parametrize(
+    "d",
+    [date(2025, 7, 3), date(2025, 11, 28), date(2025, 12, 24), date(2026, 11, 27), date(2026, 12, 24), date(2027, 11, 26)],
+)
 def test_early_close_days_close_at_1300(d):
     assert mc.session_close(d) == mc.EARLY_CLOSE
     assert mc.is_open(datetime.combine(d, mc.time(12, 59), tzinfo=ET)) is True
