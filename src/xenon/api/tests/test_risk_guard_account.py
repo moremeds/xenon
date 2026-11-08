@@ -103,6 +103,20 @@ def test_long_stock_max_loss_is_cost():
     assert v.max_loss == pytest.approx(18_000) and v.width == 0
 
 
+def test_non_usd_position_converted_with_payload_fx_rates():
+    """A TSEJ stock: entry_cost in JPY (shape of the 2026-11-06 live snapshot; values synthetic)."""
+    jp = {
+        "ticker": "6981",
+        "currency": "JPY",
+        "entry_cost": 1_000_000.0,
+        "legs": [{"direction": "LONG", "type": "Stock", "strike": 0.0, "contracts": 100}],
+    }
+    v = account_view({**_payload([jp]), "fx_rates": {"JPY": 0.0063, "USD": 1.0}}, NOW, NOW, {})
+    assert v.max_loss == pytest.approx(6_300) and v.undefined_positions == 0
+    v = account_view(_payload([jp]), NOW, NOW, {})  # no rate: not measured, never 1:1
+    assert v.max_loss == 0 and v.undefined_positions == 1
+
+
 def test_covered_call_net_credit_not_clamped_away():
     cc = {
         "ticker": "AAPL",
