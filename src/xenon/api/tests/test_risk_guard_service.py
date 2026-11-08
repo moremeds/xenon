@@ -293,3 +293,19 @@ async def test_render_failure_still_sends(monkeypatch):
     monkeypatch.setattr(g, "render", lambda ev, scope: 1 / 0)
     await _run(g, clock, 1)
     assert n.sent and "render failed" in n.sent[0][0]
+
+
+@pytest.mark.asyncio
+async def test_slow_basis_keeps_the_snapshot(monkeypatch):
+    from xenon.api.services.risk_guard import service
+
+    monkeypatch.setattr(service, "DB_TIMEOUT_S", 0.05)
+    clock = Clock()
+    g, n, _ = _guard(clock)
+
+    async def slow_basis(_scope, _today):
+        await asyncio.sleep(30)
+
+    g.basis_fn = slow_basis
+    await asyncio.wait_for(_run(g, clock, 2), timeout=2)
+    assert g.db_ok and g.snapshot is not None and "DB_DOWN" not in g.health and g.basis is None

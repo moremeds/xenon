@@ -184,15 +184,21 @@ class RiskGuard:
             # stale); a background task if that ever matters.
             async with asyncio.timeout(DB_TIMEOUT_S):
                 snap = await self.snapshot_fn(scope)
-                if now - self._basis_at >= BASIS_REFRESH_S:
-                    self.basis = await self.basis_fn(scope, wall.astimezone(market_calendar.ET).date())
-                    self._basis_at = now
         except Exception as exc:  # noqa: BLE001 — a DB failure is a BLIND cause, never a crash
             if self.db_ok:
                 logger.error("risk guard account read failed: %s", type(exc).__name__)
             self.db_ok = False
             return
         self.db_ok = True
+        if now - self._basis_at >= BASIS_REFRESH_S:
+            # Own budget: a slow drawdown basis keeps the good snapshot and
+            # only leaves drawdown on the last basis (retried every refresh).
+            try:
+                async with asyncio.timeout(DB_TIMEOUT_S):
+                    self.basis = await self.basis_fn(scope, wall.astimezone(market_calendar.ET).date())
+                self._basis_at = now
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("risk guard drawdown basis read failed: %s", type(exc).__name__)
         is_new = snap is not None and (self.snapshot is None or snap[1] != self.snapshot[1])
         self.snapshot = snap
         if not is_new:
