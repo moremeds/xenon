@@ -53,6 +53,7 @@ const WorkspaceSections = dynamic(
 );
 import ConnectionBanner from "@/components/ConnectionBanner";
 import FlexTokenBanner from "@/components/FlexTokenBanner";
+import RiskGuardBanner from "@/components/risk/RiskGuardBanner";
 import WizardRiskAlertBanner from "@/components/ticker-detail/WizardRiskAlertBanner";
 import { useTickerDetail } from "@/lib/TickerDetailContext";
 
@@ -540,6 +541,7 @@ export default function WorkspaceShell({
           ibStatusMessage={ibStatusMessage}
         />
         <FlexTokenBanner />
+        <RiskGuardBanner />
         <WizardRiskAlertBanner />
 
         <div className="content">
