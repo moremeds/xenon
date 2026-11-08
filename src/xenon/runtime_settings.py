@@ -156,6 +156,44 @@ def _greek_factors(key: str, value: Any) -> dict[str, float]:
     return out
 
 
+def _risk_thresholds(key: str, value: Any) -> dict[str, Any]:
+    """Partial override of ``risk_guard.incidents.Thresholds``: known fields only."""
+    fields = importlib.import_module("xenon.api.services.risk_guard.config").THRESHOLD_BOUNDS
+    if not isinstance(value, dict):
+        raise _invalid(key, f"must be an object over {sorted(fields)}")
+    out: dict[str, Any] = {}
+    for name, v in value.items():
+        if name not in fields:
+            raise _invalid(key, f"{name!r} is not one of {sorted(fields)}")
+        lo, hi, n = fields[name]
+        vals = v if n else [v]
+        if n and (not isinstance(v, list) or len(v) != n):
+            raise _invalid(key, f"{name!r} must be a list of {n} numbers")
+        if not all(_finite_number(x) and lo <= x <= hi for x in vals):
+            raise _invalid(key, f"{name!r} must be in [{lo:g}, {hi:g}]")
+        if n and sorted(vals, reverse=lo < 0) != vals:
+            raise _invalid(key, f"{name!r} must go from the mildest to the worst level")
+        out[name] = v
+    return out
+
+
+def _price_levels(key: str, value: Any) -> list[float]:
+    if not isinstance(value, list) or not all(_finite_number(x) and 0 < x < 1e6 for x in value):
+        raise _invalid(key, "must be a list of positive prices")
+    return sorted(set(value), reverse=True)
+
+
+def _watch_symbols(key: str, value: Any) -> list[str]:
+    allowed = importlib.import_module("xenon.api.services.risk_guard.sources").EXTRA_INDEX_EXCHANGE
+    if not isinstance(value, list) or not all(isinstance(x, str) and x in allowed for x in value):
+        raise _invalid(key, f"must be a list over {sorted(allowed)}")
+    return sorted(set(value))
+
+
+def _turns_off(old: Any, new: Any) -> bool:
+    return bool(old) and not bool(new)
+
+
 def _is_tuple(entry: str) -> bool:
     return _lazy("xenon.execution.futu_orders", "_parse_tuple")(entry) is not None
 
@@ -403,6 +441,53 @@ _SETTINGS: tuple[Setting, ...] = (
         env_value=_lazy("xenon.api.services.audit_enforce", "env_enabled"),
         confirm=_turns_on,
         consumers=("audit_enforce.enabled",),
+    ),
+    # Tail-risk guard (spec 2026-11-08). Alerts only; it never places an order.
+    Setting(
+        "XENON_RISK_GUARD",
+        "toggle",
+        "bool",
+        "Watch SPX speed, key levels, account ratios and data health; send push and email alerts.",
+        _bool,
+        env="XENON_RISK_GUARD",
+        label="Tail-risk alerts",
+        default=False,
+        env_value=_lazy("xenon.api.services.risk_guard.config", "env_enabled"),
+        confirm=_turns_off,
+        consumers=("risk_guard.config.enabled",),
+    ),
+    Setting(
+        "XENON_RISK_THRESHOLDS",
+        "tuning",
+        "object",
+        "Tier, ratio and cadence thresholds of the tail-risk alerts; unset fields keep the defaults.",
+        _risk_thresholds,
+        label="Tail-risk thresholds",
+        default={},
+        env_value=lambda: {},
+        consumers=("risk_guard.config.thresholds",),
+    ),
+    Setting(
+        "XENON_RISK_KEY_LEVELS",
+        "tuning",
+        "object",
+        "SPX levels whose break during the session raises a WATCH alert.",
+        _price_levels,
+        label="Tail-risk SPX key levels",
+        default=[],
+        env_value=lambda: [],
+        consumers=("risk_guard.config.key_levels",),
+    ),
+    Setting(
+        "XENON_RISK_WATCH_SYMBOLS",
+        "tuning",
+        "object",
+        "Extra indexes (NDX, RUT, DJX) with their own speed alerts: one IB line each, single source, FAST at most.",
+        _watch_symbols,
+        label="Tail-risk extra indexes",
+        default=[],
+        env_value=lambda: [],
+        consumers=("risk_guard.config.watch_symbols",),
     ),
     Setting(
         "orders_paused",

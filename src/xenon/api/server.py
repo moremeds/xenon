@@ -53,6 +53,7 @@ from xenon.api.routes.wizard import router as wizard_router
 from xenon.api.subprocess import ScriptResult, run_entry_point
 from xenon.api.routes.market import router as market_router
 from xenon.api.routes.ratings import router as ratings_router
+from xenon.api.routes.risk import router as risk_router
 from xenon.api.routes import settings as settings_routes
 from xenon.api.routes.settings import router as settings_router
 from xenon.api.routes.order_entry import router as order_entry_router
@@ -668,6 +669,12 @@ async def lifespan(app: FastAPI):
     # evaluates there but never writes.
     _maybe_start_wizard_risk_alert()
 
+    # Tail-risk guard (spec 2026-11-08): SPX speed / account ratios / BLIND
+    # alerts. Never orders. Starts with an unresolved scope too (BLIND cause).
+    from xenon.api.services.risk_guard import app as risk_guard_app
+
+    risk_guard_app.maybe_start()
+
     # W4.7 — PG-event-driven journal auto-import listener.
     # Replaces the legacy periodic /journal/sync flow. Failures must not
     # block boot.
@@ -707,6 +714,9 @@ async def lifespan(app: FastAPI):
                 _SHUTDOWN_STEP_S["poller"],
             )
             await _bounded_cleanup("wizard risk alert", _stop_wizard_risk_alert(), _SHUTDOWN_STEP_S["wizard"])
+            from xenon.api.services.risk_guard import app as risk_guard_app
+
+            await _bounded_cleanup("risk guard", risk_guard_app.stop(app), _SHUTDOWN_STEP_S["risk_guard"])
             await _bounded_cleanup(
                 "futu history loop",
                 _cancel_task(getattr(app.state, "futu_history_loop_task", None)),
@@ -841,6 +851,7 @@ app.include_router(futu_router)
 app.include_router(blotter_router)
 app.include_router(market_router)
 app.include_router(ratings_router)
+app.include_router(risk_router)
 app.include_router(settings_router)
 
 
@@ -881,6 +892,7 @@ _SHUTDOWN_STEP_S = {
     "listener": 2,
     "poller": 1,
     "wizard": 1,
+    "risk_guard": 1,
     "futu_loop": 1,
     "futu_observation": 1,
     "futu_orders": 1,

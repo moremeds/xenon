@@ -49,6 +49,7 @@ EXCLUDE_DIRS = {
     "_archive",  # docs/handovers/_archive, docs/note/_archive — archived historical docs
     "tasks",  # tasks/lessons.md, tasks/PROGRESS.md — historical context
     "output",  # test-output captures
+    "tmp",  # gitignored scratch; review evidence keeps copies of this guard
 }
 
 # File extensions to scan. Skip binaries.

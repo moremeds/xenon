@@ -9282,3 +9282,70 @@ tr {
 .wizard-risk-alert__text {
   color: var(--text-secondary);
 }
+
+/* Tail-risk guard banner (FastAPI lifespan task, GET /risk/state). */
+.risk-guard-banner {
+  border-bottom: 1px solid var(--line-grid);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.risk-guard-incident {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-left: 3px solid var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
+
+.risk-guard-incident--crash,
+.risk-guard-incident--blind {
+  border-left-color: var(--negative);
+  background: color-mix(in srgb, var(--negative) 10%, transparent);
+}
+
+.risk-guard-incident__label {
+  font-weight: 700;
+  color: var(--warning);
+}
+
+.risk-guard-incident--crash .risk-guard-incident__label,
+.risk-guard-incident--blind .risk-guard-incident__label {
+  color: var(--negative);
+}
+
+.risk-guard-incident__text {
+  flex: 1;
+  color: var(--text-secondary);
+}
+
+.risk-guard-incident__ack,
+.risk-guard-meta__toggle {
+  font: inherit;
+  padding: 2px 8px;
+  border: 1px solid var(--line-grid);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.risk-guard-incident__acked {
+  color: var(--text-secondary);
+}
+
+.risk-guard-meta,
+.risk-guard-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 14px;
+  color: var(--text-secondary);
+}
+
+.risk-guard-meta__error {
+  color: var(--negative);
+}

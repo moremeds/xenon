@@ -45,6 +45,7 @@ import {
   classifyIBConnectionError,
   isInfoCode,
   isDepthPermissionError,
+  staleRestartCooldownMs,
 } from "./ib_connection_status.js";
 import {
   createPriceData,
@@ -54,6 +55,7 @@ import {
   updatePriceFromTickSize,
   applyAuthoritativeClose,
   selectCompletedBarClose,
+  maskStaleIndexLast,
 } from "./ib_tick_handler.js";
 import { pickEvictable, pickAdmittable, linesToShed } from "./line_budget.js";
 import { LRUCache } from "../../lib/lru-cache.js";
@@ -707,6 +709,7 @@ const STALE_CHECK_INTERVAL_MS = 30_000; // Check every 30s
 let lastTickTimestamp = Date.now();
 let staleCheckTimer = null;
 let ibGatewayRestarting = false;
+let staleRestartStreak = 0; // consecutive stale-data restarts with no tick in between
 
 function isUSMarketHours() {
   // Convert to ET and check if within 9:30-16:00 Mon-Fri
@@ -726,6 +729,13 @@ const GATEWAY_MODE = process.env.IB_GATEWAY_MODE || "docker";
 async function restartIBGateway() {
   if (ibGatewayRestarting) return;
   ibGatewayRestarting = true;
+  staleRestartStreak += 1;
+  const cooldownMs = staleRestartCooldownMs(staleRestartStreak);
+  if (staleRestartStreak >= 3) {
+    console.error(
+      `[stale-data] ${staleRestartStreak} reconnects without a tick — IB is sending no market data upstream; next attempt in ${Math.round(cooldownMs / 60_000)} min`,
+    );
+  }
   console.log(
     "\x1b[31m[stale-data] No ticks received during market hours — handling stale data\x1b[0m",
   );
@@ -756,10 +766,10 @@ async function restartIBGateway() {
     }
   }
 
-  // Allow another attempt after 120s cooldown
+  // Allow another attempt after the (backed-off) cooldown
   setTimeout(() => {
     ibGatewayRestarting = false;
-  }, 120_000);
+  }, cooldownMs);
 }
 
 /* ─── Batched Price Relay ──────────────────────────────────────────────────
@@ -1578,11 +1588,14 @@ function computeStale(state) {
   return at == null || Date.now() - at > STALE_TICK_MS;
 }
 function withStale(state) {
-  return {
-    ...state.data,
-    stale: computeStale(state),
-    mdType: state.mdType ?? null,
-  };
+  return maskStaleIndexLast(
+    {
+      ...state.data,
+      stale: computeStale(state),
+      mdType: state.mdType ?? null,
+    },
+    isUSMarketHours(),
+  );
 }
 
 // stale on a Futu-routed row: its own timestamp aged past STALE_TICK_MS — the
@@ -1756,6 +1769,7 @@ function hydrateAndBroadcast(symbol) {
 
 function onTickPrice(tickerId, tickType, price) {
   lastTickTimestamp = Date.now();
+  staleRestartStreak = 0;
   const symbol = requestIdToSymbol.get(tickerId);
   const liveState = symbol ? symbolStates.get(symbol) : null;
   const snapshotState = snapshotRequests.get(tickerId);
@@ -1779,6 +1793,7 @@ function onTickPrice(tickerId, tickType, price) {
 
 function onTickSize(tickerId, sizeType, size) {
   lastTickTimestamp = Date.now();
+  staleRestartStreak = 0;
   const symbol = requestIdToSymbol.get(tickerId);
   const liveState = symbol ? symbolStates.get(symbol) : null;
   const snapshotState = snapshotRequests.get(tickerId);
@@ -2520,6 +2535,8 @@ function wireIBEvents() {
       `IB connected (clientId ${IB_CLIENT_ID_POOL[activeClientIdIndex]})`,
     );
     reconnectTimer = null;
+    // A fresh connection gets a full stale window before the next stale check.
+    lastTickTimestamp = Date.now();
     // Request Delayed-Frozen data so closed-market queries return last known prices
     // Type 4 cascades: Live → Delayed → Frozen → Delayed-Frozen
     ib.reqMarketDataType(4);
@@ -2570,7 +2587,8 @@ function wireIBEvents() {
     // object (unlike the dead ib@0.2.9 lib). Informational codes also surface
     // here; short-circuit them so they never flip ib_connected.
     if (isInfoCode(code)) {
-      verbose(`IB info ${code}: ${msg}`);
+      // Farm connect / broken / OK codes: normal-level log (risk-guard P0 §1 diagnosis).
+      console.log(`IB info ${code}: ${msg}`);
       return;
     }
     const tickerId = reqId;
@@ -2693,7 +2711,7 @@ function wireIBEvents() {
   // @stoqey/ib routes informational notifications (data-farm OK chatter, etc.)
   // onto a separate `info` channel — log only, never touch ibConnected.
   ib.on(EventName.info, (message, code) => {
-    verbose(`IB info ${code}: ${message}`);
+    console.log(`IB info ${code}: ${message}`);
   });
 
   ib.on(EventName.tickPrice, (tickerId, tickType, price) => {

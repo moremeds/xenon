@@ -193,7 +193,7 @@ Full enforcement matrix and combo logic: `src/xenon/CLAUDE.md` § Naked Short Pr
 uv run xenon-market-hours   # market-hours helper (xenon.utils.market_calendar)
 ```
 
-`xenon.utils.market_calendar` is the only Python market-open check: regular session 09:30–16:00 ET, Mon–Fri, ET-aware (a naive `datetime` raises), full-day holidays from `src/xenon/config/market_holidays.json`. Early closes (13:00 ET) are not modelled. The web `useMarketHours` hook and `scripts/infra/ib_realtime/ib_realtime_server.js` keep their own checks.
+`xenon.utils.market_calendar` is the only Python market-open check: regular session 09:30–16:00 ET, Mon–Fri, ET-aware (a naive `datetime` raises), full-day holidays from `src/xenon/config/market_holidays.json`, 13:00 ET early closes from `src/xenon/config/market_early_closes.json` (`session_close`). `us_equity_session` gives the stock/ETF session: `rth`, `extended` (04:00–09:30, close–20:00 or 17:00 on an early close), `overnight` (Sun–Thu 20:00 → 03:50) or `closed`. The web `useMarketHours` hook and `scripts/infra/ib_realtime/ib_realtime_server.js` keep their own checks.
 
 Quotes, fills, and position updates flow whenever IB Gateway is connected. Outside RTH the portfolio still renders from the last `account_snapshots.payload`; flag stale data in the UI rather than swap to a different source.
 
