@@ -466,6 +466,23 @@ async def health():
         "flex_divergence": _flex_divergence_health(),
         "flex_token": flex_token_status(),
         "realtime_subscribers": await asyncio.to_thread(_realtime_subscribers_health),
+        "risk_guard": _risk_guard_health(),
+    }
+
+
+def _risk_guard_health() -> dict:
+    """Public /health block: no account values (the path is auth-exempt)."""
+    from xenon.api import server
+
+    guard = getattr(server.app.state, "risk_guard", None)
+    if guard is None:
+        return {"running": False}
+    return {
+        "running": True,
+        "enabled": guard.enabled_fn(),
+        "tier": guard.state()["tier"],
+        "blind": sorted(guard.health),
+        "last_tick_at": guard.last_tick_at,
     }
 
 
