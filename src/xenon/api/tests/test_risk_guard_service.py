@@ -36,9 +36,7 @@ class Feed:
 
     async def read(self, extra=()):
         at, close = self.clock.wall(), {"SPX": 7000.0, "SPY": 700.0, "NDX": 25000.0}
-        return {
-            n: Quote(p, close[n], at, True) for n, p in self.prices.items() if p and n in ("SPX", "SPY", *extra)
-        }
+        return {n: Quote(p, close[n], at, True) for n, p in self.prices.items() if p and n in ("SPX", "SPY", *extra)}
 
 
 class Notifier:
