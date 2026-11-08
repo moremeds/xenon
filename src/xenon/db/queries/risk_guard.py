@@ -66,3 +66,18 @@ async def recent_events(engine: AsyncEngine, scope: AccountScope, limit: int = 5
     async with engine.connect() as conn:
         rows = (await conn.execute(stmt)).mappings().all()
     return [{**r, "occurred_at": r["occurred_at"].isoformat()} for r in rows]
+
+
+async def events_since(engine: AsyncEngine, scope: AccountScope, since: datetime) -> list[dict[str, Any]]:
+    """Incident rows of ``scope`` since ``since``, oldest first (guard restart restore)."""
+    c = risk_events.c
+    stmt = (
+        select(c.incident_key, c.incident_id, c.kind, c.severity, c.detail)
+        .where(c.broker == scope.broker)
+        .where(c.account_env == scope.account_env)
+        .where(c.broker_account == scope.broker_account)
+        .where(c.occurred_at >= since)
+        .order_by(c.occurred_at, c.id)
+    )
+    async with engine.connect() as conn:
+        return [dict(r) for r in (await conn.execute(stmt)).mappings().all()]

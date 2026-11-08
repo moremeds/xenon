@@ -8,8 +8,13 @@ One ``tick`` per second:
 3. collect BLIND causes: market feed health (RTH) plus system causes in the
    watch window (trading day, 09:00 ET to the close);
 4. step the incident book; send each event (push + email), then record it in
-   ``risk_events`` best-effort (never under ``XENON_READ_ONLY``);
+   ``risk_events`` best-effort (never under ``XENON_READ_ONLY``); a closed
+   incident is recorded (``close``), never sent;
 5. every ``HEARTBEAT_S`` post the dead-man heartbeat, when configured.
+
+Restart: before the first step, incidents acked earlier on the same ET date
+and not closed are restored acked (``restore_fn``, read once), so a deploy does
+not re-page an acked incident. A failed read restores nothing: alerts as usual.
 
 IO edges are injected so the loop is testable without IB or Postgres.
 """
@@ -19,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from datetime import date, datetime, timezone
 from datetime import time as dtime
 from typing import Any, Awaitable, Callable
@@ -60,6 +65,7 @@ WINDOWS = {"5m": 300, "15m": 900, "30m": 1800, "60m": 3600}
 SnapshotFn = Callable[[Any], Awaitable["tuple[dict, datetime] | None"]]
 BasisFn = Callable[[Any, date], Awaitable[DrawdownBasis]]
 RecordFn = Callable[..., Awaitable[None]]
+RestoreFn = Callable[[Any, datetime], Awaitable["list[dict[str, Any]]"]]
 
 
 def in_watch_window(wall: datetime) -> bool:
@@ -91,6 +97,7 @@ class RiskGuard:
         thresholds_fn: Callable[[], Thresholds] = rg_config.thresholds,
         levels_fn: Callable[[], tuple[float, ...]] = rg_config.key_levels,
         extra_fn: Callable[[], tuple[str, ...]] = rg_config.watch_symbols,
+        restore_fn: RestoreFn | None = None,
         mono: Callable[[], float] = time.monotonic,
         wall: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
@@ -98,11 +105,12 @@ class RiskGuard:
         self.snapshot_fn, self.basis_fn, self.record_fn, self.health_fn = snapshot_fn, basis_fn, record_fn, health_fn
         self.heartbeat_fn, self.read_only_fn, self.enabled_fn = heartbeat_fn, read_only_fn, enabled_fn
         self.thresholds_fn, self.levels_fn, self.mono, self.wall = thresholds_fn, levels_fn, mono, wall
-        self.extra_fn = extra_fn
+        self.extra_fn, self.restore_fn = extra_fn, restore_fn
+        self._restored = False
         th = Thresholds()
         self.sources = {"SPX": SourceState("SPX"), "SPY": SourceState("SPY")}
         self.extra: dict[str, SourceState] = {}  # single-source indexes, own incidents, no BLIND
-        self.book = IncidentBook(th)
+        self.book = IncidentBook(th, epoch=f"{int(self.wall().timestamp() * 1000)}.")
         self.leverage = RatioAlarm("leverage", th.leverage_levels, th.leverage_step, higher_is_worse=True)
         self.drawdown = RatioAlarm("drawdown", th.drawdown_levels, th.drawdown_step, higher_is_worse=False)
         self.snapshot: tuple[dict, datetime] | None = None
@@ -123,6 +131,8 @@ class RiskGuard:
         self._redeliver: dict[str, tuple[Event, str, str, Any, int, float, float, int]] = {}
         self._rev: dict[str, int] = {}  # per-key dispatch revision: an older in-flight send never re-queues
         self._records_in_flight = 0
+        # (event, scope, attempt, due): close / ack_void rows the restart restore depends on
+        self._lifecycle_retry: list[tuple[Event, Any, int, float]] = []
 
     # ── evaluation ───────────────────────────────────────────────────
 
@@ -187,7 +197,13 @@ class RiskGuard:
             m = self._single_inputs(src, now)
             t, r = market_tier(m, th)
             extras[sym] = (min(t, FAST), r, m)  # one source, no cross-check: FAST at most
+        if not self._restored:
+            self._restored = True
+            await self._restore(scope, wall, now)
         events = self.book.step(now, (self.tier, reasons), self.inputs, health, extras) + events
+        closed, self.book.closed = self.book.closed, []
+        for ev in closed:
+            self._spawn(self._record_lifecycle(ev, scope))
 
         if self.account is not None and daily_line_due(et, self.daily_sent):
             self.daily_sent = et.date()
@@ -196,6 +212,9 @@ class RiskGuard:
         for ev in events:
             self._dispatch(ev, scope)
         self._redeliver_due(now)
+        for item in [x for x in self._lifecycle_retry if now >= x[3]]:
+            self._lifecycle_retry.remove(item)
+            self._spawn(self._record_lifecycle(item[0], item[1], item[2]))
         if self.heartbeat_fn is not None and now - self._beat_at >= HEARTBEAT_S:
             self._beat_at = now
             self._spawn(self.heartbeat_fn(self.heartbeat_payload(wall, now)))
@@ -376,6 +395,13 @@ class RiskGuard:
             self._records_in_flight -= 1
         return True
 
+    async def _record_lifecycle(self, ev: Event, scope: Any, attempt: int = 0) -> None:
+        """A row the restart restore reads (``close``, ``ack_void``): retried like a failed send."""
+        if await self._record(ev, scope, {"reasons": list(ev.reasons)}):
+            return
+        if scope is not None and not self.read_only_fn() and attempt + 1 < REDELIVER_MAX:
+            self._lifecycle_retry.append((ev, scope, attempt + 1, self.mono() + REDELIVER_S))
+
     async def ack(self, key: str) -> str:
         """Persist the ack, then apply it. ``ok`` | ``unknown`` | ``unavailable`` (no DB: alerts go on)
         | ``changed`` (the incident rose or was replaced during the write: not applied, ack again)."""
@@ -386,14 +412,33 @@ class RiskGuard:
         # (a worsening during the write must still alert), no send in between.
         iid, severity, sent_at, ref = inc.incident_id, inc.severity, inc.last_sent_at, inc.last_inputs
         ev = Event(key, "ack", severity, inc.reasons, iid)
-        if not await self._record(ev, self.scope_fn(), {"reasons": list(inc.reasons)}):
+        detail = {"reasons": list(inc.reasons), "ref": asdict(ref) if ref is not None else None}
+        scope = self.scope_fn()
+        if not await self._record(ev, scope, detail):
             return "unavailable"
         cur = self.book.incidents.get(key)
         if cur is None or cur.incident_id != iid or cur.severity > severity or cur.last_sent_at != sent_at:
+            # The ack row is written but not applied: void it, or a restart would restore it.
+            await self._record_lifecycle(Event(key, "ack_void", severity, inc.reasons, iid), scope)
             return "changed"
         self.book.ack(key, self.mono(), ref)
         self._redeliver.pop(key, None)
         return "ok"
+
+    async def _restore(self, scope: Any, wall: datetime, now: float) -> None:
+        if scope is None or self.restore_fn is None:
+            return
+        since = wall.astimezone(market_calendar.ET).replace(hour=0, minute=0, second=0, microsecond=0)
+        try:
+            async with asyncio.timeout(DB_TIMEOUT_S):
+                rows = await self.restore_fn(scope, since)
+        except Exception as exc:  # noqa: BLE001 — no restore = open incidents alert again (fail loud)
+            logger.error("risk guard: ack restore failed (%s); open incidents alert again", type(exc).__name__)
+            return
+        for key, (iid, severity, ref) in acked_incidents(rows).items():
+            self.book.restore(key, iid, severity, ref, now)
+        if self.book.incidents:
+            logger.info("risk guard: restored acked incidents %s", sorted(self.book.incidents))
 
     async def drain(self) -> None:
         if self._pending:
@@ -514,6 +559,39 @@ class RiskGuard:
             "db_ok": self.db_ok,
             "last_notification": self.last_result,
         }
+
+
+_INPUT_FIELDS = {f.name for f in fields(MarketInputs)}
+
+
+def acked_incidents(rows: list[dict[str, Any]]) -> dict[str, tuple[str, int, MarketInputs | None]]:
+    """``risk_events`` rows (oldest first) -> key: (incident id, severity, ack reference)
+    for incidents whose latest state is acked: the last ack/worsening row is newer
+    than any open, repeat, rise, ack_void or close row of the same incident id. A
+    later incident id of the same key wins. Residual: a lifecycle row that failed
+    every retry (``REDELIVER_MAX``) can restore a stale ack on the same ET date."""
+    state: dict[str, tuple[str, bool, int, MarketInputs | None]] = {}
+    for r in rows:
+        key, iid, kind = r["incident_key"], r["incident_id"], r["kind"]
+        if key.startswith("ratio:") or kind not in ("open", "repeat", "rise", "worsening", "ack", "ack_void", "close"):
+            continue
+        prev = state.get(key)
+        ref = prev[3] if prev and prev[0] == iid else None
+        if kind == "ack":
+            raw = (r.get("detail") or {}).get("ref")
+            try:
+                ref = (
+                    None
+                    if raw is None
+                    else MarketInputs(
+                        **{k: tuple(v) if k == "levels_broken" else v for k, v in raw.items() if k in _INPUT_FIELDS}
+                    )
+                )
+            except (TypeError, ValueError):
+                ref = None  # unreadable reference: seeded by the first value seen
+        acked = kind == "ack" or (kind == "worsening" and bool(prev and prev[0] == iid and prev[1]))
+        state[key] = (iid, acked, int(r["severity"]), ref)
+    return {k: (iid, sev, ref) for k, (iid, acked, sev, ref) in state.items() if acked}
 
 
 def priority(ev: Event) -> int:

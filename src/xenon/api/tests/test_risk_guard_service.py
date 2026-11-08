@@ -343,7 +343,7 @@ async def test_slow_basis_keeps_the_snapshot(monkeypatch):
 @pytest.mark.asyncio
 async def test_ack_not_applied_when_the_incident_rises_during_the_write():
     clock = Clock()
-    g, n, _ = _guard(clock)
+    g, n, records = _guard(clock)
     await _run(g, clock, 1800)
     await _run(g, clock, 5, fall=lambda t: -0.016)  # FAST
     gate, record = asyncio.Event(), g.record_fn
@@ -362,6 +362,9 @@ async def test_ack_not_applied_when_the_incident_rises_during_the_write():
     assert await task == "changed"
     inc = g.book.incidents["market"]
     assert inc.severity == CRASH and inc.acked_at is None
+    kinds = [r["kind"] for r in records if r["incident_key"] == "market"]
+    assert kinds.index("ack_void") > kinds.index("ack")  # a restart must not restore it
+    assert rg_service.acked_incidents(records) == {}
 
 
 @pytest.mark.asyncio
@@ -484,3 +487,119 @@ async def test_an_older_in_flight_send_never_requeues_a_retry():
     g._rev["market"] = 2  # a newer send for the key was dispatched meanwhile
     await g._send(Event("market", "open", 1, (), "market#1"), "t", "b", LIVE, 0, 0.0, 1)
     assert g._redeliver == {}
+
+
+# ── restart: acks survive (plan 2026-11-09 P2.0) ─────────────────────
+
+
+async def _restarted(clock, rows, excess):
+    """A second guard (a restart) whose restore read returns ``rows``."""
+    g, n, records = _guard(clock, snapshot=None)
+    seen = []
+
+    async def restore(scope, since):
+        seen.append(since)
+        return rows
+
+    g.restore_fn = restore
+    g.snapshot_fn = lambda _s: _snap(clock, excess)
+    return g, n, records, seen
+
+
+async def _snap(clock, excess):
+    return _payload(excess=excess), clock.wall() - timedelta(seconds=5)
+
+
+@pytest.mark.asyncio
+async def test_restart_keeps_an_acked_incident_quiet_and_alerts_on_worsening():
+    clock = Clock()
+    g1, n1, rows = _guard(clock)
+    g1.snapshot_fn = lambda _s: _snap(clock, 100_000.0)  # cushion 10 %: FAST
+    await _run(g1, clock, 5)
+    assert any("FAST" in s[0] for s in n1.sent)
+    assert await g1.ack("market") == "ok"
+    assert rows[-1]["kind"] == "ack" and rows[-1]["detail"]["ref"]["cushion"] == pytest.approx(0.10)
+
+    g2, n2, _, seen = await _restarted(clock, list(rows), 100_000.0)
+    await _run(g2, clock, 90)
+    assert [s for s in n2.sent if "FAST" in s[0]] == []  # no re-page after the restart
+    assert seen == [clock.start.astimezone(ET).replace(hour=0, minute=0, second=0, microsecond=0)]
+    assert g2.book.incidents["market"].incident_id == rows[-1]["incident_id"]
+
+    g3, n3, _, _ = await _restarted(clock, list(rows), 80_000.0)  # cushion fell 2 pp while down
+    await _run(g3, clock, 3)
+    assert any("FAST" in s[0] for s in n3.sent)
+
+
+@pytest.mark.asyncio
+async def test_restart_without_restore_or_failed_read_pages_again():
+    clock = Clock()
+    g1, _, rows = _guard(clock)
+    g1.snapshot_fn = lambda _s: _snap(clock, 100_000.0)
+    await _run(g1, clock, 5)
+    await g1.ack("market")
+
+    g2, n2, _, _ = await _restarted(clock, [], 100_000.0)
+    await _run(g2, clock, 3)
+    assert any("FAST" in s[0] for s in n2.sent)
+    assert g2.book.incidents["market"].incident_id != rows[-1]["incident_id"]  # ids unique across restarts
+
+    g3, n3, _, _ = await _restarted(clock, rows, 100_000.0)
+
+    async def down(scope, since):
+        raise OSError("db down")
+
+    g3.restore_fn = down
+    await _run(g3, clock, 3)
+    assert any("FAST" in s[0] for s in n3.sent)  # fail loud
+
+
+@pytest.mark.asyncio
+async def test_cleared_incident_records_close_and_is_not_restored():
+    clock = Clock()
+    g, _, rows = _guard(clock)
+    excess = [100_000.0]
+    g.snapshot_fn = lambda _s: _snap(clock, excess[0])
+    await _run(g, clock, 5)
+    await g.ack("market")
+    excess[0] = 500_000.0  # cushion 50 %: clear
+    await _run(g, clock, 400)
+    assert rows[-1]["kind"] == "close" and "market" not in g.book.incidents
+    assert rg_service.acked_incidents(rows) == {}
+
+
+def test_acked_incidents_follows_the_latest_row_per_key():
+    def row(kind, iid="market#1", sev=2, ref=None):
+        return {"incident_key": "market", "incident_id": iid, "kind": kind, "severity": sev, "detail": {"ref": ref}}
+
+    ref = {"cushion": 0.1, "levels_broken": [6950.0], "session_low": None, "bogus": 1}
+    got = rg_service.acked_incidents([row("open"), row("ack", ref=ref)])
+    assert got["market"][0:2] == ("market#1", 2) and got["market"][2].levels_broken == (6950.0,)
+    assert rg_service.acked_incidents([row("open"), row("ack"), row("rise", sev=3)]) == {}
+    assert rg_service.acked_incidents([row("ack"), row("repeat")]) == {}
+    assert "market" in rg_service.acked_incidents([row("ack", ref=ref), row("worsening")])
+    assert rg_service.acked_incidents([row("ack"), row("close"), row("open", iid="market#2")]) == {}
+    assert rg_service.acked_incidents([row("worsening")]) == {}  # no ack seen today
+    assert rg_service.acked_incidents([row("ack", ref={"cushion": "x", "no": 1, "shorts_crossed": None})])
+
+
+@pytest.mark.asyncio
+async def test_failed_close_row_is_retried():
+    clock = Clock()
+    g, _, rows = _guard(clock)
+    excess, fail = [100_000.0], [3]
+    g.snapshot_fn = lambda _s: _snap(clock, excess[0])
+    record = g.record_fn
+
+    async def flaky(scope, **kw):
+        if kw["kind"] == "close" and fail[0]:
+            fail[0] -= 1
+            raise OSError("db down")
+        await record(scope, **kw)
+
+    g.record_fn = flaky
+    await _run(g, clock, 5)
+    excess[0] = 500_000.0
+    for _ in range(16):  # account refresh + clear_s, then 3 retries; drain each step (spawned writes run)
+        await _run(g, clock, 31)
+    assert fail[0] == 0 and [r["kind"] for r in rows].count("close") == 1

@@ -66,6 +66,14 @@ async def test_record_and_read_events(eng):
     assert rows[1]["detail"]["reasons"] == ["day -3.10%"]
     assert isinstance(rows[0]["occurred_at"], str)
 
+    since = datetime.now(timezone.utc) - timedelta(hours=1)
+    rows = await q.events_since(eng, SCOPE, since)
+    assert [r["kind"] for r in rows] == ["open", "ack"]  # oldest first: the restart restore input
+    assert set(rows[0]) == {"incident_key", "incident_id", "kind", "severity", "detail"}
+    assert await q.events_since(eng, SCOPE, datetime.now(timezone.utc) + timedelta(hours=1)) == []
+    other = AccountScope(broker="IB", account_env="live", broker_account=ACCT)
+    assert await q.events_since(eng, other, since) == []
+
 
 async def test_drawdown_basis_uses_close_rows_and_flows(eng):
     async with eng.begin() as c:

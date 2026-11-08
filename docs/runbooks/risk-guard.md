@@ -59,6 +59,21 @@ pool. A send that reached no channel (a channel failed) is retried every 30 s,
 up to 10 times, until a newer send for the same key goes out or the incident
 is acked. Paper / test scopes prefix titles with `[TEST]`.
 
+**Restart.** A guard restart (deploy, api recreate) does not re-page an acked
+incident. Before its first evaluation the guard reads the scope's
+`risk_events` rows of the current ET date and restores, acked, every incident
+whose last lifecycle row is `ack` (or a `worsening` after it): no later
+`open` / `repeat` / `rise` / `ack_void` / `close` row of the same incident id.
+The first tick then compares live values with the ack reference, so a rise or
+a worsening during the downtime alerts at once. A cleared incident writes a
+`close` row; an ack that was written but not applied (the incident rose during
+the write, 409 `RISK_INCIDENT_CHANGED`) writes `ack_void`. Both rows retry
+every 30 s, up to 10 times. A failed restore read restores nothing: open
+incidents page again (fail loud). Limits: unacked incidents re-open and page
+after a restart; the leverage / drawdown ratio alarms and the daily line send
+once again after a restart; a lifecycle row that failed all retries can
+restore a stale ack on the same ET date.
+
 ## Enable
 
 Set in `/opt/xenon/.env` (secrets live only there), then recreate the api

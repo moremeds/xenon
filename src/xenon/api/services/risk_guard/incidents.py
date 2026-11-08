@@ -15,7 +15,8 @@ flapping on a threshold sends at most every ``repeat_s``. A missing reference
 value is seeded by the first value seen after the ack. An incident closes
 after its condition stays clear for ``clear_s``; a market evaluation with no
 available input at all holds the incident (missing data is a BLIND cause,
-never "clear").
+never "clear"). A closed incident is queued in ``closed`` (recorded, never
+sent). ``restore`` re-creates an incident acked before a restart.
 
 Leverage and drawdown are standing conditions (``RatioAlarm``): they send on a
 level crossing in either direction and on each further step of worsening.
@@ -136,6 +137,8 @@ class Incident:
 class IncidentBook:
     th: Thresholds
     incidents: dict[str, Incident] = field(default_factory=dict)
+    epoch: str = ""  # per-process prefix: incident ids stay unique across restarts
+    closed: list[Event] = field(default_factory=list)
     _seq: int = 0
 
     def step(
@@ -176,6 +179,11 @@ class IncidentBook:
         inc.ref = ref if ref is not None else inc.last_inputs
         return True
 
+    def restore(self, key: str, incident_id: str, severity: int, ref: MarketInputs | None, now: float) -> None:
+        """An incident acked before a restart: acked at ``now``, no new open. The next
+        step alerts on a rise above ``severity`` or a worsening against ``ref``."""
+        self.incidents[key] = Incident(key, incident_id, severity, severity, now, severity, acked_at=now, ref=ref)
+
     def _advance(self, key, now, severity, reasons, inputs, *, repeats, events) -> None:
         if severity == 0:
             self._clear(key, now)
@@ -184,7 +192,15 @@ class IncidentBook:
         if inc is None:
             self._seq += 1
             inc = Incident(
-                key, f"{key}#{self._seq}", severity, severity, now, severity, reasons, ref=inputs, last_inputs=inputs
+                key,
+                f"{key}#{self.epoch}{self._seq}",
+                severity,
+                severity,
+                now,
+                severity,
+                reasons,
+                ref=inputs,
+                last_inputs=inputs,
             )
             self.incidents[key] = inc
             events.append(Event(key, "open", severity, reasons, inc.incident_id))
@@ -216,6 +232,7 @@ class IncidentBook:
             inc.clear_since = now
         elif now - inc.clear_since >= self.th.clear_s:
             del self.incidents[key]
+            self.closed.append(Event(key, "close", inc.severity, inc.reasons, inc.incident_id))
 
     def _worse(self, m: MarketInputs, ref: MarketInputs | None) -> bool:
         if ref is None:
