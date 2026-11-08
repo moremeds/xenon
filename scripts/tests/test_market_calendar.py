@@ -250,3 +250,70 @@ def test_cli_status_formats(monkeypatch):
     assert mc._status(_et(2026, 11, 25, 17, 0)) == "CLOSED (after hours)"
     assert mc._status(_et(2026, 11, 26, 12, 0)) == "CLOSED (holiday)"
     assert mc._status(_et(2026, 11, 28, 12, 0)) == "CLOSED (weekend)"
+
+
+# ── early closes (NYSE 13:00 ET; source nyse.com/markets/hours-calendars, read 2026-11-08) ──
+
+
+@pytest.mark.parametrize("d", [date(2025, 7, 3), date(2025, 11, 28), date(2025, 12, 24), date(2026, 11, 27), date(2026, 12, 24), date(2027, 11, 26)])
+def test_early_close_days_close_at_1300(d):
+    assert mc.session_close(d) == mc.EARLY_CLOSE
+    assert mc.is_open(datetime.combine(d, mc.time(12, 59), tzinfo=ET)) is True
+    assert mc.is_open(datetime.combine(d, mc.time(13, 0), tzinfo=ET)) is False
+    assert mc.is_open(datetime.combine(d, mc.time(13, 0, 30), tzinfo=ET), close_inclusive_minute=True) is True
+    assert mc.is_open(datetime.combine(d, mc.time(13, 1), tzinfo=ET), close_inclusive_minute=True) is False
+
+
+def test_plain_day_closes_at_1600():
+    assert mc.session_close(date(2026, 11, 25)) == mc.MARKET_CLOSE
+
+
+def test_last_close_on_early_close_day_is_1300():
+    assert mc.last_close(_et(2026, 11, 27, 14, 0)) == _et(2026, 11, 27, 13, 0)
+    # Before the early close, the last close is the prior trading day (Wed 11-25).
+    assert mc.last_close(_et(2026, 11, 27, 12, 0)) == _et(2026, 11, 25, 16, 0)
+    # Monday after: last close is the Friday early close.
+    assert mc.last_close(_et(2026, 11, 30, 9, 0)) == _et(2026, 11, 27, 13, 0)
+
+
+def test_early_close_file_missing_year_raises(monkeypatch):
+    monkeypatch.setattr(mc, "_load_early_closes", lambda: {})
+    with pytest.raises(mc.CalendarYearMissing):
+        mc.session_close(date(2026, 3, 3))
+
+
+def test_early_close_years_match_holiday_years():
+    assert set(mc._load_early_closes()) == set(mc._load_file())
+
+
+# ── us_equity_session (stocks / ETFs incl. Blue Ocean overnight) ─────
+
+
+@pytest.mark.parametrize(
+    "when,expected",
+    [
+        (_et(2026, 11, 9, 10, 0), "rth"),  # Mon
+        (_et(2026, 11, 9, 5, 0), "extended"),  # pre
+        (_et(2026, 11, 9, 17, 0), "extended"),  # after
+        (_et(2026, 11, 9, 3, 0), "overnight"),  # Sun-evening session into Mon
+        (_et(2026, 11, 9, 3, 55), "closed"),  # 03:50-04:00 gap
+        (_et(2026, 11, 9, 20, 30), "overnight"),  # Mon evening into Tue
+        (_et(2026, 11, 8, 20, 30), "overnight"),  # Sun evening
+        (_et(2026, 11, 8, 12, 0), "closed"),  # Sun midday
+        (_et(2026, 11, 13, 21, 0), "closed"),  # Fri evening: no overnight
+        (_et(2026, 11, 14, 2, 0), "closed"),  # Sat early
+        (_et(2026, 11, 25, 21, 0), "closed"),  # Wed evening before Thanksgiving
+        (_et(2026, 11, 26, 12, 0), "closed"),  # Thanksgiving
+        (_et(2026, 11, 26, 21, 0), "overnight"),  # Thu evening into the Friday early close
+        (_et(2026, 11, 27, 12, 30), "rth"),
+        (_et(2026, 11, 27, 14, 0), "extended"),  # late session to 17:00 on early close
+        (_et(2026, 11, 27, 17, 30), "closed"),
+    ],
+)
+def test_us_equity_session(when, expected):
+    assert mc.us_equity_session(when) == expected
+
+
+def test_us_equity_session_naive_rejected():
+    with pytest.raises(ValueError):
+        mc.us_equity_session(datetime(2026, 11, 9, 10, 0))
