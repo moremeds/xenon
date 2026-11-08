@@ -5,6 +5,10 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+- **Tail-risk guard, P1 (alerts only, off by default).** After the 2026-11-05 SPX fall, a new api task (`XENON_RISK_GUARD=1`) watches SPX and SPY streaming quotes on the IB `data` role and the latest account snapshot every second. It sends push (ntfy) and email (Resend) alerts in three market tiers: WATCH (15 m −0.75 %, day −1 %, key level, cushion < 20 %), FAST (30 m −1.5 %, day −2 %, short strike within 0.5 %, cushion < 12 %; every 30 s until ack) and CRASH (60 m −2.5 %, day −3 %, long leg ITM, cushion < 8 %). It sends BLIND alerts when its own inputs fail (stale or divergent feed, orders halted, data connection down, IB upstream lost, DB down, stale snapshot). Leverage (Σ max loss / NLV) and flow-adjusted drawdown send on level changes, plus a 09:00 ET daily line. Incidents are acked from a new banner or `POST /risk/incidents/{key}/ack`. New table `xenon.risk_events` (migration `2026_11_09_risk_events`), routes `GET /risk/state`, `/health` `risk_guard` block, runtime settings `XENON_RISK_GUARD` / `XENON_RISK_THRESHOLDS` / `XENON_RISK_KEY_LEVELS`, optional dead-man heartbeat `XENON_RISK_HEARTBEAT_URL`. It never places, cancels or modifies an order. Runbook: `docs/runbooks/risk-guard.md`; replay: `docs/research/2026-11-08-risk-guard-replay.md`.
+- **Market calendar: NYSE early closes and the US equity session.** `session_close(d)` returns 13:00 ET on early-close days (`src/xenon/config/market_early_closes.json`), `is_open` / `last_close` use it, and `us_equity_session(now)` returns `rth`, `extended`, `overnight` (Sun–Thu 20:00 → 03:50) or `closed`.
+- **Relay: no stale cash-index last in RTH.** A stale index snapshot (SPX, VIX, …) in RTH now carries `last: null` instead of a frozen print; the stale-restart loop backs off (120 s doubling, max 30 min) and IB info codes are logged.
+
 ## [0.20.3] — 2026-10-28
 
 

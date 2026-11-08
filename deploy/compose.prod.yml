@@ -22,6 +22,11 @@
 # XENON_INTERNAL_API_TOKEN and WATCHTOWER_NOTIFICATION_URL must be defined
 # there.
 #
+# Tail-risk guard (P1 alerts): XENON_RISK_GUARD, XENON_RISK_NTFY_URL,
+# XENON_RISK_NTFY_TOKEN, XENON_RISK_RESEND_TOKEN, XENON_RISK_EMAIL_FROM,
+# XENON_RISK_EMAIL_TO, XENON_RISK_EMAIL_MAX_PER_DAY, XENON_RISK_HEARTBEAT_URL
+# go in /opt/xenon/.env (api env_file); docs/runbooks/risk-guard.md.
+#
 # Scheduled jobs (nav-flex-refresh, core_test refresh) are host launchd
 # entries that call `docker-compose -f /opt/xenon/compose.yml run --rm api
 # <cli>`. They need no extra service here. See deploy/jobs/.

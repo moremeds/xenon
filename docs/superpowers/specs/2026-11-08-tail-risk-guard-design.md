@@ -1,6 +1,6 @@
 # Tail-Risk Guard — design (v3: Fable advice, Astra review x2, user decisions 2026-11-08)
 
-Status: P0 (read-only + manual live probe) and P1 approved; P2+ need later approval. Nothing built. Branch `feat/tail-risk-guard`.
+Status: P0 (read-only + manual live probe) and P1 approved; P2+ need later approval. P1 (alerts only) built on branch `feat/tail-risk-guard` (runbook `docs/runbooks/risk-guard.md`); P0 live TWS probe still open.
 Inputs: lab-vrp (signal-lab), argon-22, helium-vrp, Fable advisory, Astra
 review (both local in `tmp/trg/`), code scan at `e673ad9d`.
 
