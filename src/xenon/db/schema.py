@@ -911,6 +911,28 @@ runtime_settings_audit = Table(
     Index("ix_runtime_settings_audit_key_changed", "key", "changed_at"),
 )
 
+# ---------- Tail-risk guard (spec 2026-11-08 §5.3) ----------
+# Append-only log of risk-guard notifications and acks. The notifier sends
+# first and records here best-effort, so a DB outage never blocks an alert.
+# kind: open | repeat | rise | worsening | cross | step | daily | ack.
+# detail: reasons, metrics, channel results (push / email).
+
+risk_events = Table(
+    "risk_events",
+    xenon_metadata,
+    Column("id", BigInteger, Identity(always=False), primary_key=True),
+    Column("broker", Text, nullable=False),
+    Column("account_env", Text, nullable=False),
+    Column("broker_account", Text, nullable=False),
+    Column("occurred_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Column("incident_key", Text, nullable=False),
+    Column("incident_id", Text, nullable=False),
+    Column("kind", Text, nullable=False),
+    Column("severity", Integer, nullable=False),
+    Column("detail", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Index("ix_risk_events_scope_at", "broker", "account_env", "broker_account", "occurred_at"),
+)
+
 # ---------- Watchlist ----------
 
 user_watchlist = Table(
