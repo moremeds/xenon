@@ -31,6 +31,13 @@ test("outside RTH the index close is the latest value and stays", () => {
   assert.equal(maskStaleIndexLast(s, false), s);
 });
 
+test("slow indexes keep their last: a flat live line can look stale", () => {
+  for (const sym of ["MOVE", "OVX", "COR1M", "VVIX"]) {
+    const s = snap(sym, { lastIsCalculated: false });
+    assert.equal(maskStaleIndexLast(s, true), s);
+  }
+});
+
 test("stocks and index options are untouched", () => {
   const stock = snap("SPY");
   assert.equal(maskStaleIndexLast(stock, true), stock);

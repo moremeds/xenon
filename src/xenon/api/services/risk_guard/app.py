@@ -104,7 +104,9 @@ def maybe_start() -> None:
         logger.error("risk guard started with no notification channel (XENON_RISK_NTFY_URL / XENON_RISK_RESEND_TOKEN)")
     app.state.risk_guard = guard
     app.state.risk_guard_task = asyncio.create_task(run_loop(guard))
-    logger.info("risk guard started: push=%s email=%s heartbeat=%s", cfg.push_on, cfg.email_on, guard.heartbeat_fn is not None)
+    logger.info(
+        "risk guard started: push=%s email=%s heartbeat=%s", cfg.push_on, cfg.email_on, guard.heartbeat_fn is not None
+    )
 
 
 async def stop(app: Any) -> None:

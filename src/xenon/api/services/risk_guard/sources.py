@@ -5,8 +5,12 @@ P1 sources: IB ``SPX`` (cash index) and IB ``SPY``, both streamed on the api
 source: no Python consumer of the futu-quotes stream exists yet.
 
 A tick = a new ``Ticker.time`` with a live (``marketDataType == 1``) price.
-Its age runs on the monotonic receive clock; a source time more than
-``SKEW_S`` off the wall clock is rejected. A source with no tick for
+ib_async stamps ``Ticker.time`` when it processes a message, so it is a
+receive time, not an exchange time: the ``SKEW_S`` gate only catches a bad
+API-host clock or a ticker read long after its update, and any tick on the
+line (a size or bid tick too) keeps the source fresh even if ``last`` is
+flat. ponytail: a per-price-change clock if a frozen ``last`` with live
+size ticks is ever seen. Ages run on the monotonic receive clock. A source with no tick for
 ``STALE_S`` is stale. In RTH every SPX-family source stale = ``FEED_STALE``,
 some stale = ``SOURCE_STALE``; fresh sources whose 5 m returns differ by more
 than ``DIVERGENCE`` = ``FEED_DIVERGENCE``. Outside RTH staleness is shown, not
@@ -17,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -131,12 +136,14 @@ class IBQuoteFeed:
 
     SYMBOLS = ("SPX", "SPY")
     TIMEOUT_S = 3.0
+    RECONNECT_EVERY_S = 30.0
 
     def __init__(self, pool: Any) -> None:
         self.pool = pool
         self._client: Any = None
         self._contracts: dict[str, Any] = {}
         self.last_error: str | None = None
+        self._reconnect_at: float | None = None
 
     def _contract(self, symbol: str) -> Any:
         from ib_async import Index, Stock
@@ -166,9 +173,18 @@ class IBQuoteFeed:
         return out
 
     async def read(self) -> dict[str, Quote]:
-        if self.pool is None or not self.pool.is_connected("data"):
-            self.last_error = "data role not connected"
+        """Quotes, or {} on any failure. A down data role is retried (the pool
+        reconnects inside ``acquire``) at most every ``RECONNECT_EVERY_S``: the
+        pool has no reconnect loop of its own, so without this a guard alone on
+        the role would stay blind after a gateway restart."""
+        if self.pool is None:
             return {}
+        if not self.pool.is_connected("data"):
+            now = time.monotonic()
+            if self._reconnect_at is not None and now - self._reconnect_at < self.RECONNECT_EVERY_S:
+                self.last_error = "data role not connected"
+                return {}
+            self._reconnect_at = now
         from xenon.api.ib_pool import call_data_bounded
 
         try:

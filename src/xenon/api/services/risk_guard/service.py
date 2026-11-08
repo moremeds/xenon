@@ -48,6 +48,8 @@ ACCOUNT_REFRESH_S = 30.0
 BASIS_REFRESH_S = 600.0
 HEARTBEAT_S = 30.0
 SNAPSHOT_STALE_S = 120.0
+DB_TIMEOUT_S = 5.0
+OPEN_GRACE_S = 60.0
 WATCH_FROM = dtime(9, 0)
 WINDOWS = {"5m": 300, "15m": 900, "30m": 1800, "60m": 3600}
 
@@ -99,6 +101,7 @@ class RiskGuard:
         self.snapshot: tuple[dict, datetime] | None = None
         self.basis: DrawdownBasis | None = None
         self.account: AccountView | None = None
+        self.view_error: str | None = None
         self.health: dict[str, str] = {}
         self.inputs = MarketInputs()
         self.tier = 0
@@ -138,10 +141,19 @@ class RiskGuard:
             self._acct_at = now
             await self._refresh_account(scope, wall, now, events)
         self.account = self._view(wall, now)
+        guard_errors = {"ACCOUNT_UNREADABLE": self.view_error} if self.view_error else {}
 
-        health = feed_health(list(self.sources.values()), now, rth=rth)
+        # The cash index first prints at the open: give it OPEN_GRACE_S before
+        # "no tick" counts (else SOURCE_STALE pages every morning at 09:30).
+        et = wall.astimezone(market_calendar.ET)
+        after_open = (et - et.replace(hour=9, minute=30, second=0, microsecond=0)).total_seconds() >= OPEN_GRACE_S
+        health = feed_health(list(self.sources.values()), now, rth=rth and after_open)
+        health.update(guard_errors)
         if in_watch_window(wall):
-            health.update(self.health_fn(wall))
+            try:
+                health.update(self.health_fn(wall))
+            except Exception as exc:  # noqa: BLE001
+                health["GUARD_ERROR"] = f"system health check failed ({type(exc).__name__})"
             if not self.db_ok:
                 health["DB_DOWN"] = "account snapshot read failed"
             age = self.account.snapshot_age_s if self.account else None
@@ -153,7 +165,6 @@ class RiskGuard:
         self.tier, reasons = market_tier(self.inputs, th)
         events = self.book.step(now, (self.tier, reasons), self.inputs, health) + events
 
-        et = wall.astimezone(market_calendar.ET)
         if self.account is not None and daily_line_due(et, self.daily_sent):
             self.daily_sent = et.date()
             events.append(Event("ratio:daily", "daily", 0, (), f"ratio:daily:{et.date()}"))
@@ -168,10 +179,14 @@ class RiskGuard:
 
     async def _refresh_account(self, scope: Any, wall: datetime, now: float, events: list[Event]) -> None:
         try:
-            snap = await self.snapshot_fn(scope)
-            if now - self._basis_at >= BASIS_REFRESH_S:
-                self.basis = await self.basis_fn(scope, wall.astimezone(market_calendar.ET).date())
-                self._basis_at = now
+            # ponytail: inline with a deadline, so a black-holed DB stalls one
+            # tick by <= DB_TIMEOUT_S every 30 s (ages are monotonic, no false
+            # stale); a background task if that ever matters.
+            async with asyncio.timeout(DB_TIMEOUT_S):
+                snap = await self.snapshot_fn(scope)
+                if now - self._basis_at >= BASIS_REFRESH_S:
+                    self.basis = await self.basis_fn(scope, wall.astimezone(market_calendar.ET).date())
+                    self._basis_at = now
         except Exception as exc:  # noqa: BLE001 — a DB failure is a BLIND cause, never a crash
             if self.db_ok:
                 logger.error("risk guard account read failed: %s", type(exc).__name__)
@@ -194,10 +209,16 @@ class RiskGuard:
         return {n: s.last for n, s in self.sources.items() if s.fresh(now) and s.last}
 
     def _view(self, wall: datetime, now: float) -> AccountView | None:
+        """Never raises: a bad snapshot must not silence the market channel."""
+        self.view_error = None
         if self.snapshot is None:
             return None
         payload, at = self.snapshot
-        return account_view(payload, at, wall, self._spots(now))
+        try:
+            return account_view(payload, at, wall, self._spots(now))
+        except Exception as exc:  # noqa: BLE001
+            self.view_error = f"account snapshot could not be evaluated ({type(exc).__name__})"
+            return None
 
     def _drawdown(self, view: AccountView | None) -> float | None:
         return drawdown(view.nlv if view else None, self.basis.peak if self.basis else None)
@@ -207,8 +228,14 @@ class RiskGuard:
         n = len(self.sources)
 
         def metric(fn) -> float | None:
-            vals = [fn(s) for s in fresh]
-            return agree(vals + [None] * (n - len(vals)), blind=blind)
+            # A fresh source still warming its window (after a gap) has no
+            # value and does not veto; a stale or absent source does, unless
+            # BLIND. Else one 25 s SPX gap would disable the 60 m trigger for
+            # an hour with no BLIND cause.
+            vals = [v for v in (fn(s) for s in fresh) if v is not None]
+            if not vals:
+                return None
+            return max(vals) if len(fresh) == n else agree(vals + [None] * (n - len(fresh)), blind=blind)
 
         spx = self.sources["SPX"]
         levels: tuple[float, ...] = ()
@@ -236,7 +263,12 @@ class RiskGuard:
         task.add_done_callback(self._pending.discard)
 
     def _dispatch(self, ev: Event, scope: Any) -> None:
-        title, body = self.render(ev, scope)
+        try:
+            title, body = self.render(ev, scope)
+        except Exception as exc:  # noqa: BLE001 — a render bug must not drop the alert
+            logger.exception("risk guard render failed")
+            title = f"RISK {ev.key} {ev.kind} (render failed: {type(exc).__name__})"
+            body = "; ".join(ev.reasons) or ev.key
         self._spawn(self._send(ev, title, body, scope))
 
     async def _send(self, ev: Event, title: str, body: str, scope: Any) -> None:

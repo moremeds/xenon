@@ -78,9 +78,16 @@ export function updateDerivedLast(data) {
 // which is not a price: withhold `last` so no consumer reads it as live (11-05,
 // risk-guard P0). `stale` stays true. Outside RTH the close IS the latest value.
 // Returns the snapshot itself or a copy; never mutates it.
+// Only indexes that print every few seconds in RTH: a slow index (MOVE, OVX,
+// COR1M, VVIX) can hold one value past the stale threshold on a live line.
+// Known limit: the relay session check has no holiday / early-close table, so
+// on those days these indexes show "---" in what would be RTH (the safe side:
+// never a stale close shown as live).
+const MASKED_INDEX_SYMBOLS = new Set(["SPX", "NDX", "RUT", "DJX", "VIX"]);
+
 export function maskStaleIndexLast(snapshot, sessionOpen) {
   if (!sessionOpen || !snapshot.stale || snapshot.last == null) return snapshot;
-  if (snapshot.symbol.includes("_") || !CASH_INDEX_SYMBOLS.has(snapshot.symbol)) return snapshot;
+  if (snapshot.symbol.includes("_") || !MASKED_INDEX_SYMBOLS.has(snapshot.symbol)) return snapshot;
   return { ...snapshot, last: null };
 }
 

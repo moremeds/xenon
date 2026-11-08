@@ -158,12 +158,29 @@ def test_ib_feed_resubscribes_on_new_client_or_dropped_ticker():
 
 
 @pytest.mark.asyncio
-async def test_ib_feed_read_without_data_role_is_empty():
-    from xenon.api.services.risk_guard.sources import IBQuoteFeed
+async def test_ib_feed_retries_a_down_data_role_at_most_every_30s(monkeypatch):
+    """The pool reconnects only inside acquire: a down role gets one bounded
+    attempt per RECONNECT_EVERY_S, else the guard stays blind after a restart."""
+    import xenon.api.ib_pool as ib_pool
+    from xenon.api.services.risk_guard import sources
+
+    calls = []
+
+    async def fake_call(pool, fn, timeout=None):
+        calls.append(timeout)
+        raise ConnectionError("IB pool: data is not connected")
 
     class _Pool:
         def is_connected(self, role):
             return False
 
-    feed = IBQuoteFeed(_Pool())
+    clock = [1000.0]
+    monkeypatch.setattr(ib_pool, "call_data_bounded", fake_call)
+    monkeypatch.setattr(sources.time, "monotonic", lambda: clock[0])
+    feed = sources.IBQuoteFeed(_Pool())
+    assert await feed.read() == {} and feed.last_error == "ConnectionError"
+    clock[0] += 10
     assert await feed.read() == {} and feed.last_error == "data role not connected"
+    clock[0] += 25
+    assert await feed.read() == {}
+    assert calls == [3.0, 3.0]

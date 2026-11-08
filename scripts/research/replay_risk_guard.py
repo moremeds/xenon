@@ -154,7 +154,7 @@ def run_intraday(client, days: list[date], th: Thresholds) -> dict[date, tuple[f
 def daily_tiers(bars: dict[date, dict], start: date, end: date, th: Thresholds) -> list[tuple[date, float, float, str]]:
     days = sorted(bars)
     rows = []
-    for prev, d in zip(days, days[1:]):
+    for prev, d in zip(days, days[1:], strict=False):
         if not start <= d <= end:
             continue
         pc = float(bars[prev]["close"])

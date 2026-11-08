@@ -28,12 +28,18 @@ A FastAPI lifespan task ticks once per second:
 
    A price metric counts only when both sources agree (the milder value
    wins). With one source fresh it counts only while a BLIND cause is raised.
+   A fresh source still refilling its window after a tick gap does not veto
+   the other. Freshness = any tick on the line: ib_async `Ticker.time` is a
+   receive time, so a flat `last` with live size ticks still counts as fresh.
 
 4. Raises BLIND causes (priority 5, every 30 s until ack):
    `FEED_STALE` / `SOURCE_STALE` (no tick for 20 s, RTH only),
    `FEED_DIVERGENCE` (5 m returns differ > 0.3 pp), `OWNER_HALTED`,
    `DATA_ROLE_DOWN`, `UPSTREAM_LOST` (1100/2110), `SCOPE_UNRESOLVED`,
-   `DB_DOWN`, `SNAPSHOT_STALE` (> 120 s in RTH). System causes alarm only on a
+   `DB_DOWN` (read failed or > 5 s), `SNAPSHOT_STALE` (> 120 s in RTH),
+   `ACCOUNT_UNREADABLE`, `GUARD_ERROR`. Stale feeds count from 09:31 ET
+   (the cash index first prints at the open). A down data role is retried
+   every 30 s (the pool reconnects only inside `acquire`). System causes alarm only on a
    trading day from 09:00 ET to the close.
 5. Sends ratio alerts on a level change or each further step: leverage
    (Σ max loss / NLV, levels 0.5 / 0.75 / 1.0, step 0.25) and drawdown (NLV vs

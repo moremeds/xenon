@@ -231,3 +231,65 @@ def test_run_loop_survives_a_failed_tick():
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(service.run_loop(G(), tick_s=0.0))
     assert len(calls) == 3
+
+
+# ── review regressions (Sonnet review 2026-11-08) ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_no_stale_page_in_the_open_grace_minute():
+    clock = Clock(start=datetime(2026, 11, 9, 14, 30, tzinfo=timezone.utc))  # 09:30:00 ET
+    g, n, _ = _guard(clock)
+    g.feed.prices["SPX"] = None  # the cash index has not printed yet
+    await _run(g, clock, 50)
+    assert "SOURCE_STALE" not in g.health and not any("STALE" in s[0] for s in n.sent)
+    await _run(g, clock, 30)  # 09:31:20 ET, still no SPX tick
+    assert "SOURCE_STALE" in g.health
+
+
+@pytest.mark.asyncio
+async def test_a_warming_source_after_a_gap_does_not_disable_speed_triggers():
+    clock = Clock()
+    g, n, _ = _guard(clock)
+    await _run(g, clock, 1800)
+    g.feed.prices["SPX"] = None
+    await _run(g, clock, 25)  # SPX gap > 20 s: its window restarts
+    g.feed.prices["SPX"] = 7000.0
+    await _run(g, clock, 5)
+    assert g.sources["SPX"].window.ret(clock.t, 1800) is None and g.sources["SPX"].fresh(clock.t)
+    n.sent.clear()
+    await _run(g, clock, 60, fall=lambda t: -0.016)  # 30 m return -1.6 % on SPY only
+    assert any("FAST" in s[0] and "30m" in s[0] for s in n.sent)
+
+
+@pytest.mark.asyncio
+async def test_hung_db_read_is_bounded_and_blind(monkeypatch):
+    from xenon.api.services.risk_guard import service
+
+    monkeypatch.setattr(service, "DB_TIMEOUT_S", 0.05)
+
+    async def hang(_scope):
+        await asyncio.sleep(30)
+
+    clock = Clock()
+    g, n, _ = _guard(clock, snapshot_fn=hang)
+    await asyncio.wait_for(_run(g, clock, 2), timeout=2)
+    assert "DB_DOWN" in g.health
+
+
+@pytest.mark.asyncio
+async def test_unreadable_snapshot_is_blind_and_market_still_evaluated():
+    clock = Clock()
+    bad = {"positions": [{"ticker": "SPX", "legs": [None]}], "account_summary": {"net_liquidation": 1.0}}
+    g, n, _ = _guard(clock, snapshot=(bad, T0))
+    await _run(g, clock, 3)
+    assert "ACCOUNT_UNREADABLE" in g.health and g.last_tick_at is not None
+
+
+@pytest.mark.asyncio
+async def test_render_failure_still_sends(monkeypatch):
+    clock = Clock()
+    g, n, _ = _guard(clock, health={"GATEWAY_DOWN": "port closed"})
+    monkeypatch.setattr(g, "render", lambda ev, scope: 1 / 0)
+    await _run(g, clock, 1)
+    assert n.sent and "render failed" in n.sent[0][0]
