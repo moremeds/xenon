@@ -757,3 +757,83 @@ async def test_rise_during_downtime_alerts_on_the_first_tick():
     g, n, _, _ = _restarted(clock, {"acked": [entry]}, 50_000.0)  # cushion 5 %: CRASH now
     await _run(g, clock, 1)
     assert any("CRASH" in s[0] for s in n.sent)
+
+
+@pytest.mark.asyncio
+async def test_ack_in_flight_across_an_account_change_is_refused():
+    clock = Clock()
+    g, n, rows = _guard(clock)
+    scope = [LIVE]
+    g.scope_fn = lambda: scope[0]
+    g.snapshot_fn = lambda _s: _snap(clock, 100_000.0)
+    await _run(g, clock, 3)
+    gate, record = asyncio.Event(), g.record_fn
+
+    async def slow(sc, **kw):
+        if kw["kind"] == "ack":
+            await gate.wait()
+        await record(sc, **kw)
+
+    g.record_fn = slow
+    task = asyncio.create_task(g.ack("market"))
+    await asyncio.sleep(0)
+    scope[0] = AccountScope(broker="IB", account_env="live", broker_account="U2")
+    await g.tick()  # rebinds to U2 while U1's ack write waits
+    gate.set()
+    assert await task == "changed"
+    assert g.book.incidents["market"].acked_at is None
+    await g.drain()
+    assert all(r["detail"]["acked"] == [] for r in rows if r["kind"] == "ack_state" and r["scope"] != LIVE)
+
+
+@pytest.mark.asyncio
+async def test_late_worsening_completion_does_not_replace_a_newer_ack_reference():
+    clock = Clock()
+    g, rows = await _acked_fast(clock)
+    gate, send = asyncio.Event(), g.notifier.send
+
+    async def slow(title, body, priority, tags=(), today=None):
+        await gate.wait()  # the worsening alert is delivered late
+        return await send(title, body, priority, tags=tags, today=today)
+
+    g.notifier.send = slow
+    g.snapshot_fn = lambda _s: _snap(clock, 80_000.0)  # cushion 8 %: worsening
+    for _ in range(35):
+        await g.tick()  # the worsening is dispatched; its delivery hangs
+        clock.t += 1
+    assert any(k[0] == "market" for k in g._worse_refs)
+    g.snapshot_fn = lambda _s: _snap(clock, 115_000.0)  # cushion rebounds to 11.5 %
+    for _ in range(31):
+        await g.tick()
+        clock.t += 1
+    assert await g.ack("market") == "ok"  # the operator acks at 11.5 %
+    gate.set()
+    await g.drain()
+    assert g._durable_ref[g.book.incidents["market"].incident_id].cushion == pytest.approx(0.115)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_during_the_restore_read_writes_nothing():
+    from xenon.api.services.risk_guard import app as rg_app
+
+    clock = Clock()
+    _, rows = await _acked_fast(clock)
+    g, n, rec2, _ = _restarted(clock, _latest_state(rows), 100_000.0)
+    hang = asyncio.Event()
+
+    async def slow_restore(scope, since):
+        await hang.wait()
+
+    g.restore_fn = slow_restore
+    task = asyncio.create_task(rg_service.run_loop(g, tick_s=0.01))
+    await asyncio.sleep(0.02)  # the first tick waits on the restore read
+
+    class _State:
+        risk_guard_task, risk_guard = task, g
+
+    class _App:
+        state = _State()
+
+    g.notifier.aclose = _noop
+    await rg_app.stop(_App())
+    assert [r for r in rec2 if r["kind"] == "ack_state"] == []  # the saved set stays the latest

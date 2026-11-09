@@ -120,6 +120,7 @@ class RiskGuard:
         self.extra_fn, self.restore_fn = extra_fn, restore_fn
         self._restored = False  # restore attempted for ``_book_scope``
         self._book_scope: Any = None  # the account the acks in ``book`` belong to
+        self._scope_gen = 0  # bumped on every account change: an ack begun under another account is refused
         self._nonce = uuid.uuid4().hex[:8]
         # ack_state writer. _state_written None = nothing committed by this process yet (forces one write).
         self._state_written: list[dict] | None = None
@@ -219,8 +220,8 @@ class RiskGuard:
         if scope is not None and scope != self._book_scope:
             self._rebind(scope)
         if scope is not None and not self._restored:
-            self._restored = True
             await self._restore(scope, wall, now)
+            self._restored = True  # only after the read: a shutdown mid-read never publishes an empty book
         events = self.book.step(now, (self.tier, reasons), self.inputs, health, extras) + events
         self._seed_durable()
         self._persist_acks(now)
@@ -453,6 +454,7 @@ class RiskGuard:
             for inc in self.book.incidents.values():
                 inc.acked_at = None
         self._book_scope, self._restored, self._state_written = scope, False, None
+        self._scope_gen += 1
         self._durable_ref.clear()
         self._worse_refs.clear()
 
@@ -534,16 +536,25 @@ class RiskGuard:
         # What the operator acks: this incident, this tier, the inputs of now
         # (a worsening during the write must still alert), no send in between.
         iid, severity, sent_at, ref = inc.incident_id, inc.severity, inc.last_sent_at, inc.last_inputs
+        gen = self._scope_gen
         ev = Event(key, "ack", severity, inc.reasons, iid)
         detail = {"reasons": list(inc.reasons), "ref": asdict(ref) if ref is not None else None}  # audit
         if not await self._record(ev, self.scope_fn(), detail):
             return "unavailable"
         cur = self.book.incidents.get(key)
-        if cur is None or cur.incident_id != iid or cur.severity > severity or cur.last_sent_at != sent_at:
+        if (
+            cur is None
+            or cur.incident_id != iid
+            or cur.severity > severity
+            or cur.last_sent_at != sent_at
+            or self._scope_gen != gen
+        ):
             return "changed"
         self.book.ack(key, self.mono(), ref)
         self._redeliver.pop(key, None)
         self._durable_ref[iid] = self.book.incidents[key].ref
+        for k in [k for k in self._worse_refs if k[0] == key]:
+            del self._worse_refs[k]  # an older worsening completing later must not replace the ack reference
         self._persist_acks(self.mono())  # now, not on the next tick: a shutdown may come first
         return "ok"
 
