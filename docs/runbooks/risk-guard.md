@@ -60,22 +60,28 @@ up to 10 times, until a newer send for the same key goes out or the incident
 is acked. Paper / test scopes prefix titles with `[TEST]`.
 
 **Restart.** A guard restart (deploy, api recreate) does not re-page an acked
-incident. The guard keeps one `ack_state` row in `xenon.risk_events`: each
-time the set of acked incidents changes (an ack is applied, an acked incident
-rises, worsens or clears) and once at start, a single serialized writer
-appends the whole set (incident id, sent and highest severity, worsening
-reference); a failed write retries every 5 s, and shutdown tries once more.
-Before its first evaluation a new process restores the newest `ack_state` row
-of the current ET date. The first tick then compares live values with the
-stored reference, so a rise or a worsening during the downtime alerts at once,
-and a worsening already sent before the restart is not sent again. An ack row
-that was written but not applied (409 `RISK_INCIDENT_CHANGED`) is never in the
-state. An entry that fails validation is dropped and logged (that incident
-pages again); a failed restore read restores nothing (fail loud). Limits:
-unacked incidents re-open and page after a restart; the leverage / drawdown
-ratio alarms and the daily line send once again; a state change whose write
-failed until the process died is lost (the older state is restored; a higher
-tier still alerts at once). `GET /risk/state` hides `ack_state` rows.
+incident. The guard keeps its acked incidents (incident id, sent and highest
+severity, worsening reference) in `ack_state` rows of `xenon.risk_events`.
+One writer per process appends the whole set whenever it differs from the
+last committed one: at start, at once when an ack is applied, and when an
+acked incident rises, clears or has a worsening delivered. Each row carries
+the process nonce and a sequence number; restore takes the newest process's
+highest sequence, so a late write never wins. A failed write retries every
+5 s; at shutdown the guard first writes the final set directly (0.6 s, not
+subject to the 4-write cap). Before its first evaluation with a resolved
+account scope, a new process restores the latest set of the current ET date.
+The first tick then compares live values with the stored reference, so a
+rise or a worsening during the downtime alerts at once. A worsening reference
+is stored only after its alert reached a channel: a worsening sent before the
+restart is not sent again, an undelivered one alerts again. An ack row that
+was written but not applied (409 `RISK_INCIDENT_CHANGED`) never enters the
+set. An account change clears the acks (they page again) and restores the new
+account's set. An entry that fails validation is dropped and logged (that
+incident pages again); a failed restore read restores nothing (fail loud).
+Limits: unacked incidents re-open and page after a restart; the leverage /
+drawdown ratio alarms and the daily line send once again; a set whose writes
+all failed before the process died is lost (the older set is restored; a
+higher tier still alerts at once). `GET /risk/state` hides `ack_state` rows.
 
 ## Enable
 

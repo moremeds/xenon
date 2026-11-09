@@ -70,7 +70,8 @@ async def recent_events(engine: AsyncEngine, scope: AccountScope, limit: int = 5
 
 
 async def latest_ack_state(engine: AsyncEngine, scope: AccountScope, since: datetime) -> dict[str, Any] | None:
-    """``detail`` of the newest ``ack_state`` row of ``scope`` since ``since`` (guard restart restore)."""
+    """The latest ``ack_state`` of ``scope`` since ``since``: the newest process's highest ``seq``
+    (concurrent writes of one process can commit out of order)."""
     c = risk_events.c
     stmt = (
         select(c.detail)
@@ -80,7 +81,12 @@ async def latest_ack_state(engine: AsyncEngine, scope: AccountScope, since: date
         .where(c.kind == "ack_state")
         .where(c.occurred_at >= since)
         .order_by(c.id.desc())
-        .limit(1)
+        .limit(100)
     )
     async with engine.connect() as conn:
-        return (await conn.execute(stmt)).scalar_one_or_none()
+        rows = [r for r in (await conn.execute(stmt)).scalars().all() if isinstance(r, dict)]
+    if not rows:
+        return None
+    proc = rows[0].get("proc")
+    same = [r for r in rows if r.get("proc") == proc and isinstance(r.get("seq"), int)]
+    return max(same, key=lambda r: r["seq"]) if same else rows[0]

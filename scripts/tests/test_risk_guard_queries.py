@@ -68,7 +68,8 @@ async def test_record_and_read_events(eng):
 
     since = datetime.now(timezone.utc) - timedelta(hours=1)
     assert await q.latest_ack_state(eng, SCOPE, since) is None
-    for acked in ([{"key": "market"}], []):
+    # process A, then process B whose seq 2 committed before its seq 1 (concurrent writes)
+    for proc, seq, acked in (("A", 5, [{"key": "a"}]), ("B", 2, []), ("B", 1, [{"key": "b"}])):
         await q.record_event(
             eng,
             SCOPE,
@@ -76,9 +77,10 @@ async def test_record_and_read_events(eng):
             incident_id="guard:acks",
             kind="ack_state",
             severity=0,
-            detail={"acked": acked},
+            detail={"proc": proc, "seq": seq, "acked": acked},
         )
-    assert await q.latest_ack_state(eng, SCOPE, since) == {"acked": []}  # newest row wins
+    got = await q.latest_ack_state(eng, SCOPE, since)
+    assert (got["proc"], got["seq"], got["acked"]) == ("B", 2, [])  # newest process, highest seq
     assert await q.latest_ack_state(eng, SCOPE, datetime.now(timezone.utc) + timedelta(hours=1)) is None
     other = AccountScope(broker="IB", account_env="live", broker_account=ACCT)
     assert await q.latest_ack_state(eng, other, since) is None

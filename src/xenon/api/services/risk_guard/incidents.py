@@ -182,7 +182,9 @@ class IncidentBook:
     ) -> None:
         """An incident acked before a restart: acked at ``now``, no new open. The next
         step alerts on a rise above ``sent`` or a worsening against ``ref``."""
-        self.incidents[key] = Incident(key, incident_id, sent, sent, now, max_sent, acked_at=now, ref=ref)
+        # last send one repeat_s ago: a rise during the downtime alerts on the first step
+        last = now - self.th.repeat_s
+        self.incidents[key] = Incident(key, incident_id, sent, sent, last, max_sent, acked_at=now, ref=ref)
 
     def _advance(self, key, now, severity, reasons, inputs, *, repeats, events) -> None:
         if severity == 0:
@@ -207,7 +209,7 @@ class IncidentBook:
             return
         inc.clear_since, inc.severity, inc.reasons, inc.last_inputs = None, severity, reasons, inputs
         if inputs is not None and inc.ref is not None:
-            inc.ref = _seed(inc.ref, inputs)
+            inc.ref = seed_ref(inc.ref, inputs)
         if severity < inc.sent_severity:
             inc.sent_severity = severity
         kind = None
@@ -251,7 +253,7 @@ def _any_input(m: MarketInputs) -> bool:
     ) or bool(m.levels_broken or m.long_itm)
 
 
-def _seed(ref: MarketInputs, now: MarketInputs) -> MarketInputs:
+def seed_ref(ref: MarketInputs, now: MarketInputs) -> MarketInputs:
     """Fill reference values that were missing at the ack with the first value seen."""
     fills = {f: getattr(now, f) for f in ("session_low", "cushion") if getattr(ref, f) is None}
     return replace(ref, **fills) if any(v is not None for v in fills.values()) else ref

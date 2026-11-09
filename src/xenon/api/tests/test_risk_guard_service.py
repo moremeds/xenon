@@ -59,7 +59,7 @@ def _guard(clock, *, scope=LIVE, snapshot=None, read_only=False, snapshot_fn=Non
         return DrawdownBasis(peak=100_000.0, peak_30d=100_000.0, adjusted=True, flows_since=None)
 
     async def record(_scope, **kw):
-        records.append(kw)
+        records.append({**kw, "scope": _scope})
 
     g = RiskGuard(
         feed=Feed(clock),
@@ -450,7 +450,7 @@ async def test_worsening_during_the_ack_write_still_alerts_after_the_ack():
     gate.set()
     assert await task == "ok"
     await _run(g, clock, 2)
-    assert records[-1]["kind"] == "worsening"
+    assert [r["kind"] for r in records if r["kind"] != "ack_state"][-1] == "worsening"
 
 
 @pytest.mark.asyncio
@@ -492,8 +492,12 @@ async def test_an_older_in_flight_send_never_requeues_a_retry():
 
 
 def _latest_state(rows):
+    """What a restore would read: the newest process's highest seq (``latest_ack_state``)."""
     states = [r["detail"] for r in rows if r["kind"] == "ack_state"]
-    return states[-1] if states else None
+    if not states:
+        return None
+    same = [d for d in states if d["proc"] == states[-1]["proc"]]
+    return {"acked": max(same, key=lambda d: d["seq"])["acked"]}
 
 
 async def _snap(clock, excess):
@@ -588,6 +592,10 @@ async def test_bad_state_entries_are_dropped_and_the_guard_keeps_ticking():
         {**good, "ref": {**good["ref"], "shorts_crossed": None}},
         {**good, "ref": None},  # a market incident without its reference could never worsen
         {**good, "ref": []},
+        {**good, "ref": {}},  # incomplete: a missing baseline would hide a downtime worsening
+        {**good, "ref": {k: v for k, v in good["ref"].items() if k != "cushion"}},
+        {**good, "ref": {**good["ref"], "session_low": 10**400}},  # would overflow in the worsening check
+        {**good, "ref": {**good["ref"], "levels_broken": [10**400]}},
         {**good, "sent_severity": True},
         {**good, "sent_severity": 3, "max_sent": 2},
         {**good, "key": "bogus"},
@@ -612,7 +620,7 @@ async def test_bad_state_entries_are_dropped_and_the_guard_keeps_ticking():
 
 
 @pytest.mark.asyncio
-async def test_failed_state_write_is_retried_and_flushed_on_drain():
+async def test_failed_state_write_is_retried():
     clock = Clock()
     g, n, rows = _guard(clock)
     g.snapshot_fn = lambda _s: _snap(clock, 100_000.0)
@@ -627,13 +635,125 @@ async def test_failed_state_write_is_retried_and_flushed_on_drain():
     g.record_fn = flaky
     await _run(g, clock, 3)  # first write fails
     await g.ack("market")
-    await _run(g, clock, 1)
-    assert _latest_state(rows) is None
+    await g.drain()
+    assert _latest_state(rows) is None  # second fails too
     for _ in range(4):
         await _run(g, clock, 3)  # drained per step: the retry runs after STATE_RETRY_S
     assert fail[0] == 0 and [a["key"] for a in _latest_state(rows)["acked"]] == ["market"]
 
-    g.book.incidents["market"].acked_at = None  # a change that has not been written yet
-    g._persist_acks(None, clock.t)  # no scope this tick: marked dirty only
+
+@pytest.mark.asyncio
+async def test_ack_is_written_at_once_and_shutdown_flushes_past_a_full_write_cap():
+    """An ack applied right before shutdown survives even when the writer is refused by the 4-write cap."""
+    from xenon.api.services.risk_guard import app as rg_app
+
+    clock = Clock()
+    g, n, rows = _guard(clock)
+    g.snapshot_fn = lambda _s: _snap(clock, 100_000.0)
+    await _run(g, clock, 3)
+    capped = g._record
+
+    async def cap_full(ev, scope, detail):
+        return False if ev.kind == "ack_state" else await capped(ev, scope, detail)  # as when 4 writes are in flight
+
+    g._record = cap_full
+    assert await g.ack("market") == "ok"
+    await asyncio.sleep(0)
+    assert g._state_due > clock.t  # the writer ran at once (no tick needed) and was refused
+
+    class _State:
+        risk_guard_task, risk_guard = None, g
+
+    class _App:
+        state = _State()
+
+    g.notifier.aclose = _noop
+    await rg_app.stop(_App())
+    assert [a["key"] for a in _latest_state(rows)["acked"]] == ["market"]  # flush_state bypasses the cap
+
+
+async def _noop():
+    return None
+
+
+@pytest.mark.asyncio
+async def test_late_older_state_write_never_wins():
+    clock = Clock()
+    g, n, rows = _guard(clock)
+    g.snapshot_fn = lambda _s: _snap(clock, 100_000.0)
+    await _run(g, clock, 3)
+    gate, record = asyncio.Event(), g.record_fn
+
+    async def slow(scope, **kw):
+        if kw["kind"] == "ack_state" and kw["detail"]["acked"]:
+            await gate.wait()  # the "acked" write commits late
+        await record(scope, **kw)
+
+    g.record_fn = slow
+    assert await g.ack("market") == "ok"
+    await asyncio.sleep(0)  # the writer starts and blocks on its "acked" row
+    g.book.incidents["market"].acked_at = None  # then a rise un-acks it
+    assert await g.flush_state(1.0)  # shutdown writes the newer, empty set first
+    gate.set()
     await g.drain()
-    assert _latest_state(rows) == {"acked": []}
+    order = [(r["detail"]["seq"], r["detail"]["acked"] != []) for r in rows if r["kind"] == "ack_state"]
+    assert order.index((2, True)) > order.index((3, False))  # the older "acked" set committed after the flush
+    assert _latest_state(rows) == {"acked": []}  # but its seq is lower: restore takes the newer set
+
+
+@pytest.mark.asyncio
+async def test_restore_waits_for_a_scope_and_a_scope_change_clears_acks():
+    clock = Clock()
+    _, rows = await _acked_fast(clock)
+    state = _latest_state(rows)
+    g, n, rec2, seen = _restarted(clock, state, 100_000.0)
+    scope = [None]
+    g.scope_fn = lambda: scope[0]
+    await _run(g, clock, 3)
+    assert seen == [] and [r for r in rec2 if r["kind"] == "ack_state"] == []  # nothing read or written yet
+    scope[0] = LIVE
+    await _run(g, clock, 3)
+    assert len(seen) == 1 and g.book.incidents["market"].acked_at is not None
+    assert [s for s in n.sent if "FAST" in s[0]] == []
+
+    other = AccountScope(broker="IB", account_env="live", broker_account="U2")
+    g.restore_fn = lambda sc, since: _none()
+    scope[0] = other
+    await _run(g, clock, 31)
+    assert any("FAST" in s[0] for s in n.sent)  # U1's ack does not silence U2
+    written = [r for r in rec2 if r["kind"] == "ack_state"]
+    assert written[0]["scope"] == LIVE and written[-1]["scope"] == other and written[-1]["detail"]["acked"] == []
+
+
+async def _none():
+    return None
+
+
+@pytest.mark.asyncio
+async def test_undelivered_worsening_reference_is_not_persisted():
+    clock = Clock()
+    g, rows = await _acked_fast(clock)
+    sent = g.notifier.send
+
+    async def down(title, body, priority, tags=(), today=None):
+        g.notifier.sent.append((title, body, priority))
+        return SendResult("failed", "off")
+
+    g.notifier.send = down
+    g.snapshot_fn = lambda _s: _snap(clock, 80_000.0)
+    await _run(g, clock, 35)
+    assert _latest_state(rows)["acked"][0]["ref"]["cushion"] == pytest.approx(0.10)  # not the undelivered 8 %
+    g2, n2, _, _ = _restarted(clock, _latest_state(rows), 80_000.0)
+    await _run(g2, clock, 3)
+    assert any("FAST" in s[0] for s in n2.sent)  # the worsening alerts again after the restart
+    g.notifier.send = sent
+
+
+@pytest.mark.asyncio
+async def test_rise_during_downtime_alerts_on_the_first_tick():
+    clock = Clock()
+    _, rows = await _acked_fast(clock)
+    entry = {**_latest_state(rows)["acked"][0], "max_sent": 3}  # CRASH was sent before, then it fell to FAST
+    g, n, _, _ = _restarted(clock, {"acked": [entry]}, 50_000.0)  # cushion 5 %: CRASH now
+    await _run(g, clock, 1)
+    assert any("CRASH" in s[0] for s in n.sent)

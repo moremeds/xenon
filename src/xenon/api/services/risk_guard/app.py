@@ -120,5 +120,6 @@ async def stop(app: Any) -> None:
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
     if guard is not None:
+        await guard.flush_state(0.6)  # first: the shutdown step has 1 s, the acked set matters most
         await guard.drain()
         await guard.notifier.aclose()
