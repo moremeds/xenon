@@ -477,8 +477,8 @@ class RiskGuard:
         try:
             while True:
                 scope, state = self._book_scope, self._ack_state()
-                if scope is None or state == self._state_written:
-                    return
+                if scope is None or not self._restored or state == self._state_written:
+                    return  # never publish a book whose account has not been restored yet
                 ev = Event("guard:acks", "ack_state", 0, (), "guard:acks")
                 if not await self._record(ev, scope, self._state_detail(state)):
                     self._state_due = self.mono() + STATE_RETRY_S

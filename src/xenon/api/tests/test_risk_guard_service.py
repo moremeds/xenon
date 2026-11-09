@@ -837,3 +837,48 @@ async def test_shutdown_during_the_restore_read_writes_nothing():
     g.notifier.aclose = _noop
     await rg_app.stop(_App())
     assert [r for r in rec2 if r["kind"] == "ack_state"] == []  # the saved set stays the latest
+
+
+@pytest.mark.asyncio
+async def test_pending_write_never_publishes_an_unrestored_account():
+    """A's ack_state write is in flight, the scope moves to B, B's restore hangs, then shutdown."""
+    from xenon.api.services.risk_guard import app as rg_app
+
+    clock = Clock()
+    g, n, rows = _guard(clock)
+    scope = [LIVE]
+    g.scope_fn = lambda: scope[0]
+    g.snapshot_fn = lambda _s: _snap(clock, 100_000.0)
+    await _run(g, clock, 3)
+    gate, record = asyncio.Event(), g.record_fn
+
+    async def slow(sc, **kw):
+        if kw["kind"] == "ack_state":
+            await gate.wait()
+        await record(sc, **kw)
+
+    g.record_fn = slow
+    assert await g.ack("market") == "ok"
+    await asyncio.sleep(0)  # A's write is now in flight
+    hang = asyncio.Event()
+
+    async def slow_restore(sc, since):
+        await hang.wait()
+
+    g.restore_fn = slow_restore
+    scope[0] = AccountScope(broker="IB", account_env="live", broker_account="U2")
+    task = asyncio.create_task(g.tick())  # rebinds to U2, then waits on U2's restore
+    await asyncio.sleep(0)
+    gate.set()  # A's write commits; the writer loops while U2 is unrestored
+    await asyncio.sleep(0.01)
+    task.cancel()
+
+    class _State:
+        risk_guard_task, risk_guard = task, g
+
+    class _App:
+        state = _State()
+
+    g.notifier.aclose = _noop
+    await rg_app.stop(_App())
+    assert [r for r in rows if r["kind"] == "ack_state" and r["scope"] != LIVE] == []
