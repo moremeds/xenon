@@ -66,6 +66,26 @@ async def test_record_and_read_events(eng):
     assert rows[1]["detail"]["reasons"] == ["day -3.10%"]
     assert isinstance(rows[0]["occurred_at"], str)
 
+    since = datetime.now(timezone.utc) - timedelta(hours=1)
+    assert await q.latest_ack_state(eng, SCOPE, since) is None
+    # process A, then process B whose seq 2 committed before its seq 1 (concurrent writes)
+    for proc, seq, acked in (("A", 5, [{"key": "a"}]), ("B", 2, []), ("B", 1, [{"key": "b"}])):
+        await q.record_event(
+            eng,
+            SCOPE,
+            incident_key="guard:acks",
+            incident_id="guard:acks",
+            kind="ack_state",
+            severity=0,
+            detail={"proc": proc, "seq": seq, "acked": acked},
+        )
+    got = await q.latest_ack_state(eng, SCOPE, since)
+    assert (got["proc"], got["seq"], got["acked"]) == ("B", 2, [])  # newest process, highest seq
+    assert await q.latest_ack_state(eng, SCOPE, datetime.now(timezone.utc) + timedelta(hours=1)) is None
+    other = AccountScope(broker="IB", account_env="live", broker_account=ACCT)
+    assert await q.latest_ack_state(eng, other, since) is None
+    assert [r["kind"] for r in await q.recent_events(eng, SCOPE)] == ["ack", "open"]  # state rows hidden
+
 
 async def test_drawdown_basis_uses_close_rows_and_flows(eng):
     async with eng.begin() as c:

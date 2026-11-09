@@ -75,6 +75,7 @@ def build() -> RiskGuard:
         snapshot_fn=lambda scope: q.latest_snapshot(get_engine(), scope),
         basis_fn=lambda scope, today: load_drawdown_basis(get_engine(), scope, today),
         record_fn=lambda scope, **kw: q.record_event(get_engine(), scope, **kw),
+        restore_fn=lambda scope, since: q.latest_ack_state(get_engine(), scope, since),
         health_fn=system_health,
         notifier=notifier,
         heartbeat_fn=heartbeat if beat_url else None,
@@ -119,5 +120,6 @@ async def stop(app: Any) -> None:
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
     if guard is not None:
+        await guard.flush_state(0.6)  # first: the shutdown step has 1 s, the acked set matters most
         await guard.drain()
         await guard.notifier.aclose()

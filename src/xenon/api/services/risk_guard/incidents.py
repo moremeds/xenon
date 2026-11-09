@@ -15,7 +15,7 @@ flapping on a threshold sends at most every ``repeat_s``. A missing reference
 value is seeded by the first value seen after the ack. An incident closes
 after its condition stays clear for ``clear_s``; a market evaluation with no
 available input at all holds the incident (missing data is a BLIND cause,
-never "clear").
+never "clear"). ``restore`` re-creates an incident acked before a restart.
 
 Leverage and drawdown are standing conditions (``RatioAlarm``): they send on a
 level crossing in either direction and on each further step of worsening.
@@ -136,6 +136,7 @@ class Incident:
 class IncidentBook:
     th: Thresholds
     incidents: dict[str, Incident] = field(default_factory=dict)
+    epoch: str = ""  # per-process nonce: incident ids stay unique across restarts
     _seq: int = 0
 
     def step(
@@ -176,6 +177,15 @@ class IncidentBook:
         inc.ref = ref if ref is not None else inc.last_inputs
         return True
 
+    def restore(
+        self, key: str, incident_id: str, sent: int, max_sent: int, ref: MarketInputs | None, now: float
+    ) -> None:
+        """An incident acked before a restart: acked at ``now``, no new open. The next
+        step alerts on a rise above ``sent`` or a worsening against ``ref``."""
+        # last send one repeat_s ago: a rise during the downtime alerts on the first step
+        last = now - self.th.repeat_s
+        self.incidents[key] = Incident(key, incident_id, sent, sent, last, max_sent, acked_at=now, ref=ref)
+
     def _advance(self, key, now, severity, reasons, inputs, *, repeats, events) -> None:
         if severity == 0:
             self._clear(key, now)
@@ -184,14 +194,22 @@ class IncidentBook:
         if inc is None:
             self._seq += 1
             inc = Incident(
-                key, f"{key}#{self._seq}", severity, severity, now, severity, reasons, ref=inputs, last_inputs=inputs
+                key,
+                f"{key}#{self.epoch}{self._seq}",
+                severity,
+                severity,
+                now,
+                severity,
+                reasons,
+                ref=inputs,
+                last_inputs=inputs,
             )
             self.incidents[key] = inc
             events.append(Event(key, "open", severity, reasons, inc.incident_id))
             return
         inc.clear_since, inc.severity, inc.reasons, inc.last_inputs = None, severity, reasons, inputs
         if inputs is not None and inc.ref is not None:
-            inc.ref = _seed(inc.ref, inputs)
+            inc.ref = seed_ref(inc.ref, inputs)
         if severity < inc.sent_severity:
             inc.sent_severity = severity
         kind = None
@@ -235,7 +253,7 @@ def _any_input(m: MarketInputs) -> bool:
     ) or bool(m.levels_broken or m.long_itm)
 
 
-def _seed(ref: MarketInputs, now: MarketInputs) -> MarketInputs:
+def seed_ref(ref: MarketInputs, now: MarketInputs) -> MarketInputs:
     """Fill reference values that were missing at the ack with the first value seen."""
     fills = {f: getattr(now, f) for f in ("session_low", "cushion") if getattr(ref, f) is None}
     return replace(ref, **fills) if any(v is not None for v in fills.values()) else ref

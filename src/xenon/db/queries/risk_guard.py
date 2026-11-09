@@ -60,9 +60,33 @@ async def recent_events(engine: AsyncEngine, scope: AccountScope, limit: int = 5
         .where(risk_events.c.broker == scope.broker)
         .where(risk_events.c.account_env == scope.account_env)
         .where(risk_events.c.broker_account == scope.broker_account)
+        .where(risk_events.c.kind != "ack_state")  # restart state, not an alert
         .order_by(risk_events.c.occurred_at.desc(), risk_events.c.id.desc())
         .limit(limit)
     )
     async with engine.connect() as conn:
         rows = (await conn.execute(stmt)).mappings().all()
     return [{**r, "occurred_at": r["occurred_at"].isoformat()} for r in rows]
+
+
+async def latest_ack_state(engine: AsyncEngine, scope: AccountScope, since: datetime) -> dict[str, Any] | None:
+    """The latest ``ack_state`` of ``scope`` since ``since``: the newest process's highest ``seq``
+    (concurrent writes of one process can commit out of order)."""
+    c = risk_events.c
+    stmt = (
+        select(c.detail)
+        .where(c.broker == scope.broker)
+        .where(c.account_env == scope.account_env)
+        .where(c.broker_account == scope.broker_account)
+        .where(c.kind == "ack_state")
+        .where(c.occurred_at >= since)
+        .order_by(c.id.desc())
+        .limit(100)
+    )
+    async with engine.connect() as conn:
+        rows = [r for r in (await conn.execute(stmt)).scalars().all() if isinstance(r, dict)]
+    if not rows:
+        return None
+    proc = rows[0].get("proc")
+    same = [r for r in rows if r.get("proc") == proc and isinstance(r.get("seq"), int)]
+    return max(same, key=lambda r: r["seq"]) if same else rows[0]
